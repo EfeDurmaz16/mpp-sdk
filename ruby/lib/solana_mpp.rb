@@ -17,6 +17,7 @@ require_relative 'solana_mpp/intents/subscription_account_state'
 require_relative 'solana_mpp/server/verification_result'
 require_relative 'solana_mpp/server/charge_server'
 require_relative 'solana_mpp/server/session_server'
+require_relative 'solana_mpp/server/subscription_server'
 
 module SolanaMpp
 end
