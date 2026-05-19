@@ -66,6 +66,24 @@ final class SessionTest extends TestCase
         );
     }
 
+    public function testSessionRequestParsesFromArray(): void
+    {
+        $request = SessionRequest::fromArray([
+            'cap' => '1000000',
+            'currency' => 'USDC',
+            'operator' => 'operator',
+            'recipient' => 'recipient',
+            'splits' => [['recipient' => 'affiliate', 'bps' => 250]],
+            'modes' => [SessionRequest::MODE_PUSH],
+        ]);
+
+        self::assertSame('1000000', $request->cap);
+        self::assertSame([['recipient' => 'affiliate', 'bps' => 250]], array_map(
+            static fn (SessionSplit $split): array => $split->toArray(),
+            $request->splits,
+        ));
+    }
+
     public function testSignedVoucherSerializesCumulativeVoucher(): void
     {
         $voucher = new SignedVoucher(

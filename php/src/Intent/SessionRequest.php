@@ -104,6 +104,53 @@ final class SessionRequest
         return $value;
     }
 
+    /**
+     * @param array<string, mixed> $value
+     */
+    public static function fromArray(array $value): self
+    {
+        $splits = [];
+        $rawSplits = $value['splits'] ?? [];
+        if (!is_array($rawSplits)) {
+            throw new InvalidArgumentException('splits must be an array');
+        }
+        foreach ($rawSplits as $split) {
+            if (!is_array($split)) {
+                throw new InvalidArgumentException('splits must contain objects');
+            }
+            $splits[] = new SessionSplit(
+                recipient: (string)($split['recipient'] ?? ''),
+                bps: (int)($split['bps'] ?? 0),
+            );
+        }
+
+        $modes = [];
+        $rawModes = $value['modes'] ?? [];
+        if (!is_array($rawModes)) {
+            throw new InvalidArgumentException('modes must be an array');
+        }
+        foreach ($rawModes as $mode) {
+            $modes[] = (string)$mode;
+        }
+
+        return new self(
+            cap: (string)($value['cap'] ?? ''),
+            currency: (string)($value['currency'] ?? ''),
+            operator: (string)($value['operator'] ?? ''),
+            recipient: (string)($value['recipient'] ?? ''),
+            decimals: array_key_exists('decimals', $value) ? (int)$value['decimals'] : null,
+            network: (string)($value['network'] ?? ''),
+            splits: $splits,
+            programId: (string)($value['programId'] ?? ''),
+            description: (string)($value['description'] ?? ''),
+            externalId: (string)($value['externalId'] ?? ''),
+            minVoucherDelta: (string)($value['minVoucherDelta'] ?? ''),
+            modes: $modes,
+            pullVoucherStrategy: array_key_exists('pullVoucherStrategy', $value) ? (string)$value['pullVoucherStrategy'] : null,
+            recentBlockhash: (string)($value['recentBlockhash'] ?? ''),
+        );
+    }
+
     public static function normalizeMode(string $mode): string
     {
         return match ($mode) {
