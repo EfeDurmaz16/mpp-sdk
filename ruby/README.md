@@ -15,5 +15,5 @@ small commits so each protocol surface remains easy to review.
 
 ```bash
 cd ruby
-ruby -Ilib:test test/charge_request_test.rb
+ruby -Ilib:test test/run.rb
 ```
