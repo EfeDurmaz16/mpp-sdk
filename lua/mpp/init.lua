@@ -2,6 +2,7 @@ local challenge = require('mpp.protocol.core.challenge')
 local headers = require('mpp.protocol.core.headers')
 local intents = require('mpp.protocol.intents.charge')
 local session = require('mpp.protocol.intents.session')
+local subscription = require('mpp.protocol.intents.subscription')
 local protocol = require('mpp.protocol.solana')
 local store = require('mpp.store')
 local types = require('mpp.protocol.core.types')
@@ -18,6 +19,7 @@ return {
     intents = {
       charge = intents,
       session = session,
+      subscription = subscription,
     },
     solana = protocol,
   },
@@ -46,6 +48,9 @@ return {
   NewSessionSignedVoucher = session.new_signed_voucher,
   NewSessionSplit = session.new_split,
   NewSessionVoucherData = session.new_voucher_data,
+  NewSubscriptionAccountState = subscription.new_account_state,
+  NewSubscriptionReceipt = subscription.new_receipt,
+  NewSubscriptionRequest = subscription.new_request,
   ParseAuthorization = headers.parse_authorization,
   ParseReceipt = headers.parse_receipt,
   ParseUnits = intents.parse_units,
