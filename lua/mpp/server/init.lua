@@ -1,6 +1,8 @@
 local challenge = require('mpp.protocol.core.challenge')
 local html_module = require('mpp.server.html')
 local intents = require('mpp.protocol.intents.charge')
+local session_intent = require('mpp.protocol.intents.session')
+local subscription_intent = require('mpp.protocol.intents.subscription')
 local protocol = require('mpp.protocol.solana')
 local solana_verify = require('mpp.server.solana_verify')
 local store = require('mpp.store')
@@ -48,6 +50,8 @@ function M.new(config)
     fee_payer_key = config.fee_payer_key,
     store = config.store or store.memory(),
     verify_payment = config.verify_payment,
+    verify_session = config.verify_session,
+    verify_subscription = config.verify_subscription,
     recent_blockhash = config.recent_blockhash,
     html = config.html or false,
   }
@@ -108,6 +112,67 @@ function Server:charge_with_options(amount, options)
   )
 end
 
+function Server:session_with_options(options)
+  options = options or {}
+  local request = session_intent.new_request({
+    cap = options.cap,
+    currency = options.currency or self.currency,
+    operator = options.operator,
+    recipient = options.recipient or self.recipient,
+    decimals = options.decimals or self.decimals,
+    network = options.network or self.network,
+    splits = options.splits,
+    programId = options.programId or options.program_id,
+    description = options.description,
+    externalId = options.externalId or options.external_id,
+    minVoucherDelta = options.minVoucherDelta or options.min_voucher_delta,
+    modes = options.modes,
+    pullVoucherStrategy = options.pullVoucherStrategy or options.pull_voucher_strategy,
+    recentBlockhash = options.recentBlockhash or options.recent_blockhash or self.recent_blockhash,
+  })
+  return challenge.new_challenge_with_secret_full(
+    self.secret_key,
+    self.realm,
+    types.new_method_name('solana'),
+    types.new_intent_name('session'),
+    types.new_base64url_json_value(request),
+    options.expires,
+    nil,
+    options.description,
+    nil
+  )
+end
+
+function Server:subscription_with_options(options)
+  options = options or {}
+  local method_details = options.methodDetails or options.method_details
+  if method_details == nil then
+    method_details = { network = options.network or self.network }
+  end
+  local request = subscription_intent.new_request({
+    amount = options.amount,
+    currency = options.currency or self.currency,
+    periodUnit = options.periodUnit or options.period_unit,
+    periodCount = options.periodCount or options.period_count,
+    recipient = options.recipient or self.recipient,
+    subscriptionExpires = options.subscriptionExpires or options.subscription_expires,
+    description = options.description,
+    externalId = options.externalId or options.external_id,
+    methodDetails = method_details,
+  })
+  return challenge.new_challenge_with_secret_full(
+    self.secret_key,
+    self.realm,
+    types.new_method_name('solana'),
+    types.new_intent_name('subscription'),
+    types.new_base64url_json_value(request),
+    options.expires,
+    nil,
+    options.description,
+    nil
+  )
+end
+
 --- Verify a credential (simple API).
 --
 -- This is appropriate for servers that only gate a single route. Servers that
@@ -123,6 +188,32 @@ end
 function Server:verify_credential(credential_value, now_epoch)
   local request, _method_details, payload = self:_verify_challenge_and_decode(credential_value, now_epoch)
   return self:_finalize_verification(credential_value, request, payload)
+end
+
+function Server:verify_session_credential(credential_value, now_epoch)
+  local request, payload = self:_verify_intent_challenge_and_decode(
+    credential_value,
+    'session',
+    session_intent.new_request,
+    now_epoch
+  )
+  return self:_finalize_callback_verification(credential_value, request, payload, self.verify_session, 'verify_session callback is required')
+end
+
+function Server:verify_subscription_credential(credential_value, now_epoch)
+  local request, payload = self:_verify_intent_challenge_and_decode(
+    credential_value,
+    'subscription',
+    subscription_intent.new_request,
+    now_epoch
+  )
+  return self:_finalize_callback_verification(
+    credential_value,
+    request,
+    payload,
+    self.verify_subscription,
+    'verify_subscription callback is required'
+  )
 end
 
 --- Verify a credential against the route's expected charge request.
@@ -201,6 +292,37 @@ function Server:_verify_challenge_and_decode(credential_value, now_epoch)
   return request, method_details, payload
 end
 
+function Server:_verify_intent_challenge_and_decode(credential_value, expected_intent, validate_request, now_epoch)
+  local echoed = credential_value.challenge
+  local challenge_value = challenge.challenge_from_table({
+    id = echoed.id,
+    realm = echoed.realm,
+    method = echoed.method,
+    intent = echoed.intent,
+    request = echoed.request:raw(),
+    expires = echoed.expires,
+    digest = echoed.digest,
+    opaque = echoed.opaque and echoed.opaque:raw() or nil,
+  })
+
+  if not challenge_value:verify(self.secret_key) then
+    error('challenge ID mismatch')
+  end
+  if challenge_value:is_expired(now_epoch or os.time()) then
+    error('challenge expired at ' .. tostring(challenge_value.expires))
+  end
+
+  local request, decode_err = challenge_value.request:decode()
+  if not request then
+    error(decode_err)
+  end
+
+  self:_verify_intent_pinned_fields(echoed, expected_intent)
+  validate_request(request)
+
+  return request, challenge.payload_as(credential_value) or {}
+end
+
 function Server:_verify_pinned_fields(echoed, request)
   local method_name = 'solana'
   if echoed.method ~= method_name then
@@ -231,6 +353,28 @@ function Server:_verify_pinned_fields(echoed, request)
   end
 end
 
+function Server:_verify_intent_pinned_fields(echoed, expected_intent)
+  local method_name = 'solana'
+  if echoed.method ~= method_name then
+    error(string.format(
+      "credential method '%s' does not match this server (expected '%s')",
+      tostring(echoed.method), method_name
+    ))
+  end
+  if echoed.intent ~= expected_intent then
+    error(string.format(
+      "credential intent '%s' does not match expected '%s'",
+      tostring(echoed.intent), expected_intent
+    ))
+  end
+  if echoed.realm ~= self.realm then
+    error(string.format(
+      "credential realm '%s' does not match this server (expected '%s')",
+      tostring(echoed.realm), tostring(self.realm)
+    ))
+  end
+end
+
 function Server:_finalize_verification(credential_value, request, payload)
   local method_details = request.methodDetails or {}
   if type(self.verify_payment) ~= 'function' then
@@ -255,6 +399,34 @@ function Server:_finalize_verification(credential_value, request, payload)
   local inserted = self.store:put_if_absent(replay_key, true)
   if not inserted then
     error('payment already consumed')
+  end
+
+  return challenge.new_receipt({
+    method = 'solana',
+    timestamp = result.timestamp or os.date('!%Y-%m-%dT%H:%M:%SZ'),
+    reference = reference,
+    challengeId = credential_value.challenge.id,
+    externalId = request.externalId,
+    status = result.status or types.RECEIPT_STATUS_SUCCESS,
+  })
+end
+
+function Server:_finalize_callback_verification(credential_value, request, payload, verifier, missing_message)
+  if type(verifier) ~= 'function' then
+    error(missing_message)
+  end
+
+  local result = verifier({
+    payload = payload,
+    request = request,
+    credential = credential_value,
+    store = self.store,
+    server = self,
+  }) or {}
+
+  local reference = result.reference or payload.signature or payload.transaction
+  if reference == nil or reference == '' then
+    error('verification result must include a reference')
   end
 
   return challenge.new_receipt({
