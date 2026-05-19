@@ -1,6 +1,7 @@
 local challenge = require('mpp.protocol.core.challenge')
 local headers = require('mpp.protocol.core.headers')
 local intents = require('mpp.protocol.intents.charge')
+local session = require('mpp.protocol.intents.session')
 local protocol = require('mpp.protocol.solana')
 local store = require('mpp.store')
 local types = require('mpp.protocol.core.types')
@@ -16,6 +17,7 @@ return {
     },
     intents = {
       charge = intents,
+      session = session,
     },
     solana = protocol,
   },
@@ -38,6 +40,12 @@ return {
   NewPaymentCredential = challenge.new_payment_credential,
   NewMethodName = types.new_method_name,
   NewIntentName = types.new_intent_name,
+  NewSessionCommitReceipt = session.new_commit_receipt,
+  NewSessionMeteringDirective = session.new_metering_directive,
+  NewSessionRequest = session.new_request,
+  NewSessionSignedVoucher = session.new_signed_voucher,
+  NewSessionSplit = session.new_split,
+  NewSessionVoucherData = session.new_voucher_data,
   ParseAuthorization = headers.parse_authorization,
   ParseReceipt = headers.parse_receipt,
   ParseUnits = intents.parse_units,

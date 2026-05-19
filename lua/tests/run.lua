@@ -8,6 +8,7 @@ package.path = table.concat({
 
 require('tests.network_check_spec')
 require('tests.core_spec')
+require('tests.session_spec')
 require('tests.server_spec')
 require('tests.solana_verify_spec')
 require('tests.html_spec')
