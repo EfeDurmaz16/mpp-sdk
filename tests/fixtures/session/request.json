@@ -1,0 +1,21 @@
+{
+  "cap": "1000000",
+  "currency": "USDC",
+  "decimals": 6,
+  "network": "devnet",
+  "operator": "Operator111111111111111111111111111111111",
+  "recipient": "Recipient11111111111111111111111111111111",
+  "splits": [
+    {
+      "recipient": "Affiliate1111111111111111111111111111111",
+      "bps": 250
+    }
+  ],
+  "programId": "PayChan111111111111111111111111111111111",
+  "description": "Metered API session",
+  "externalId": "session-order-001",
+  "minVoucherDelta": "1000",
+  "modes": ["push", "pull"],
+  "pullVoucherStrategy": "clientVoucher",
+  "recentBlockhash": "RecentBlockhash111111111111111111111111111"
+}

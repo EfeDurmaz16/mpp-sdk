@@ -1,0 +1,13 @@
+{
+  "action": "commit",
+  "deliveryId": "delivery-001",
+  "voucher": {
+    "data": {
+      "channelId": "Channel111111111111111111111111111111111",
+      "cumulativeAmount": "30000",
+      "expiresAt": 4102444800,
+      "nonce": 2
+    },
+    "signature": "commit-voucher-signature"
+  }
+}

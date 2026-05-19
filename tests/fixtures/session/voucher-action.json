@@ -1,0 +1,12 @@
+{
+  "action": "voucher",
+  "voucher": {
+    "data": {
+      "channelId": "Channel111111111111111111111111111111111",
+      "cumulativeAmount": "25000",
+      "expiresAt": 4102444800,
+      "nonce": 1
+    },
+    "signature": "voucher-signature"
+  }
+}

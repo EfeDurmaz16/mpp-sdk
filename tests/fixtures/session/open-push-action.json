@@ -1,0 +1,13 @@
+{
+  "action": "open",
+  "mode": "push",
+  "channelId": "Channel111111111111111111111111111111111",
+  "deposit": "1000000",
+  "payer": "Payer11111111111111111111111111111111111",
+  "payee": "Recipient11111111111111111111111111111111",
+  "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+  "salt": "42",
+  "gracePeriod": 60,
+  "authorizedSigner": "SessionSigner111111111111111111111111111",
+  "signature": "open-signature"
+}

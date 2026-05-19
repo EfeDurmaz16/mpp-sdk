@@ -1,0 +1,7 @@
+{
+  "deliveryId": "delivery-001",
+  "sessionId": "Channel111111111111111111111111111111111",
+  "amount": "5000",
+  "cumulative": "30000",
+  "status": "committed"
+}

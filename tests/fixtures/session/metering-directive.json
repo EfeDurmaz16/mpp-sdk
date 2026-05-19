@@ -1,0 +1,10 @@
+{
+  "deliveryId": "delivery-001",
+  "sessionId": "Channel111111111111111111111111111111111",
+  "amount": "5000",
+  "currency": "USDC",
+  "sequence": 1,
+  "expiresAt": 4102444800,
+  "commitUrl": "https://merchant.example/session/commit",
+  "proof": "opaque-server-proof"
+}

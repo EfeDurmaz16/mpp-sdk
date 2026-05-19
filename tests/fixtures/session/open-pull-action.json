@@ -1,0 +1,11 @@
+{
+  "action": "open",
+  "mode": "pull",
+  "tokenAccount": "TokenAccount111111111111111111111111111111",
+  "approvedAmount": "1000000",
+  "owner": "Owner11111111111111111111111111111111111",
+  "authorizedSigner": "SessionSigner111111111111111111111111111",
+  "signature": "delegation-signature",
+  "initMultiDelegateTx": "base64-init-multi-delegate-tx",
+  "updateDelegationTx": "base64-update-delegation-tx"
+}
