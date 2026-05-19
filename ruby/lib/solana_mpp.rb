@@ -14,6 +14,8 @@ require_relative 'solana_mpp/intents/session_metering'
 require_relative 'solana_mpp/intents/subscription_request'
 require_relative 'solana_mpp/intents/subscription_receipt'
 require_relative 'solana_mpp/intents/subscription_account_state'
+require_relative 'solana_mpp/server/verification_result'
+require_relative 'solana_mpp/server/charge_server'
 
 module SolanaMpp
 end
