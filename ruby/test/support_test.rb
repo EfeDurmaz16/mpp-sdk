@@ -22,7 +22,9 @@ class SupportTest < Minitest::Test
 
   def test_stablecoin_resolution_and_token_programs
     assert_nil SolanaMpp::Common::StablecoinMints.resolve("SOL", "localnet")
-    assert_equal "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", SolanaMpp::Common::StablecoinMints.resolve("USDC", "localnet")
+    # Surfpool localnet mirrors mainnet, so USDC on "localnet" resolves to the mainnet USDC mint.
+    assert_equal "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", SolanaMpp::Common::StablecoinMints.resolve("USDC", "localnet")
+    assert_equal "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", SolanaMpp::Common::StablecoinMints.resolve("USDC", "devnet")
     assert_equal "SomeMint111111111111111111111111111111111", SolanaMpp::Common::StablecoinMints.resolve("SomeMint111111111111111111111111111111111", "localnet")
     assert_equal SolanaMpp::Common::StablecoinMints::TOKEN_2022_PROGRAM, SolanaMpp::Common::StablecoinMints.token_program_for("PYUSD", "devnet")
     assert_equal SolanaMpp::Common::StablecoinMints::TOKEN_PROGRAM, SolanaMpp::Common::StablecoinMints.token_program_for("USDC", "localnet")

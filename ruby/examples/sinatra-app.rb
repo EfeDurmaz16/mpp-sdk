@@ -26,47 +26,41 @@ class RubyMppSinatraExample < Sinatra::Base
     rpc = SolanaMpp::Solana::RpcClient.new(ENV.fetch("MPP_RPC_URL", DEFAULT_RPC_URL))
     network = ENV.fetch("MPP_NETWORK", "localnet")
     mint = ENV.fetch("MPP_MINT", DEFAULT_MINT)
+    fee_payer = fee_payer_from_env
+
     challenges = SolanaMpp::Server::ChargeServer.new(
       secret_key: ENV.fetch("MPP_SECRET_KEY", "ruby-mpp-dev-secret"),
-      realm: "Ruby Sinatra Example"
+      realm: "Ruby Sinatra Example",
+      blockhash_provider: -> { rpc.latest_blockhash }
     )
     handler = SolanaMpp::Server::ChargeHandler.new(
       challenges: challenges,
       rpc: rpc,
       replay_store: SolanaMpp::MemoryStore.new,
-      fee_payer: fee_payer_from_env,
+      fee_payer: fee_payer,
       network: network
     )
 
-    set :mpp_rpc, rpc
-    set :mpp_network, network
-    set :mpp_mint, mint
-    set :mpp_handler, handler
-  end
-
-  helpers do
-    # Build a fresh charge request for each protected request.
-    def mpp_charge_request
-      method_details = {
-        "network" => settings.mpp_network,
-        "decimals" => Integer(ENV.fetch("MPP_DECIMALS", "6")),
-        "tokenProgram" => SolanaMpp::Common::StablecoinMints.token_program_for(settings.mpp_mint, settings.mpp_network),
-        "recentBlockhash" => settings.mpp_rpc.latest_blockhash
-      }
-      if settings.mpp_handler.fee_payer_pubkey
-        method_details["feePayer"] = true
-        method_details["feePayerKey"] = settings.mpp_handler.fee_payer_pubkey
-      end
-
-      SolanaMpp::Intent::ChargeRequest.new(
-        amount: ENV.fetch("MPP_AMOUNT", "1000"),
-        currency: settings.mpp_mint,
-        recipient: ENV.fetch("MPP_PAY_TO", DEFAULT_PAY_TO),
-        description: "Sinatra protected endpoint",
-        external_id: "ruby-sinatra-example",
-        method_details: method_details
-      )
+    method_details = {
+      "network" => network,
+      "decimals" => Integer(ENV.fetch("MPP_DECIMALS", "6"))
+    }
+    if handler.fee_payer_pubkey
+      method_details["feePayer"] = true
+      method_details["feePayerKey"] = handler.fee_payer_pubkey
     end
+
+    request = SolanaMpp::Intent::ChargeRequest.new(
+      amount: ENV.fetch("MPP_AMOUNT", "1000"),
+      currency: mint,
+      recipient: ENV.fetch("MPP_PAY_TO", DEFAULT_PAY_TO),
+      description: "Sinatra protected endpoint",
+      external_id: "ruby-sinatra-example",
+      method_details: method_details
+    )
+
+    set :mpp_handler, handler
+    set :mpp_request, request
   end
 
   get "/health" do
@@ -75,7 +69,7 @@ class RubyMppSinatraExample < Sinatra::Base
   end
 
   get "/paid" do
-    payment = settings.mpp_handler.handle(request.env["HTTP_AUTHORIZATION"], mpp_charge_request)
+    payment = settings.mpp_handler.handle(request.env["HTTP_AUTHORIZATION"], settings.mpp_request)
     status payment.status
     payment.headers.each { |name, value| headers[name] = value }
     content_type :json
