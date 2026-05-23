@@ -14,5 +14,7 @@ require('tests.html_spec')
 require('tests.cross_route_replay_spec')
 require('tests.rpc_spec')
 require('tests.charge_handler_spec')
+require('tests.util_base58_spec')
+require('tests.util_base64_std_spec')
 
 require('tests.test_helper').run()
