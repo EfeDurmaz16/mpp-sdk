@@ -69,6 +69,17 @@ export const clientImplementations: ImplementationDefinition[] = [
     ],
     enabled: isEnabled("swift", "MPP_INTEROP_CLIENTS", false),
   },
+  {
+    id: "python-x402",
+    label: "Python x402 exact client",
+    role: "client",
+    command: [
+      "sh",
+      "-c",
+      "cd ../../python && PYTHONPATH=src python3 -m x402.interop.client",
+    ],
+    enabled: isEnabled("python-x402", "MPP_INTEROP_CLIENTS", false),
+  },
 ];
 
 export const serverImplementations: ImplementationDefinition[] = [
@@ -160,5 +171,16 @@ export const serverImplementations: ImplementationDefinition[] = [
     role: "server",
     command: ["sh", "-c", "cd go-server && go run ."],
     enabled: isEnabled("go", "MPP_INTEROP_SERVERS", true),
+  },
+  {
+    id: "python-x402",
+    label: "Python x402 exact server",
+    role: "server",
+    command: [
+      "sh",
+      "-c",
+      "cd ../../python && PYTHONPATH=src python3 -m x402.interop.server",
+    ],
+    enabled: isEnabled("python-x402", "MPP_INTEROP_SERVERS", false),
   },
 ];
