@@ -115,4 +115,15 @@ export const serverImplementations: ImplementationDefinition[] = [
     ],
     enabled: isEnabled("ruby", "MPP_INTEROP_SERVERS", false),
   },
+  {
+    id: "lua-x402-server",
+    label: "Lua x402 exact server",
+    role: "server",
+    command: [
+      "sh",
+      "-c",
+      "lua ../../lua/x402/bin/interop-server.lua",
+    ],
+    enabled: isEnabled("lua-x402-server", "MPP_INTEROP_SERVERS", false),
+  },
 ];
