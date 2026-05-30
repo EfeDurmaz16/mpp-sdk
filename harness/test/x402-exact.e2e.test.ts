@@ -88,6 +88,8 @@ describe("x402 exact intent — cross-language matrix", () => {
   const allowedPair = (clientId: string, serverId: string): boolean => {
     if (clientId === "ts-x402" && serverId === "ts-x402") return true;
     if (clientId === "rust-x402" && serverId === "rust-x402") return true;
+    if (clientId === "swift-x402" && serverId === "rust-x402") return true;
+    if (clientId === "swift-x402" && serverId === "python") return true;
     return false;
   };
 
