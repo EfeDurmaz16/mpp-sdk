@@ -357,4 +357,13 @@ end
 
 M.Server = Server
 
+-- Session intent surface. The session lifecycle (open / voucher / commit /
+-- topUp / close) is stateful and distinct from the stateless charge verify
+-- path above, so it lives in its own handler with its own channel store.
+-- Re-exported here so callers reach it through the same mpp server package
+-- as charge: `require('pay_kit.protocols.mpp.server').session_server`.
+M.session = require('pay_kit.protocols.mpp.session')
+M.session_server = require('pay_kit.protocols.mpp.server.session_handler')
+M.channel_store = require('pay_kit.protocols.mpp.channel_store')
+
 return M

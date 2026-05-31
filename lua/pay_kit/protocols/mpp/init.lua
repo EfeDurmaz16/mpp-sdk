@@ -265,6 +265,15 @@ function Adapter:verify_and_settle(gate, req)
   }
 end
 
+-- Session intent surface, reachable through the mpp protocol package:
+--   require('pay_kit.protocols.mpp').session         -- wire types
+--   require('pay_kit.protocols.mpp').session_server  -- server lifecycle
+-- The charge adapter above stays the 402 dispatch entry; session is a
+-- separate stateful lifecycle and is exposed here for callers that drive it
+-- directly (the harness adapter routes to it via MPP_INTEROP_INTENT=session).
+M.session = require('pay_kit.protocols.mpp.session')
+M.session_server = require('pay_kit.protocols.mpp.server.session_handler')
+
 -- Silence "unused-local" while protocol bits stabilise.
 M._unused = { mpp_intents, mpp_protocol, error_codes }
 
