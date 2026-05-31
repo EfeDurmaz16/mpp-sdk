@@ -53,6 +53,21 @@ from solana_mpp.protocol.intents import ChargeRequest  # noqa: E402
 from solana_mpp.server.mpp import ChargeOptions, Config, Mpp  # noqa: E402
 from solana_mpp.store import MemoryStore  # noqa: E402
 
+# Session intent (opt-in via MPP_INTEROP_INTENT=session). The charge adapter
+# stays the default; the session branch advertises the "session" capability
+# and serves the open/voucher/commit/close lifecycle over HTTP. Full on-chain
+# byte-parity is exercised by surfpool in CI; the local harness path proves the
+# wire-shape + voucher-signature lifecycle without RPC.
+from solana_mpp.channel_store import MemoryChannelStore  # noqa: E402
+from solana_mpp.protocol.session import (  # noqa: E402
+    session_action_from_dict,
+)
+from solana_mpp.server.session import (  # noqa: E402
+    DeliveryRequest,
+    SessionConfig,
+    SessionServer,
+)
+
 
 def require_env(name: str) -> str:
     value = os.environ.get(name)
@@ -338,6 +353,152 @@ class InteropHandler(BaseHTTPRequestHandler):
         )
 
 
+def _build_session_server() -> tuple[SessionServer, dict[str, Any]]:
+    """Construct the session SessionServer from the harness environment.
+
+    Mirrors the charge adapter's env contract. The session server tracks
+    channel lifecycle state in a MemoryChannelStore (not the charge replay
+    store).
+    """
+    network = optional_env("MPP_INTEROP_NETWORK", "localnet")
+    mint = require_env("MPP_INTEROP_MINT")
+    pay_to = require_env("MPP_INTEROP_PAY_TO")
+    cap = optional_env("MPP_INTEROP_SESSION_CAP", "10000000")
+    decimals = int(optional_env("MPP_INTEROP_DECIMALS", "6"))
+    min_delta = int(optional_env("MPP_INTEROP_MIN_VOUCHER_DELTA", "0"))
+    resource_path = optional_env("MPP_INTEROP_RESOURCE_PATH", "/session")
+
+    config = SessionConfig(
+        operator=pay_to,
+        recipient=pay_to,
+        currency=mint,
+        decimals=decimals,
+        network=network,
+        max_cap=int(cap),
+        min_voucher_delta=min_delta,
+    )
+    server = SessionServer(config, MemoryChannelStore())
+    return server, {
+        "resource_path": resource_path,
+        "cap": int(cap),
+    }
+
+
+class SessionInteropHandler(BaseHTTPRequestHandler):
+    """HTTP adapter for the session intent lifecycle.
+
+    Routes (all under the configured resource path):
+
+    * ``GET <path>`` without a session-action body returns the session
+      challenge request (the wire ``SessionRequest``).
+    * ``POST <path>`` with a tagged session-action JSON body dispatches to the
+      matching server handler (open / voucher / commit / close) and replies
+      with the result.
+    * ``POST <path>/begin`` reserves a metered delivery and returns the
+      directive.
+    """
+
+    server_version = "mpp-python-interop-session/1.0"
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+        return
+
+    @property
+    def session_server(self) -> SessionServer:
+        return self.server.session_server  # type: ignore[attr-defined]
+
+    @property
+    def cfg(self) -> dict[str, Any]:
+        return self.server.cfg  # type: ignore[attr-defined]
+
+    def _send_json(self, status: int, body: dict) -> None:
+        payload = json.dumps(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(payload)))
+        self.send_header("connection", "close")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _read_body(self) -> dict[str, Any]:
+        length = int(self.headers.get("content-length", "0") or "0")
+        if length == 0:
+            return {}
+        raw = self.rfile.read(length)
+        return json.loads(raw.decode("utf-8"))
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/health":
+            self._send_json(200, {"ok": True})
+            return
+        if self.path == self.cfg["resource_path"]:
+            request = self.session_server.build_challenge_request(self.cfg["cap"])
+            self._send_json(200, {"request": request.to_dict()})
+            return
+        self._send_json(404, {"error": "not_found"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        base = self.cfg["resource_path"]
+        try:
+            body = self._read_body()
+        except Exception as exc:  # noqa: BLE001
+            self._send_json(400, {"error": "bad_body", "message": str(exc)})
+            return
+
+        try:
+            if self.path == f"{base}/begin":
+                directive = asyncio.run(
+                    self.session_server.begin_delivery(
+                        DeliveryRequest(
+                            session_id=body["sessionId"],
+                            amount=int(body["amount"]),
+                            delivery_id=body.get("deliveryId"),
+                        )
+                    )
+                )
+                self._send_json(200, {"directive": directive.to_dict()})
+                return
+
+            if self.path == base:
+                result = asyncio.run(self._dispatch_action(body))
+                self._send_json(200, result)
+                return
+        except Exception as err:  # noqa: BLE001 (lifecycle errors map to 402)
+            print(f"interop python session error: {err}", file=sys.stderr)
+            self._send_json(402, {"error": "session_invalid", "message": str(err)})
+            return
+
+        self._send_json(404, {"error": "not_found"})
+
+    async def _dispatch_action(self, body: dict[str, Any]) -> dict[str, Any]:
+        from solana_mpp.protocol.session import (
+            ClosePayload,
+            CommitPayload,
+            OpenPayload,
+            TopUpPayload,
+            VoucherPayload,
+        )
+
+        action = session_action_from_dict(body)
+        server = self.session_server
+        if isinstance(action, OpenPayload):
+            state = await server.process_open(action)
+            return {"ok": True, "channelId": state.channel_id, "deposit": state.deposit}
+        if isinstance(action, VoucherPayload):
+            cumulative = await server.verify_voucher(action)
+            return {"ok": True, "cumulative": str(cumulative)}
+        if isinstance(action, CommitPayload):
+            receipt = await server.process_commit(action)
+            return {"ok": True, "receipt": receipt.to_dict()}
+        if isinstance(action, TopUpPayload):
+            state = await server.process_topup(action)
+            return {"ok": True, "deposit": state.deposit}
+        if isinstance(action, ClosePayload):
+            params = await server.process_close(action)
+            return {"ok": True, "settled": params.settled, "channelId": params.channel_id}
+        raise ValueError("unsupported session action")
+
+
 class _ThreadedHTTPServer(HTTPServer):
     pass
 
@@ -385,7 +546,40 @@ def _fund_recipient_via_surfpool(rpc_url: str, pay_to: str, mint: str) -> None:
         print(f"interop python surfpool seed failed: {err}", file=sys.stderr)
 
 
+def _run_session_server() -> None:
+    """Run the session-intent adapter branch (opt-in)."""
+    session_server, cfg = _build_session_server()
+    port = _free_port()
+    server = _ThreadedHTTPServer(("127.0.0.1", port), SessionInteropHandler)
+    server.session_server = session_server  # type: ignore[attr-defined]
+    server.cfg = cfg  # type: ignore[attr-defined]
+
+    ready = {
+        "type": "ready",
+        "implementation": "python",
+        "role": "server",
+        "port": port,
+        "capabilities": ["session"],
+    }
+    sys.stdout.write(json.dumps(ready) + "\n")
+    sys.stdout.flush()
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        thread.join()
+    except KeyboardInterrupt:
+        server.shutdown()
+
+
 def main() -> None:
+    # Default intent is charge; the session branch is opt-in so the existing
+    # charge interop matrix stays untouched until the surfpool session
+    # scenario lands in the harness.
+    if optional_env("MPP_INTEROP_INTENT", "charge") == "session":
+        _run_session_server()
+        return
+
     handler, cfg = _build_mpp()
     port = _free_port()
     server = _ThreadedHTTPServer(("127.0.0.1", port), InteropHandler)
