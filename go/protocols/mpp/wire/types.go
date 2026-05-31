@@ -35,6 +35,9 @@ func NewIntentName(name string) IntentName { return IntentName(strings.ToLower(n
 // IsCharge returns whether the intent is the charge intent.
 func (i IntentName) IsCharge() bool { return strings.EqualFold(string(i), "charge") }
 
+// IsSubscription returns whether the intent is the subscription intent.
+func (i IntentName) IsSubscription() bool { return strings.EqualFold(string(i), "subscription") }
+
 // Base64URLJSON preserves a base64url-encoded JSON blob.
 type Base64URLJSON struct {
 	raw string

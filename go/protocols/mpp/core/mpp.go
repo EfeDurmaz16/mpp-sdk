@@ -36,6 +36,13 @@ type (
 	MethodDetails     = paycore.MethodDetails
 	CredentialPayload = paycore.CredentialPayload
 	Split             = paycore.Split
+
+	SubscriptionRequest           = intents.SubscriptionRequest
+	SubscriptionPeriodUnit        = intents.SubscriptionPeriodUnit
+	SubscriptionMethodDetails     = paycore.SubscriptionMethodDetails
+	SubscriptionReceiptExtensions = paycore.SubscriptionReceiptExtensions
+	ActivatePayload               = paycore.ActivatePayload
+	SubscriptionAction            = paycore.SubscriptionAction
 )
 
 //revive:enable:exported
@@ -49,6 +56,9 @@ const (
 	PaymentScheme         = wire.PaymentScheme
 	ReceiptStatusSuccess  = wire.ReceiptStatusSuccess
 	WWWAuthenticateHeader = wire.WWWAuthenticateHeader
+
+	PeriodUnitDay  = intents.PeriodUnitDay
+	PeriodUnitWeek = intents.PeriodUnitWeek
 )
 
 // Re-exported helper functions for parsing and formatting MPP wire
