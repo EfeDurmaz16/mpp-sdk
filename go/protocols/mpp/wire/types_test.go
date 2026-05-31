@@ -119,6 +119,15 @@ func TestIntentNameIsCharge(t *testing.T) {
 	}
 }
 
+func TestIntentNameIsSubscription(t *testing.T) {
+	if !NewIntentName("Subscription").IsSubscription() {
+		t.Fatal("expected subscription intent")
+	}
+	if NewIntentName("charge").IsSubscription() {
+		t.Fatal("charge must not be a subscription intent")
+	}
+}
+
 func TestMethodNameInvalid(t *testing.T) {
 	tests := []struct {
 		name  string

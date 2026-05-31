@@ -289,13 +289,13 @@ func BuildCreatePlanIx(programID solana.PublicKey, accounts CreatePlanAccounts, 
 // SubscribeAccounts are the account inputs for BuildSubscribeIx. Payer is
 // optional: when zero, the subscriber funds rent.
 type SubscribeAccounts struct {
-	Subscriber                 solana.PublicKey
-	Merchant                   solana.PublicKey
-	PlanPDA                    solana.PublicKey
-	SubscriptionPDA            solana.PublicKey
-	SubscriptionAuthorityPDA   solana.PublicKey
-	EventAuthority             solana.PublicKey
-	Payer                      *solana.PublicKey
+	Subscriber               solana.PublicKey
+	Merchant                 solana.PublicKey
+	PlanPDA                  solana.PublicKey
+	SubscriptionPDA          solana.PublicKey
+	SubscriptionAuthorityPDA solana.PublicKey
+	EventAuthority           solana.PublicKey
+	Payer                    *solana.PublicKey
 }
 
 // BuildSubscribeIx builds a Subscribe instruction. Includes the optional
@@ -374,11 +374,11 @@ func BuildCancelSubscriptionIx(programID solana.PublicKey, accounts CancelSubscr
 // InitializeSubscriptionAuthorityAccounts are the account inputs for
 // BuildInitializeSubscriptionAuthorityIx.
 type InitializeSubscriptionAuthorityAccounts struct {
-	Owner                solana.PublicKey
+	Owner                 solana.PublicKey
 	SubscriptionAuthority solana.PublicKey
-	TokenMint            solana.PublicKey
-	UserATA              solana.PublicKey
-	TokenProgram         solana.PublicKey
+	TokenMint             solana.PublicKey
+	UserATA               solana.PublicKey
+	TokenProgram          solana.PublicKey
 }
 
 // BuildInitializeSubscriptionAuthorityIx builds an InitSubscriptionAuthority

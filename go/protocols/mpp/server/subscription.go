@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	subscriptionMethodName  = "solana"
-	subscriptionIntentName  = "subscription"
+	subscriptionMethodName   = "solana"
+	subscriptionIntentName   = "subscription"
 	defaultSubscriptionRealm = "MPP Subscription"
 
 	// subscriptionDelegationLen is the serialized length of the on-chain
