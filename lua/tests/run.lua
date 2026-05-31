@@ -30,6 +30,9 @@ require('tests.error_codes_spec')
 require('tests.store_shared_dict_spec')
 require('tests.intents_charge_spec')
 require('tests.json_util_spec')
+require('tests.session_payment_channels_spec')
+require('tests.session_wire_spec')
+require('tests.session_handler_spec')
 
 -- PayKit umbrella suites (P1+).
 require('tests.pay_kit.errors_spec')
