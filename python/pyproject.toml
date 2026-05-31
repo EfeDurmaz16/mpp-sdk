@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.27",
     "solders>=0.22",
     "solana>=0.35",
+    "blake3>=1.0.8",
 ]
 
 [project.optional-dependencies]
