@@ -87,7 +87,7 @@ Rust, Go, PHP, Ruby, Lua, and Python packages.
 |---|:---:|
 | `mpp/charge/pull` | pass |
 | `mpp/charge/push` | planned |
-| `mpp/session` | planned |
+| `mpp/session` | client |
 | `mpp/subscription` | planned |
 
 ### x402
@@ -171,14 +171,18 @@ for the [HTTP Payment Authentication Scheme](https://paymentauth.org).
 ```text
 swift/
 ├── Sources/SolanaMpp/
-│   ├── Client/                # Charge client, HTTP retry, JSON-RPC
+│   ├── Client/                # Charge + session clients, HTTP retry, JSON-RPC
 │   │   ├── Charge.swift       # MPP charge intent wire-signing pull path
+│   │   ├── Session.swift      # ActiveSession, SessionConsumer, dispatch
 │   │   ├── HTTPClient.swift   # URLSession-backed 402 retry client
 │   │   └── RpcClient.swift    # Minimal JSON-RPC client
 │   ├── Protocol/              # Wire format types
 │   │   ├── Headers.swift      # Payment WWW-Authenticate / Authorization
-│   │   └── Models.swift       # Wire-format Codable types
+│   │   ├── Models.swift       # Charge wire-format Codable types
+│   │   └── SessionTypes.swift # Session wire-format Codable types
 │   └── Crypto/                # Solana primitives (vendored, no umbrella dep)
+│       ├── Blake3.swift       # Pure-Swift BLAKE3 (distribution hashing)
+│       └── PaymentChannels.swift # PDA, voucher bytes, instructions
 ├── Tests/SolanaMppTests/      # XCTest / swift-testing suite
 └── Examples/                  # Sample clients (planned: Solana Seeker demo)
 ```

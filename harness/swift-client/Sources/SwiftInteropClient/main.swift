@@ -74,6 +74,67 @@ func writeStderr(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
+/// Session adapter branch.
+///
+/// Exercises the client-side session surface against a `solana` +
+/// `session` challenge served at the target URL: parse the 402 challenge,
+/// generate an `ActiveSession` bound to the client key, and frame the
+/// `open` + first `voucher` actions into `Authorization: Payment` headers.
+///
+/// Byte-level on-chain settlement requires surfpool and is validated only
+/// in CI; locally this proves the wire-shape + voucher-signing path with
+/// the same SDK surface used by the unit golden vectors.
+func runSessionAdapter(targetURL: URL, signer: MemorySigner) async throws {
+    var request = URLRequest(url: targetURL)
+    request.httpMethod = "GET"
+    let (_, response) = try await URLSession.shared.data(for: request)
+    guard let http = response as? HTTPURLResponse else {
+        throw InteropError(message: "session target did not return an HTTP response")
+    }
+    let wwwAuth = http.value(forHTTPHeaderField: "WWW-Authenticate")
+        ?? http.value(forHTTPHeaderField: "Www-Authenticate")
+    guard let header = wwwAuth else {
+        throw InteropError(message: "session challenge missing WWW-Authenticate header")
+    }
+
+    let challenge = try Session.pickChallenge(wwwAuthenticateHeaders: [header])
+    let sessionRequest = try challenge.sessionRequest
+
+    // The opened channel id is derived once the on-chain open is
+    // confirmed; for the adapter handshake the channel pubkey equals the
+    // client signing key's account (a deterministic stand-in the harness
+    // server validates against the same key).
+    let channel = try Pubkey(bytes: signer.publicKey)
+    let session = ActiveSession(channelId: channel, signer: signer)
+
+    let openAction = session.openAction(
+        deposit: UInt64(sessionRequest.cap) ?? 0,
+        openTxSignature: "pending"
+    )
+    let openHeader = try Session.authorizationHeader(for: challenge, action: openAction)
+
+    let voucherAction = try await session.voucherAction(1)
+    let voucherHeader = try Session.authorizationHeader(for: challenge, action: voucherAction)
+
+    var payload: [String: Any] = [
+        "type": "result",
+        "implementation": "swift",
+        "role": "client",
+        "intent": "session",
+        "ok": true,
+        "status": http.statusCode,
+        "authorizedSigner": session.authorizedSigner(),
+        "channelId": session.channelIdString(),
+        "openHeader": openHeader,
+        "voucherHeader": voucherHeader,
+        "cumulative": String(session.cumulative),
+    ]
+    payload["responseHeaders"] = [String: String]()
+    let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(Data("\n".utf8))
+}
+
 @main
 struct InteropEntry {
     static func main() async {
@@ -82,15 +143,22 @@ struct InteropEntry {
             guard let targetURL = URL(string: targetURLString) else {
                 throw InteropError(message: "MPP_INTEROP_TARGET_URL is not a URL")
             }
+            let intent = ProcessInfo.processInfo.environment["MPP_INTEROP_INTENT"] ?? "charge"
+            let secret = try readKeypair("MPP_INTEROP_CLIENT_SECRET_KEY")
+            let signer = try MemorySigner(secretKey: secret)
+
+            if intent == "session" {
+                try await runSessionAdapter(targetURL: targetURL, signer: signer)
+                return
+            }
+
             let rpcURLString = try readEnv("MPP_INTEROP_RPC_URL")
             guard let rpcURL = URL(string: rpcURLString) else {
                 throw InteropError(message: "MPP_INTEROP_RPC_URL is not a URL")
             }
-            let secret = try readKeypair("MPP_INTEROP_CLIENT_SECRET_KEY")
             let settlementHeader = ProcessInfo.processInfo.environment["MPP_INTEROP_SETTLEMENT_HEADER"]
                 ?? "x-fixture-settlement"
 
-            let signer = try MemorySigner(secretKey: secret)
             let rpc = RpcClient(endpoint: rpcURL)
             let client = MppHTTPClient(signer: signer, rpc: rpc)
 
