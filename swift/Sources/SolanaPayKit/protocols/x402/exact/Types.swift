@@ -41,6 +41,17 @@ public struct X402AcceptsEntry: Codable, Sendable {
     public let decimals: Int?
     /// SPL token program at the top level (otherwise `extra.tokenProgram`).
     public let tokenProgram: String?
+    /// Cluster slug carried alongside the CAIP-2 `network` by some servers
+    /// (e.g. `"devnet"`). Used during offer selection to match a client's
+    /// preferred network, mirroring the rust `cluster` field on
+    /// `PaymentRequirements`.
+    public let cluster: String?
+    /// Unique resource identifier (URL) for this payment. Echoed back in the
+    /// `Payment-Signature` envelope's `resource` field, mirroring rust
+    /// `PaymentRequirements::resource_info`.
+    public let resource: String?
+    /// Human-readable description carried with the resource metadata.
+    public let description: String?
     /// Pinned blockhash at the top level (otherwise `extra.recentBlockhash`).
     public let recentBlockhash: String?
     /// Managed fee-payer pubkey at the top level. The rust normalization reads
@@ -69,7 +80,7 @@ public struct X402AcceptsEntry: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case scheme, network, amount, maxAmountRequired, asset, payTo, recipient, extra
         case currency, decimals, tokenProgram, recentBlockhash, maxTimeoutSeconds
-        case feePayerKey, feePayer
+        case feePayerKey, feePayer, cluster, resource, description
     }
 
     public init(
@@ -88,6 +99,9 @@ public struct X402AcceptsEntry: Codable, Sendable {
         feePayerKey: String? = nil,
         feePayer: Bool? = nil,
         maxTimeoutSeconds: Int? = nil,
+        cluster: String? = nil,
+        resource: String? = nil,
+        description: String? = nil,
         raw: JSONValue? = nil
     ) {
         self.scheme = scheme
@@ -105,6 +119,9 @@ public struct X402AcceptsEntry: Codable, Sendable {
         self.feePayerKey = feePayerKey
         self.feePayer = feePayer
         self.maxTimeoutSeconds = maxTimeoutSeconds
+        self.cluster = cluster
+        self.resource = resource
+        self.description = description
         self.raw = raw
     }
 
@@ -125,6 +142,9 @@ public struct X402AcceptsEntry: Codable, Sendable {
         feePayerKey = try container.decodeIfPresent(String.self, forKey: .feePayerKey)
         feePayer = try container.decodeIfPresent(Bool.self, forKey: .feePayer)
         maxTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .maxTimeoutSeconds)
+        cluster = try container.decodeIfPresent(String.self, forKey: .cluster)
+        resource = try container.decodeIfPresent(String.self, forKey: .resource)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
         // Capture the verbatim object for faithful echo.
         raw = try JSONValue(from: decoder)
     }
@@ -201,9 +221,31 @@ public struct X402AcceptsEntry: Codable, Sendable {
         return feePayer != false ? key : nil
     }
 
+    /// Canonical v2 resource metadata for this offer, or `nil` when the
+    /// offer carries no resource URL. Mirrors rust
+    /// `PaymentRequirements::resource_info`: an empty `resource` yields
+    /// `nil`; otherwise `{ url, description? }`.
+    public var resourceInfo: X402ResourceInfo? {
+        guard let url = resource, !url.isEmpty else { return nil }
+        return X402ResourceInfo(url: url, description: description, mimeType: nil)
+    }
+
     /// Extract a `String` value from `extra`.
     public func extraString(_ key: String) -> String? {
         guard case let .string(s)? = extra?[key], !s.isEmpty else { return nil }
+        return s
+    }
+
+    /// Extract a raw `String` value from `extra`, preserving an empty string.
+    ///
+    /// Unlike `extraString`, this does not collapse `""` to `nil`. The x402
+    /// memo field distinguishes "absent" (random nonce) from "present but
+    /// empty" (emit a zero-length memo the rust verifier expects), so the
+    /// memo path must see the empty string. Mirrors rust `memo_instruction`,
+    /// which emits `memo.as_bytes()` for any `Some(memo)` including `""`
+    /// (`rust/crates/x402/src/client/exact/payment.rs:350`).
+    public func extraRawString(_ key: String) -> String? {
+        guard case let .string(s)? = extra?[key] else { return nil }
         return s
     }
 
@@ -273,6 +315,33 @@ public struct X402PaymentRequiredEnvelope: Codable, Sendable {
     public let accepts: [X402AcceptsEntry]
 }
 
+/// Canonical x402 v2 resource metadata, mirroring the rust `ResourceInfo`
+/// (`rust/crates/x402/src/protocol/schemes/exact/types.rs:170`). Carried in
+/// the `Payment-Signature` envelope's `resource` field. `description` and
+/// `mimeType` are omitted from the wire when `nil`.
+public struct X402ResourceInfo: Codable, Sendable, Equatable {
+    public let url: String
+    public let description: String?
+    public let mimeType: String?
+
+    public init(url: String, description: String? = nil, mimeType: String? = nil) {
+        self.url = url
+        self.description = description
+        self.mimeType = mimeType
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case url, description, mimeType
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(url, forKey: .url)
+        try container.encodeIfPresent(description, forKey: .description)
+        try container.encodeIfPresent(mimeType, forKey: .mimeType)
+    }
+}
+
 /// The `payload` field of a `Payment-Signature` envelope.
 public struct X402PaymentPayload: Codable, Sendable {
     /// Standard-base64 encoded signed VersionedTransaction.
@@ -286,26 +355,37 @@ public struct X402PaymentPayload: Codable, Sendable {
 /// The `Payment-Signature` header value (base64 of this JSON).
 ///
 /// Mirrors the rust `PaymentSignatureEnvelope`:
-/// `{ x402Version, accepted, payload }`.
+/// `{ x402Version, accepted, resource?, payload }`. The `resource` field is
+/// populated from the offer's resource metadata
+/// (`rust/crates/x402/src/client/exact/payment.rs:136`) and omitted from the
+/// wire when absent.
 public struct X402PaymentSignatureEnvelope: Codable, Sendable {
     public let x402Version: Int
     public let accepted: X402AcceptsEntry?
+    public let resource: X402ResourceInfo?
     public let payload: X402PaymentPayload
 
-    public init(x402Version: Int, accepted: X402AcceptsEntry?, payload: X402PaymentPayload) {
+    public init(
+        x402Version: Int,
+        accepted: X402AcceptsEntry?,
+        resource: X402ResourceInfo? = nil,
+        payload: X402PaymentPayload
+    ) {
         self.x402Version = x402Version
         self.accepted = accepted
+        self.resource = resource
         self.payload = payload
     }
 
     private enum CodingKeys: String, CodingKey {
-        case x402Version, accepted, payload
+        case x402Version, accepted, resource, payload
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         x402Version = try container.decode(Int.self, forKey: .x402Version)
         accepted = try container.decodeIfPresent(X402AcceptsEntry.self, forKey: .accepted)
+        resource = try container.decodeIfPresent(X402ResourceInfo.self, forKey: .resource)
         payload = try container.decode(X402PaymentPayload.self, forKey: .payload)
     }
 
@@ -322,6 +402,7 @@ public struct X402PaymentSignatureEnvelope: Codable, Sendable {
         } else {
             try container.encodeIfPresent(accepted, forKey: .accepted)
         }
+        try container.encodeIfPresent(resource, forKey: .resource)
         try container.encode(payload, forKey: .payload)
     }
 }

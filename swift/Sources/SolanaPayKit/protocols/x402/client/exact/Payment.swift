@@ -86,6 +86,7 @@ public func buildX402PaymentHeader(
     let envelope = X402PaymentSignatureEnvelope(
         x402Version: X402Version,
         accepted: offer,
+        resource: offer.resourceInfo,
         payload: payload
     )
     let encoder = JSONEncoder()
@@ -236,7 +237,11 @@ private func _appendX402Memo(
     nonceGenerator: (() -> Data)? = nil
 ) throws {
     let memoText: String
-    if let memo = offer.extraString("memo") {
+    // Use the raw value so a present-but-empty `extra.memo` emits a
+    // zero-length memo (which the rust verifier expects), rather than
+    // falling through to a random nonce. Mirrors rust `memo_instruction`,
+    // which emits the memo bytes for any `Some(memo)` including `""`.
+    if let memo = offer.extraRawString("memo") {
         memoText = memo
     } else {
         // Generate a random 16-byte nonce and hex-encode it.
@@ -294,7 +299,7 @@ private func _selectRequirement(
     let clusterLabel = SolanaNetwork.clusterLabel(for: preferredNetwork)
 
     let solana = accepts.filter { _isSolanaExact($0) }
-    let onPreferred = solana.filter { $0.network == preferredNetwork }
+    let onPreferred = solana.filter { _networkMatches($0, preferred: preferredNetwork) }
 
     if let currencies = selection.currencies {
         for wanted in currencies {
@@ -312,13 +317,34 @@ private func _selectRequirement(
     return candidates.min(by: { _effectiveAmountOf($0) < _effectiveAmountOf($1) })
 }
 
+/// Eligibility filter for an x402 offer, mirroring the rust spine.
+///
+/// Rust selects on network alone: an offer is a candidate when
+/// `cluster_for_caip2_network(requirement.network).is_some()`
+/// (`rust/crates/x402/src/client/exact/payment.rs:303`), which accepts the
+/// canonical CAIP-2 ids, the cluster slugs (`mainnet`/`devnet`/`testnet`
+/// /`localnet`/`mainnet-beta`), the legacy `solana` alias, and any
+/// `solana:*` id. Rust never inspects `scheme` while selecting, so neither
+/// does the swift client (the previous `scheme == "exact"` gate diverged).
 private func _isSolanaExact(_ offer: X402AcceptsEntry) -> Bool {
-    // Require an explicit `scheme == "exact"` (python parity): offers
-    // without a scheme, or with a different scheme, are not eligible.
-    guard offer.scheme == "exact" else { return false }
-    return offer.network == SolanaNetwork.mainnet
-        || offer.network == SolanaNetwork.devnet
-        || offer.network == SolanaNetwork.testnet
+    SolanaNetwork.clusterForCaip2(offer.network) != nil
+}
+
+/// True when an offer's network matches the client's preferred network,
+/// mirroring the rust `network_matches`
+/// (`rust/crates/x402/src/client/exact/payment.rs:291`):
+/// direct equality, the legacy `solana` alias against mainnet, or the
+/// offer's `cluster` slug mapping back to the preferred CAIP-2 id.
+private func _networkMatches(_ offer: X402AcceptsEntry, preferred: String) -> Bool {
+    if offer.network == preferred { return true }
+    if preferred == SolanaNetwork.mainnet && offer.network == SolanaNetwork.legacyAlias {
+        return true
+    }
+    if let cluster = offer.cluster,
+       SolanaNetwork.caip2(for: cluster) == preferred {
+        return true
+    }
+    return false
 }
 
 private func _effectiveAmountOf(_ offer: X402AcceptsEntry) -> UInt64 {

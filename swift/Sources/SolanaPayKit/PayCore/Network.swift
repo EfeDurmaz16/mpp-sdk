@@ -10,6 +10,9 @@ public enum SolanaNetwork {
     public static let devnet = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
     /// Testnet CAIP-2 id (mirrors rust `SOLANA_TESTNET`).
     public static let testnet = "solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z"
+    /// Legacy bare `"solana"` network alias (rust `SOLANA_NETWORK`), treated
+    /// as mainnet during offer selection.
+    public static let legacyAlias = "solana"
 
     /// Return the CAIP-2 id for a cluster slug or CAIP-2 string.
     ///
@@ -45,6 +48,25 @@ public enum SolanaNetwork {
         case devnet: return "devnet"
         case testnet: return "testnet"
         default: return "mainnet"
+        }
+    }
+
+    /// Map a CAIP-2 id (or alias / cluster slug) back to a cluster name,
+    /// returning `nil` for non-Solana networks. Mirrors the rust
+    /// `cluster_for_caip2_network`
+    /// (`rust/crates/x402/src/protocol/schemes/exact/types.rs:42`): it
+    /// recognizes the canonical CAIP-2 ids, the slugs, the legacy `solana`
+    /// alias, and any `solana:*` id; everything else is `nil`.
+    public static func clusterForCaip2(_ network: String) -> String? {
+        switch network {
+        case legacyAlias, "mainnet", "mainnet-beta", mainnet:
+            return "mainnet-beta"
+        case "solana-devnet", "devnet", "localnet", devnet:
+            return "devnet"
+        case "solana-testnet", "testnet", testnet:
+            return "testnet"
+        default:
+            return network.hasPrefix("solana:") ? "mainnet-beta" : nil
         }
     }
 }
