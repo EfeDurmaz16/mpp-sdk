@@ -50,18 +50,35 @@ case explicit_protocol
 when "x402"
   x402_active = true
   mpp_active = false
+  session_active = false
 when "mpp", "charge"
   x402_active = false
   mpp_active = true
+  session_active = false
+when "session"
+  x402_active = false
+  mpp_active = false
+  session_active = true
 else
   x402_active = !ENV["X402_INTEROP_RPC_URL"].to_s.empty?
-  mpp_active  = !ENV["MPP_INTEROP_RPC_URL"].to_s.empty?
-  if x402_active == mpp_active
-    warn "ruby-server: set exactly one of X402_INTEROP_RPC_URL / MPP_INTEROP_RPC_URL, or set PAY_KIT_INTEROP_PROTOCOL=x402|mpp"
+  session_active = !ENV["MPP_SESSION_INTEROP_RPC_URL"].to_s.empty?
+  # The session matrix shares the MPP_INTEROP_* namespace for shared
+  # fixtures, so a populated session namespace takes precedence over a
+  # bare MPP charge namespace.
+  mpp_active = !session_active && !ENV["MPP_INTEROP_RPC_URL"].to_s.empty?
+  active_count = [x402_active, mpp_active, session_active].count(true)
+  if active_count != 1
+    warn "ruby-server: set exactly one of X402_INTEROP_RPC_URL / MPP_INTEROP_RPC_URL / MPP_SESSION_INTEROP_RPC_URL, or set PAY_KIT_INTEROP_PROTOCOL=x402|mpp|session"
     exit 2
   end
 end
-protocol = x402_active ? :x402 : :mpp
+protocol = if x402_active
+  :x402
+elsif session_active
+  :session
+else
+  :mpp
+end
 
 # --- per-protocol setup -------------------------------------------------
 
@@ -102,7 +119,7 @@ if x402_active
   PayKit.pricing = pricing_class.new
 
   dispatcher = PayKit::Rack::Dispatcher.new(config: PayKit.config, pricing: PayKit.pricing)
-else
+elsif mpp_active
   # --- MPP direct-mode wiring -----------------------------------------
 
   rpc_url           = require_env("MPP_INTEROP_RPC_URL")
@@ -157,6 +174,54 @@ else
   replay_amount_int = replay_amount ? Integer(replay_amount, 10) : nil
 
   amount_int = Integer(amount_raw, 10)
+elsif session_active
+  # --- MPP session lifecycle wiring -----------------------------------
+  #
+  # The session adapter drives Mpp::Server::Session directly: it serves a
+  # 402 challenge on GET, then accepts open/voucher/commit/topUp/close
+  # POSTs that carry the SessionAction JSON in the request body. State is
+  # tracked in an in-memory ChannelStore for the lifetime of the process.
+
+  rpc_url       = require_env("MPP_SESSION_INTEROP_RPC_URL")
+  pay_to        = require_env("MPP_SESSION_INTEROP_PAY_TO")
+  operator      = optional_env("MPP_SESSION_INTEROP_OPERATOR", pay_to)
+  mint_raw      = require_env("MPP_SESSION_INTEROP_MINT")
+  cap_raw       = require_env("MPP_SESSION_INTEROP_CAP")
+  network_raw   = optional_env("MPP_SESSION_INTEROP_NETWORK", "localnet")
+  resource_path = optional_env("MPP_SESSION_INTEROP_RESOURCE_PATH", "/paid")
+  decimals_raw  = optional_env("MPP_SESSION_INTEROP_DECIMALS", "6")
+  min_delta_raw = optional_env("MPP_SESSION_INTEROP_MIN_VOUCHER_DELTA", "0")
+  modes_raw     = optional_env("MPP_SESSION_INTEROP_MODES", "")
+  pull_strategy = ENV["MPP_SESSION_INTEROP_PULL_VOUCHER_STRATEGY"]
+  splits_raw    = optional_env("MPP_SESSION_INTEROP_SPLITS", "[]")
+
+  network_label = case network_raw
+  when "mainnet" then "mainnet-beta"
+  when "devnet" then "devnet"
+  else "localnet"
+  end
+
+  session_modes = modes_raw.split(",").map(&:strip).reject(&:empty?)
+  session_modes = [::Mpp::Protocol::Intents::Session::Mode::PUSH] if session_modes.empty?
+
+  parsed_splits = JSON.parse(splits_raw)
+  session_splits = parsed_splits.map { |s| {recipient: s["recipient"], bps: Integer(s["bps"])} }
+
+  session_config = ::Mpp::Server::Session::Config.new(
+    operator: operator,
+    recipient: pay_to,
+    splits: session_splits,
+    max_cap: Integer(cap_raw, 10),
+    currency: mint_raw,
+    decimals: Integer(decimals_raw, 10),
+    network: network_label,
+    min_voucher_delta: Integer(min_delta_raw, 10),
+    modes: session_modes,
+    pull_voucher_strategy: (pull_strategy && !pull_strategy.empty?) ? pull_strategy : nil
+  )
+  session_server = ::Mpp::Server::Session.new(config: session_config)
+  session_cap_int = Integer(cap_raw, 10)
+  _ = rpc_url # reserved for future on-chain open verification
 end
 
 # --- HTTP loop ----------------------------------------------------------
@@ -175,7 +240,10 @@ def read_request(conn)
     next if value.nil?
     headers[name.downcase] = value.strip
   end
-  {method: method, path: raw_path, headers: headers}
+  body = ""
+  content_length = headers["content-length"].to_i
+  body = conn.read(content_length) || "" if content_length.positive?
+  {method: method, path: raw_path, headers: headers, body: body}
 end
 
 def write_response(conn, status, headers, body)
@@ -216,7 +284,11 @@ $stdout.write(JSON.generate({
   implementation: "ruby",
   role: "server",
   port: port,
-  capabilities: [x402_active ? "exact" : "charge"]
+  capabilities: [if x402_active
+    "exact"
+  else
+    (session_active ? "session" : "charge")
+  end]
 }) + "\n")
 $stdout.flush
 
@@ -277,6 +349,51 @@ serve_mpp = proc do |conn, req|
   end
 end
 
+# Per-request handler for the MPP session lifecycle. GET returns the 402
+# session challenge; POST carries a SessionAction (open/voucher/commit/topUp/
+# close) in the request body and drives Mpp::Server::Session.
+serve_session = proc do |conn, req|
+  session_intents = ::Mpp::Protocol::Intents::Session
+
+  if req[:method] == "GET"
+    challenge = session_server.build_challenge_request(session_cap_int)
+    write_response(conn, 402, {"content-type" => "application/json"}, {
+      ok: false, paid: false, protocol: "session", intent: "mpp/session",
+      challenge: challenge.to_h
+    })
+    next
+  end
+
+  action_json = JSON.parse(req[:body].to_s.empty? ? "{}" : req[:body])
+  action, payload = session_intents::SessionAction.from_h(action_json)
+
+  body = case action
+  when session_intents::SessionAction::OPEN
+    state = session_server.process_open(payload)
+    {ok: true, action: "open", sessionId: state.channel_id, deposit: state.deposit.to_s, cumulative: state.cumulative.to_s}
+  when session_intents::SessionAction::VOUCHER
+    cumulative = session_server.verify_voucher(payload)
+    {ok: true, action: "voucher", cumulative: cumulative.to_s}
+  when session_intents::SessionAction::COMMIT
+    receipt = session_server.process_commit(payload)
+    {ok: true, action: "commit", receipt: receipt.to_h}
+  when session_intents::SessionAction::TOP_UP
+    state = session_server.process_topup(payload)
+    {ok: true, action: "topUp", deposit: state.deposit.to_s}
+  when session_intents::SessionAction::CLOSE
+    params = session_server.process_close(payload)
+    {ok: true, action: "close", settled: params.settled.to_s, distributionHash: params.distribution_hash.unpack1("H*")}
+  else
+    nil
+  end
+
+  if body.nil?
+    write_response(conn, 400, {"content-type" => "application/json"}, {error: "unsupported session action: #{action}"})
+  else
+    write_response(conn, 200, {"content-type" => "application/json"}, body.merge(protocol: "session"))
+  end
+end
+
 loop do
   begin
     conn = listener.accept
@@ -302,9 +419,13 @@ loop do
     # replay-source path route to the same handler. The handler picks
     # the per-path expected amount.
     path_matches = (req[:path] == resource_path) ||
-      (!x402_active && replay_resource_path && req[:path] == replay_resource_path)
+      (mpp_active && replay_resource_path && req[:path] == replay_resource_path)
 
-    unless req[:method] == "GET" && path_matches
+    # Session lifecycle accepts GET (challenge) and POST (actions); the
+    # charge/x402 paths are GET-only.
+    method_ok = session_active ? %w[GET POST].include?(req[:method]) : req[:method] == "GET"
+
+    unless method_ok && path_matches
       write_response(conn, 404, {"content-type" => "application/json"}, {"error" => "not_found"})
       conn.close
       next
@@ -312,6 +433,8 @@ loop do
 
     if x402_active
       serve_x402.call(conn, req)
+    elsif session_active
+      serve_session.call(conn, req)
     else
       serve_mpp.call(conn, req)
     end

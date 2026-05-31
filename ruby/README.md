@@ -210,8 +210,16 @@ Supported on the Ruby server:
 |----------------|--------|
 | `charge/pull`  | ✅      |
 | `charge/push`  | ✅      |
-| `session`      | —      |
+| `session`      | ✅\*    |
 | `subscription` | —      |
+
+\* Session covers the server lifecycle: challenge issuance, voucher
+verification with an atomic channel store, metered-delivery commit
+(idempotent on `deliveryId`), top-up, and cooperative close. It exposes
+the payment-channels voucher bytes, channel PDA, and distribution hash for
+parity with the Rust spine. Broadcasting the on-chain finalize/distribute
+transactions is left to the host integration, which receives the resolved
+`FinalizeParams` from `process_close`.
 
 ---
 
