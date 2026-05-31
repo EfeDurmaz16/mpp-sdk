@@ -32,7 +32,13 @@ fun main() {
     // Force any unexpected logs to stderr by default; the standard
     // System.err is already off the message channel.
     try {
-        runAdapter()
+        // Opt-in session intent: the harness gates the session lifecycle
+        // adapter behind MPP_INTEROP_INTENT=session. Charge stays the default.
+        if (System.getenv("MPP_INTEROP_INTENT") == "session") {
+            runSessionAdapter()
+        } else {
+            runAdapter()
+        }
     } catch (error: Throwable) {
         System.err.println("kotlin interop adapter error: ${error.message}")
         error.printStackTrace(System.err)
@@ -119,7 +125,7 @@ private fun runAdapter() {
     }
 }
 
-private fun requireEnv(name: String): String =
+internal fun requireEnv(name: String): String =
     System.getenv(name) ?: error("$name is required")
 
 /**
