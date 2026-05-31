@@ -173,7 +173,7 @@ server subsidises the customer's network fee.
 |----------------|--------|
 | `charge/pull`  | ✅      |
 | `charge/push`  | ✅      |
-| `session`      | —      |
+| `session`      | ✅ (server) |
 | `subscription` | —      |
 
 ---

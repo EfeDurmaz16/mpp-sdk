@@ -37,6 +37,13 @@ use PayKit\Protocols\Mpp\Intent\ChargeRequest;
 use PayKit\Protocols\Mpp\MppConfig;
 use PayKit\Protocols\Mpp\Server\ChargeServer;
 use PayKit\Protocols\Mpp\Server\SolanaChargeHandler;
+use PayKit\Protocols\Mpp\Intent\Session\ClosePayload;
+use PayKit\Protocols\Mpp\Intent\Session\SessionAction;
+use PayKit\Protocols\Mpp\Intent\Session\SessionMode;
+use PayKit\Protocols\Mpp\Intent\Session\SessionSplit;
+use PayKit\Protocols\Mpp\Server\Session\MemoryChannelStore;
+use PayKit\Protocols\Mpp\Server\Session\SessionConfig;
+use PayKit\Protocols\Mpp\Server\Session\SessionServer;
 use PayKit\Protocols\X402\Adapter as X402Adapter;
 use PayKit\Signer;
 use PayKit\PayCore\Stablecoin;
@@ -81,7 +88,13 @@ function secret_key_from_json(string $raw): string
 
 $explicit = strtolower(optional_env('PAY_KIT_INTEROP_PROTOCOL', ''));
 $x402Active = false;
-if ($explicit === 'x402') {
+$sessionActive = false;
+if ($explicit === 'session' || (getenv('SESSION_INTEROP_RPC_URL') ?: '') !== '') {
+    // mpp:session intent. The shared interop harness does not ship session
+    // scenarios yet (see skills .../intents/mpp-session.md test plan), so this
+    // adapter branch stands ready for the cell that will be enabled in CI.
+    $sessionActive = true;
+} elseif ($explicit === 'x402') {
     $x402Active = true;
 } elseif ($explicit === 'mpp' || $explicit === 'charge') {
     $x402Active = false;
@@ -97,7 +110,35 @@ if ($explicit === 'x402') {
 
 // ── Per-protocol env read ───────────────────────────────────────────────────
 
-if ($x402Active) {
+// Pre-declare per-protocol locals so the three-way branch below leaves every
+// handler path with defined variables (the session branch is the third arm
+// added after the original x402/mpp split).
+$amountUnits = '0';
+$settlementHeader = 'x-payment-settlement-signature';
+$mppSecret = '';
+$paymentMode = 'pull';
+$replayPath = null;
+$replayAmount = null;
+$splits = [];
+$feePayer = null;
+$capUnits = 0;
+$operator = '';
+$minDelta = 0;
+$handler = null;
+
+if ($sessionActive) {
+    $rpcUrl       = require_env('SESSION_INTEROP_RPC_URL');
+    $payTo        = require_env('SESSION_INTEROP_PAY_TO');
+    $operator     = optional_env('SESSION_INTEROP_OPERATOR', $payTo);
+    $mint         = optional_env('SESSION_INTEROP_MINT', 'USDC');
+    $capUnits     = (int) optional_env('SESSION_INTEROP_CAP', '10000000');
+    $networkRaw   = optional_env('SESSION_INTEROP_NETWORK', 'localnet');
+    $resourcePath = optional_env('SESSION_INTEROP_RESOURCE_PATH', '/paid');
+    $minDelta     = (int) optional_env('SESSION_INTEROP_MIN_VOUCHER_DELTA', '0');
+    /** @var mixed $splitsDecoded */
+    $splitsDecoded = json_decode(optional_env('SESSION_INTEROP_SPLITS', '[]'), true, flags: JSON_THROW_ON_ERROR);
+    $splits = is_array($splitsDecoded) ? $splitsDecoded : [];
+} elseif ($x402Active) {
     $rpcUrl       = require_env('X402_INTEROP_RPC_URL');
     $payTo        = require_env('X402_INTEROP_PAY_TO');
     $facilitatorSecretJson = require_env('X402_INTEROP_FACILITATOR_SECRET_KEY');
@@ -126,7 +167,31 @@ if ($x402Active) {
 
 // ── Boot the SDK ────────────────────────────────────────────────────────────
 
-if ($x402Active) {
+if ($sessionActive) {
+    // mpp:session mode: build a SessionServer over an in-process channel
+    // store. The same code path serves the SessionRequest challenge and walks
+    // the open -> voucher -> topUp -> close lifecycle from the client's
+    // base64url-encoded SessionAction header.
+    $sessionSplits = [];
+    foreach ($splits as $split) {
+        if (is_array($split) && isset($split['recipient'], $split['bps']) && is_int($split['bps'])) {
+            $sessionSplits[] = new SessionSplit((string) $split['recipient'], $split['bps']);
+        }
+    }
+    $sessionServer = new SessionServer(
+        new SessionConfig(
+            operator: $operator,
+            recipient: $payTo,
+            maxCap: $capUnits,
+            currency: $mint,
+            network: $networkRaw,
+            splits: $sessionSplits,
+            minVoucherDelta: $minDelta,
+            modes: [SessionMode::Push],
+        ),
+        new MemoryChannelStore(),
+    );
+} elseif ($x402Active) {
     // x402 mode: build the umbrella Client + X402 Adapter with the
     // facilitator key as the operator's signer.
     $signer = Signer::json($facilitatorSecretJson);
@@ -288,6 +353,46 @@ function psr7_from_socket(array $req): \Psr\Http\Message\ServerRequestInterface
     return $r;
 }
 
+/**
+ * Dispatch one decoded SessionAction against the SessionServer and return the
+ * JSON body the harness reads back.
+ *
+ * @return array<string,mixed>
+ */
+function handle_session_action(SessionServer $server, SessionAction $action): array
+{
+    switch ($action->action) {
+        case SessionAction::OPEN:
+            $state = $server->processOpen($action->open);
+            return [
+                'ok' => true,
+                'action' => 'open',
+                'channelId' => $state->channelId,
+                'deposit' => (string) $state->deposit,
+            ];
+        case SessionAction::VOUCHER:
+            $cumulative = $server->verifyVoucher($action->voucher);
+            return ['ok' => true, 'action' => 'voucher', 'cumulative' => (string) $cumulative];
+        case SessionAction::COMMIT:
+            $receipt = $server->processCommit($action->commit);
+            return array_merge(['ok' => true, 'action' => 'commit'], $receipt->toArray());
+        case SessionAction::TOP_UP:
+            $state = $server->processTopup($action->topUp);
+            return ['ok' => true, 'action' => 'topUp', 'deposit' => (string) $state->deposit];
+        case SessionAction::CLOSE:
+            $params = $server->processClose($action->close);
+            return [
+                'ok' => true,
+                'action' => 'close',
+                'channelId' => $params->channelId,
+                'settled' => (string) $params->settled,
+                'distributionHash' => bin2hex($params->distributionHash),
+            ];
+        default:
+            throw new InvalidArgumentException('unknown session action');
+    }
+}
+
 // ── Listen + accept ─────────────────────────────────────────────────────────
 
 $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
@@ -307,7 +412,7 @@ fwrite(STDOUT, json_encode([
     'implementation' => 'php',
     'role'           => 'server',
     'port'           => $port,
-    'capabilities'   => [$x402Active ? 'exact' : 'charge'],
+    'capabilities'   => [$sessionActive ? 'session' : ($x402Active ? 'exact' : 'charge')],
 ], JSON_THROW_ON_ERROR) . "\n");
 fflush(STDOUT);
 
@@ -340,7 +445,7 @@ while (is_resource($listener)) {
             continue;
         }
         $isProtected = ($req['method'] === 'GET' && $req['path'] === $resourcePath);
-        $isReplay = (!$x402Active && $req['method'] === 'GET'
+        $isReplay = (!$x402Active && !$sessionActive && $req['method'] === 'GET'
             && isset($replayPath) && $replayPath !== null && $req['path'] === $replayPath);
         if (!$isProtected && !$isReplay) {
             write_response($conn, 404, ['content-type' => 'application/json'], ['error' => 'not_found']);
@@ -348,7 +453,41 @@ while (is_resource($listener)) {
             continue;
         }
 
-        if ($x402Active) {
+        if ($sessionActive) {
+            // mpp:session path. With no `payment-session` credential, emit a
+            // 402 carrying the SessionRequest challenge. With one, decode the
+            // base64url SessionAction and drive the channel lifecycle.
+            $credential = $req['headers']['payment-session'] ?? '';
+            if ($credential === '') {
+                $challenge = $sessionServer->buildChallengeRequest($capUnits);
+                write_response($conn, 402, ['content-type' => 'application/json'], [
+                    'error'    => 'payment_required',
+                    'resource' => $req['path'],
+                    'session'  => $challenge->toArray(),
+                ]);
+            } else {
+                try {
+                    $decoded = base64_decode(strtr($credential, '-_', '+/'), true);
+                    if ($decoded === false) {
+                        throw new InvalidArgumentException('payment-session is not valid base64url');
+                    }
+                    /** @var mixed $actionJson */
+                    $actionJson = json_decode($decoded, true, flags: JSON_THROW_ON_ERROR);
+                    if (!is_array($actionJson)) {
+                        throw new InvalidArgumentException('payment-session must decode to a JSON object');
+                    }
+                    /** @var array<string,mixed> $actionJson */
+                    $action = SessionAction::fromArray($actionJson);
+                    $body = handle_session_action($sessionServer, $action);
+                    write_response($conn, 200, ['content-type' => 'application/json'], $body);
+                } catch (Throwable $e) {
+                    write_response($conn, 402, ['content-type' => 'application/json'], [
+                        'error'   => 'invalid_session_action',
+                        'message' => $e->getMessage(),
+                    ]);
+                }
+            }
+        } elseif ($x402Active) {
             // x402 path through the umbrella adapter.
             $psrReq = psr7_from_socket($req);
             $sig = $req['headers']['payment-signature'] ?? '';
@@ -386,8 +525,8 @@ while (is_resource($listener)) {
                     ]);
                 }
             }
-        } else {
-            // Existing MPP path (untouched).
+        } elseif ($handler !== null) {
+            // Existing MPP charge path.
             $protectedAmount = $isReplay && $replayAmount !== null ? (string) $replayAmount : $amountUnits;
             $request = build_charge_request($protectedAmount, $mint, $payTo, $networkRaw, $paymentMode, $handler->feePayerPubkey(), $splits);
             $authorization = $req['headers']['authorization'] ?? null;
