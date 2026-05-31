@@ -233,6 +233,43 @@ function extractRecentBlockhash(clientTxBase64: string): string | null {
 const MAX_COMPUTE_UNIT_LIMIT = 200_000;
 const MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS = 5_000_000n;
 
+/**
+ * Pure, RPC-free structural verifier for an MPP charge transaction.
+ *
+ * Decodes the base64 wire transaction and runs the same pre-broadcast
+ * checks the server performs before it would broadcast (transfer shape,
+ * fee-payer guards, ATA-creation allowlist, compute-budget caps, memo
+ * matching, decimals). It performs NO network I/O, so it is suitable for
+ * the cross-SDK conformance-vector harness where the decoded semantic
+ * shape (not on-chain settlement) is the oracle.
+ *
+ * Resolves on accept; throws on the first violation. The thrown message
+ * is stable enough to classify into a canonical reject code.
+ */
+export async function verifyChargeTransaction(
+    clientTxBase64: string,
+    challenge: ChargeChallengeRequest,
+): Promise<void> {
+    await verifyBase64TransactionPreBroadcast(clientTxBase64, challenge as ChallengeRequest);
+}
+
+/** Public alias of the internal challenge-request shape for the verifier. */
+export type ChargeChallengeRequest = {
+    amount: string;
+    currency: string;
+    externalId?: string;
+    methodDetails: {
+        decimals?: number;
+        feePayer?: boolean;
+        feePayerKey?: string;
+        network?: string;
+        recentBlockhash?: string;
+        splits?: Array<{ amount: string; ataCreationRequired?: boolean; memo?: string; recipient: string }>;
+        tokenProgram?: string;
+    };
+    recipient: string;
+};
+
 type CompiledMessage = {
     addressTableLookups?: readonly unknown[];
     instructions: readonly CompiledInstruction[];

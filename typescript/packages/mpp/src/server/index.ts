@@ -1,5 +1,6 @@
 export * from '../constants.js';
-export { charge } from './Charge.js';
+export { charge, verifyChargeTransaction } from './Charge.js';
+export type { ChargeChallengeRequest } from './Charge.js';
 export { solana } from './Methods.js';
 // Re-export Mppx so consumers can do: import { Mppx, solana } from 'solana-mpp-sdk/server'
 export { Mppx, Expires, Store } from 'mppx/server';
