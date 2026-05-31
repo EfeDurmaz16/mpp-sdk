@@ -6,6 +6,7 @@ require_relative "mpp/version"
 require_relative "mpp/error"
 require_relative "mpp/expires"
 require_relative "mpp/store"
+require_relative "mpp/channel_store"
 require_relative "mpp/challenge"
 require_relative "mpp/settlement"
 
@@ -15,11 +16,15 @@ require_relative "mpp/protocol/core/receipt"
 require_relative "mpp/protocol/core/headers"
 require_relative "mpp/protocol/core/challenge_store"
 require_relative "mpp/protocol/intents/charge"
+require_relative "mpp/protocol/intents/session"
 require_relative "mpp/protocol/solana/verification_result"
 require_relative "mpp/protocol/solana/verifier"
 require_relative "mpp/protocol/solana"
 
+require_relative "mpp/program/payment_channels"
+
 require_relative "mpp/server/charge"
+require_relative "mpp/server/session"
 require_relative "mpp/server/decorator"
 require_relative "mpp/server/middleware"
 
