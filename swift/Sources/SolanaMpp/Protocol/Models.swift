@@ -35,6 +35,18 @@ public struct PaymentChallenge: Codable, Equatable, Sendable {
         }
     }
 
+    /// Decode the embedded `SessionRequest` for a `mpp/session` challenge.
+    public var sessionRequest: SessionRequest {
+        get throws {
+            let data = try Base64URL.decode(request)
+            do {
+                return try JSONDecoder().decode(SessionRequest.self, from: data)
+            } catch {
+                throw MppError.invalidJSON(String(describing: error))
+            }
+        }
+    }
+
     public init(
         id: String,
         realm: String,
@@ -58,6 +70,12 @@ public struct PaymentChallenge: Codable, Equatable, Sendable {
 
     public func requireSolanaCharge() throws {
         guard method == "solana", intent == "charge" else {
+            throw MppError.unsupportedChallenge(method: method, intent: intent)
+        }
+    }
+
+    public func requireSolanaSession() throws {
+        guard method == "solana", intent == "session" else {
             throw MppError.unsupportedChallenge(method: method, intent: intent)
         }
     }
