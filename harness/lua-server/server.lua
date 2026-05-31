@@ -63,6 +63,18 @@ end
 
 local protocol = x402_active and 'x402' or 'mpp'
 
+-- Session intent branch. The cross-language harness does not ship session
+-- scenarios yet (see skills/.../mpp-session.md test plan), so this branch is
+-- opt-in: it only activates when the orchestrator sets
+-- MPP_INTEROP_INTENT=session. When active, the adapter drives the stateful
+-- session lifecycle (open -> voucher/commit -> topUp -> close) over the same
+-- TCP loop rather than the single-GET charge flow. Byte parity for vouchers
+-- and the channel PDA is proven by the golden-vector unit tests
+-- (lua/tests/session_*_spec.lua); full surfpool interop can only be validated
+-- in CI once a session scenario lands in harness/src/contracts.ts.
+local session_active = (not x402_active)
+  and ((os.getenv('MPP_INTEROP_INTENT') or ''):lower() == 'session')
+
 -- --- per-protocol env read -----------------------------------------
 
 local rpc_url, pay_to, amount_units, mint, resource_path, network_raw
@@ -176,6 +188,76 @@ if #splits_decoded > 0 then
   require('pay_kit.protocols.mpp').set_splits_override('paid', override)
 end
 
+-- --- session server (opt-in) ---------------------------------------
+
+-- Build the stateful session server when the session intent is active. The
+-- charge gate above stays registered so the /health handshake and the 402
+-- challenge advertisement still work; session endpoints are layered on top.
+local session_server
+if session_active then
+  local session_handler = require('pay_kit.protocols.mpp.server.session_handler')
+  local session_mod = require('pay_kit.protocols.mpp.session')
+  local session_network = ({
+    solana_mainnet = 'mainnet',
+    solana_devnet = 'devnet',
+    solana_localnet = 'localnet',
+  })[network_sym] or 'localnet'
+  session_server = session_handler.new({
+    operator = pay_to,
+    recipient = pay_to,
+    splits = (function()
+      local out = {}
+      for _, s in ipairs(splits_decoded) do
+        if s.bps then out[#out + 1] = { recipient = s.recipient, bps = s.bps } end
+      end
+      return out
+    end)(),
+    max_cap = optional_env('MPP_INTEROP_SESSION_CAP', '10000000'),
+    currency = mint,
+    decimals = 6,
+    network = session_network,
+    min_voucher_delta = optional_env('MPP_INTEROP_MIN_VOUCHER_DELTA', nil),
+    modes = { session_mod.MODE_PUSH },
+  })
+  log('session intent active (cap ' .. optional_env('MPP_INTEROP_SESSION_CAP', '10000000') .. ')')
+end
+
+-- Dispatch a single session lifecycle action posted as JSON. Returns
+-- (status, body_table). Mirrors the action tags on the wire: open, voucher,
+-- commit, topUp, close.
+local function handle_session_action(body_json)
+  local action = body_json and body_json.action
+  local dispatched, result = pcall(function()
+    if action == 'open' then
+      local state = session_server:process_open(body_json)
+      return { ok = true, channelId = state.channel_id, deposit = state.deposit }
+    elseif action == 'voucher' then
+      local cumulative = session_server:verify_voucher(body_json)
+      return { ok = true, cumulative = cumulative }
+    elseif action == 'commit' then
+      return session_server:process_commit(body_json)
+    elseif action == 'topUp' then
+      local state = session_server:process_topup(body_json)
+      return { ok = true, deposit = state.deposit }
+    elseif action == 'close' then
+      local params = session_server:process_close(body_json)
+      return { ok = true, settled = params.settled, channelId = params.channel_id }
+    elseif action == 'beginDelivery' then
+      return session_server:begin_delivery({
+        session_id = body_json.sessionId,
+        amount = body_json.amount,
+        delivery_id = body_json.deliveryId,
+      })
+    end
+    error('unsupported session action: ' .. tostring(action))
+  end)
+  if dispatched then
+    return 200, result
+  end
+  local message = type(result) == 'table' and result.message or tostring(result)
+  return 402, { error = message, code = 'session_action_rejected' }
+end
+
 -- --- HTTP loop -----------------------------------------------------
 
 local function send_response(client, status, hdrs, body)
@@ -201,7 +283,13 @@ local function read_request(client)
     local name, value = line:match('^([^:]+):%s*(.+)$')
     if name then req_headers[name:lower()] = value end
   end
-  return {method = method, path = path, headers = req_headers}
+  -- Read a body when Content-Length is present (session lifecycle POSTs).
+  local body
+  local content_length = tonumber(req_headers['content-length'] or '')
+  if content_length and content_length > 0 then
+    body = client:receive(content_length)
+  end
+  return {method = method, path = path, headers = req_headers, body = body}
 end
 
 local listener, bind_err = socket.bind('127.0.0.1', 0)
@@ -213,7 +301,7 @@ io.stdout:write(cjson.encode({
   implementation = 'lua',
   role = 'server',
   port = port,
-  capabilities = {x402_active and 'exact' or 'charge'},
+  capabilities = {x402_active and 'exact' or (session_active and 'session' or 'charge')},
 }) .. '\n')
 io.stdout:flush()
 
@@ -226,6 +314,16 @@ while true do
     client:close()
   elseif req.method == 'GET' and req.path == '/health' then
     send_response(client, 200, {['content-type'] = 'application/json'}, {ok = true})
+    client:close()
+  elseif session_active and req.method == 'POST' and req.path == '/session' then
+    local parsed = req.body and cjson.decode(req.body) or nil
+    if type(parsed) ~= 'table' then
+      send_response(client, 400, {['content-type'] = 'application/json'},
+        {error = 'invalid session action body'})
+    else
+      local status, body = handle_session_action(parsed)
+      send_response(client, status, {['content-type'] = 'application/json'}, body)
+    end
     client:close()
   elseif req.method == 'GET' and req.path == resource_path then
     local payment, perr, response = pay_kit.try_payment('paid', {
