@@ -94,6 +94,18 @@ func TestPeriodHoursValidatesRange(t *testing.T) {
 	if got, err := atBound.PeriodHours(); err != nil || got != 8760 {
 		t.Fatalf("at-bound period_hours = %d, err = %v; want 8760", got, err)
 	}
+
+	// Unparseable periodCount short-circuits PeriodHours before the unit mapping.
+	badCount := SubscriptionRequest{PeriodUnit: PeriodUnitDay, PeriodCount: "not-a-number"}
+	if _, err := badCount.PeriodHours(); err == nil {
+		t.Fatal("unparseable periodCount must error")
+	}
+
+	// An unsupported unit propagates the ToPeriodHours error through PeriodHours.
+	badUnit := SubscriptionRequest{PeriodUnit: SubscriptionPeriodUnit("month"), PeriodCount: "1"}
+	if _, err := badUnit.PeriodHours(); err == nil {
+		t.Fatal("unsupported periodUnit must error")
+	}
 }
 
 func TestParseAmountAndPeriodCount(t *testing.T) {
