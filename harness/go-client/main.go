@@ -51,6 +51,13 @@ func main() {
 		}
 		return
 	}
+	if os.Getenv("MPP_SESSION_INTEROP_TARGET_URL") != "" {
+		if err := runSessionAdapter(os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if os.Getenv("MPP_INTEROP_TARGET_URL") != "" {
 		if err := runProcessAdapter(os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "FAIL: %v\n", err)

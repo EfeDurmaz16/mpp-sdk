@@ -47,6 +47,9 @@ type readyMessage struct {
 
 func main() {
 	protocolMode := strings.ToLower(os.Getenv("PAY_KIT_INTEROP_PROTOCOL"))
+	if strings.EqualFold(os.Getenv("MPP_SESSION_INTEROP_PROTOCOL"), "session") {
+		protocolMode = "session"
+	}
 	if protocolMode == "" {
 		switch {
 		case os.Getenv("X402_INTEROP_RPC_URL") != "":
@@ -54,7 +57,7 @@ func main() {
 		case os.Getenv("MPP_INTEROP_RPC_URL") != "":
 			protocolMode = "mpp"
 		default:
-			log.Fatal("set exactly one of X402_INTEROP_RPC_URL / MPP_INTEROP_RPC_URL, or PAY_KIT_INTEROP_PROTOCOL")
+			log.Fatal("set exactly one of X402_INTEROP_RPC_URL / MPP_INTEROP_RPC_URL, MPP_SESSION_INTEROP_PROTOCOL, or PAY_KIT_INTEROP_PROTOCOL")
 		}
 	}
 
@@ -80,6 +83,8 @@ func main() {
 		mountX402(mux, resourcePath, settlementHeader)
 	case "mpp":
 		mountMPP(mux, resourcePath, settlementHeader)
+	case "session":
+		mountSession(mux)
 	default:
 		log.Fatalf("unknown protocol %q", protocolMode)
 	}
