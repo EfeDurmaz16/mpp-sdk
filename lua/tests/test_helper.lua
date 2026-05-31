@@ -58,16 +58,46 @@ local SKIP = {
 
 -- Under luacov instrumentation the LuaJIT trace recorder is disabled, so
 -- the pure-Lua modular-arithmetic on-curve check in mpp/methods/solana/ata
--- becomes ~100x slower. Skip only the heaviest ATA spec (which derives
--- twice). The verifier specs that internally call ata.derive still run
--- under coverage, because letting them in gives us branch coverage for
--- the SPL transferChecked / ATA-allowlist code paths.
+-- becomes ~100x slower. Skip only the heaviest ATA standalone spec (which
+-- drives find_program_address from scratch). Verifier / x402 specs that
+-- internally call ata.derive still run under coverage to exercise the SPL
+-- transferChecked / ATA-allowlist code paths; those calls are fast because
+-- the ATA stub below resolves them from a pre-computed lookup table.
 local SLOW_UNDER_COVER = {
   ['ata.derive matches the Ruby reference for the USDC Token-2022 ATA'] = true,
+  ['ata.derive matches the Ruby reference for the USDC SPL Token ATA'] = true,
+  ['on-curve check matches known reference vectors after the bignum cleanup'] = true,
 }
 if package.loaded['luacov'] then
   for name, _ in pairs(SLOW_UNDER_COVER) do
     SKIP[name] = true
+  end
+
+  -- Replace ata.derive with a lookup-table stub so the bignum on-curve loop
+  -- does not run under instrumentation. Keys are "owner:mint:token_program";
+  -- values are the pre-computed base58 ATA addresses (cross-checked against
+  -- the Ruby reference at ruby/lib/mpp/methods/solana/associated_token.rb and
+  -- the ata.derive tests that run in the non-coverage suite pass).
+  local ok_ata, ata_mod = pcall(require, 'pay_kit.solana.ata')
+  if ok_ata then
+    local ATA_CACHE = {
+      -- verifier_spec + solana_verify_spec fixtures (all use TOKEN_PROGRAM):
+      -- owner = \x01*32, \x03*32  with USDC mainnet
+      ['4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v:TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA']
+        = 'Gs6NxmndAL3PULGZeYUHCknpMdDVbL46eFCBh856p5z6',
+      ['CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v:TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA']
+        = 'GewoiTtgmMFV5vERJqe64UJXUW2ygmxtAxZ8mhpju1dH',
+      -- x402 spec fixture: pay_to = \x05*32, mint = \x04*32, TOKEN_PROGRAM
+      ['LbUiWL3xVV8hTFYBVdbTNrpDo41NKS6o3LHHuDzjfcY:GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq:TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA']
+        = 'ExdJGUaW8C3EL2TDp4poEekZhYBUhmt8WJa7d8T1kD7d',
+    }
+    local _real_derive = ata_mod.derive
+    ata_mod.derive = function(owner, mint, token_program)
+      local key = owner .. ':' .. mint .. ':' .. token_program
+      local cached = ATA_CACHE[key]
+      if cached then return cached end
+      return _real_derive(owner, mint, token_program)
+    end
   end
 end
 
