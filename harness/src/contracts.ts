@@ -1,12 +1,13 @@
 import type { CanonicalErrorCode } from "./canonical-codes";
 import { chargeScenarios } from "./intents/charge";
+import { sessionScenarios } from "./intents/session";
 import { x402ExactScenarios } from "./intents/x402-exact";
 
 export type { CanonicalErrorCode };
 
 export type AdapterKind = "client" | "server";
 
-export type InteropIntent = "charge" | "x402-exact";
+export type InteropIntent = "charge" | "x402-exact" | "session";
 
 export type InteropScenarioSplit = {
   recipientKey: string;
@@ -136,10 +137,18 @@ export type ClientRunResult = {
 export type AdapterMessage = ReadyMessage | ClientRunResult;
 
 export { chargeCanonicalJsonVectors } from "./intents/charge";
+export {
+  sessionCanonicalJsonVectors,
+  sessionVoucherBytesVectors,
+  sessionSaltVectors,
+  sessionCumulativeVectors,
+  sessionDeliveryIdVectors,
+} from "./intents/session";
 
 export const interopScenarios: readonly InteropScenario[] = [
   ...chargeScenarios,
   ...x402ExactScenarios,
+  ...sessionScenarios,
 ];
 
 export const interopScenario: InteropScenario = {

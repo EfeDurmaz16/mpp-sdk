@@ -18,6 +18,10 @@ describe("interop intent selection", () => {
     expect(selectInteropIntents("x402-exact")).toEqual(["x402-exact"]);
   });
 
+  it("accepts the foundation session intent", () => {
+    expect(selectInteropIntents("session")).toEqual(["session"]);
+  });
+
   it("accepts both intents at once", () => {
     expect(selectInteropIntents("charge,x402-exact")).toEqual([
       "charge",
@@ -25,8 +29,8 @@ describe("interop intent selection", () => {
     ]);
   });
 
-  it("rejects scenarios that are not implemented yet", () => {
-    expect(() => selectInteropIntents("session")).toThrow(
+  it("rejects intents that are not registered", () => {
+    expect(() => selectInteropIntents("subscription")).toThrow(
       /Unsupported MPP_INTEROP_INTENTS/,
     );
   });
