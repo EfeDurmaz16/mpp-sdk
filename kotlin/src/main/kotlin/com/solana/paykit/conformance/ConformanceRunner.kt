@@ -3,6 +3,7 @@ package com.solana.paykit.conformance
 import com.solana.paykit.paycore.Base58
 import com.solana.paykit.paycore.Base64Url
 import com.solana.paykit.paycore.MemorySigner
+import com.solana.paykit.paycore.Network
 import com.solana.paykit.paycore.Programs
 import com.solana.paykit.paycore.resolveStablecoinMint
 import com.solana.paykit.protocols.mpp.client.BlockhashProvider
@@ -12,6 +13,10 @@ import com.solana.paykit.protocols.mpp.core.CanonicalJson
 import com.solana.paykit.protocols.mpp.core.ChargeRequest
 import com.solana.paykit.protocols.mpp.core.SolanaChargeMethodDetails
 import com.solana.paykit.protocols.mpp.core.SolanaChargeSplit
+import com.solana.paykit.protocols.x402.client.exact.buildPaymentHeader
+import com.solana.paykit.protocols.x402.client.exact.buildPaymentHeaderV1
+import com.solana.paykit.protocols.x402.exact.X402AcceptsEntry
+import com.solana.paykit.protocols.x402.exact.X402Extra
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -82,9 +87,13 @@ fun main() {
 
 private fun runVector(vector: JsonObject): JsonObject {
     val id = vector["id"]?.jsonPrimitive?.contentOrNull ?: ""
+    val intent = vector["intent"]?.jsonPrimitive?.contentOrNull ?: "charge"
     val mode = vector["mode"]?.jsonPrimitive?.contentOrNull ?: ""
     val input = vector["input"]?.jsonObject ?: JsonObject(emptyMap())
     return try {
+        if (intent == "x402-exact") {
+            return runX402Vector(id, mode, input)
+        }
         when (mode) {
             "canonical-bytes" -> accept(id, exactBytes = runCanonicalBytes(input))
             "build-transaction" -> {
@@ -138,11 +147,13 @@ private fun accept(
     id: String,
     transactionShape: JsonObject? = null,
     exactBytes: JsonObject? = null,
+    x402EnvelopeShape: JsonObject? = null,
 ): JsonObject = buildJsonObject {
     put("id", id)
     put("outcome", "accept")
     if (transactionShape != null) put("transactionShape", transactionShape)
     if (exactBytes != null) put("exactBytes", exactBytes)
+    if (x402EnvelopeShape != null) put("x402EnvelopeShape", x402EnvelopeShape)
 }
 
 private fun reject(id: String, error: String): JsonObject = buildJsonObject {
@@ -157,6 +168,122 @@ private fun unsupported(id: String, mode: String): JsonObject = buildJsonObject 
     put("id", id)
     put("outcome", "unsupported-mode")
     put("error", "kotlin SDK is client-only and does not support $mode vectors")
+}
+
+// ── x402-exact intent ─────────────────────────────────────────────────────────
+
+/**
+ * Deterministic 32-byte blockhash for the offline x402 build path. The
+ * conformance oracle is the DECODED ENVELOPE shape, not the signed Solana
+ * transaction inside `payload.transaction` (that is the interop matrix's job),
+ * so any valid 32-byte blockhash produces an envelope of the right shape. The
+ * value is the 32-byte zero vector encoded base58, kept pinned so the build is
+ * RPC-free and reproducible.
+ */
+private val X402_OFFLINE_BLOCKHASH = ByteArray(32)
+
+/** Pinned memo nonce so the x402 build path is fully deterministic. */
+private const val X402_FIXED_NONCE = "00000000000000000000000000000000"
+
+/**
+ * x402-exact runner. ROLE: the Kotlin SDK is a CLIENT, so it can BUILD a
+ * payment header but has no pre-broadcast server verifier. A build vector
+ * drives the real Kotlin x402 client (buildPaymentHeader for v2 /
+ * buildPaymentHeaderV1 for v1) over the vector offer, decodes the resulting
+ * base64(JSON) envelope, and emits the X402EnvelopeShape oracle the driver
+ * asserts (x402Version, top-level scheme/network for v1, the echoed `accepted`
+ * offer for v2, payloadHasTransaction). A verify vector is emitted as
+ * "unsupported-mode" so the driver SKIPs it for Kotlin.
+ *
+ * The build is RPC-free and deterministic: the blockhash is pinned
+ * ([X402_OFFLINE_BLOCKHASH]) and the memo nonce is fixed ([X402_FIXED_NONCE]),
+ * so a missing offer.recentBlockhash never reaches for a live RPC.
+ */
+private fun runX402Vector(id: String, mode: String, input: JsonObject): JsonObject = when (mode) {
+    "build-transaction" -> {
+        val offer = input["x402Offer"]?.jsonObject
+            ?: throw IllegalArgumentException("invalid payload: x402 build vector missing input.x402Offer")
+        val version = input["x402Version"]?.jsonPrimitive?.intOrNull ?: 2
+        val header = buildX402Header(version, offer)
+        accept(id, x402EnvelopeShape = decodeEnvelopeShape(header))
+    }
+    // CLIENT-only SDK: no x402 server verifier. Signal unsupported so the
+    // driver SKIPs the verify vectors for Kotlin rather than failing them.
+    "verify-transaction" -> unsupported(id, "x402 verify-transaction")
+    else -> reject(id, "unsupported x402 mode \"$mode\"")
+}
+
+/**
+ * Maps a conformance vector x402 offer onto the [X402AcceptsEntry] the real
+ * client consumes, then builds the v1 or v2 payment header through the SDK.
+ *
+ * The offer's `network` is a CAIP-2 id; it is passed through verbatim so the
+ * client's v1 network resolver (v1NetworkForRequirement) derives the legacy
+ * slug ("solana-devnet" vs "solana") exactly as the rust spine does. The
+ * pinned blockhash and fixed nonce keep the build offline and reproducible.
+ */
+private fun buildX402Header(version: Int, offer: JsonObject): String {
+    val str = { key: String -> offer[key]?.jsonPrimitive?.contentOrNull }
+    val extraObj = offer["extra"]?.jsonObject
+    val extra = if (extraObj != null) {
+        X402Extra(
+            feePayer = extraObj["feePayer"]?.jsonPrimitive?.contentOrNull,
+            decimals = extraObj["decimals"]?.jsonPrimitive?.intOrNull,
+            tokenProgram = extraObj["tokenProgram"]?.jsonPrimitive?.contentOrNull,
+            memo = extraObj["memo"]?.jsonPrimitive?.contentOrNull,
+            recentBlockhash = extraObj["recentBlockhash"]?.jsonPrimitive?.contentOrNull,
+        )
+    } else {
+        null
+    }
+
+    val requirement = X402AcceptsEntry(
+        scheme = str("scheme") ?: "exact",
+        network = str("network"),
+        asset = str("asset"),
+        amount = str("amount"),
+        payTo = str("payTo"),
+        maxTimeoutSeconds = offer["maxTimeoutSeconds"]?.jsonPrimitive?.intOrNull,
+        extra = extra,
+    )
+
+    val signer = MemorySigner.generate()
+    val blockhash = { X402_OFFLINE_BLOCKHASH }
+    val nonce = { X402_FIXED_NONCE }
+    return if (version == 1) {
+        buildPaymentHeaderV1(signer, requirement, blockhash, nonce)
+    } else {
+        buildPaymentHeader(signer, requirement, blockhash, nonce)
+    }
+}
+
+/**
+ * Decodes a base64(JSON) x402 envelope into the X402EnvelopeShape oracle the
+ * driver asserts. Mirrors the TS reference decodeEnvelopeShape: field presence
+ * is meaningful — `scheme`/`network` present iff v1, `hasAccepted` true iff v2,
+ * and the v2 `accepted` offer fields are surfaced so a build that drops or
+ * rewrites the offer is caught. `payloadHasTransaction` is true iff the payload
+ * carries a non-empty base64 transaction proof.
+ */
+private fun decodeEnvelopeShape(header: String): JsonObject {
+    val raw = Base64.getDecoder().decode(header).toString(Charsets.UTF_8)
+    val env = json.parseToJsonElement(raw).jsonObject
+    val accepted = env["accepted"]?.jsonObject
+    val payloadTx = env["payload"]?.jsonObject?.get("transaction")?.jsonPrimitive?.contentOrNull
+    return buildJsonObject {
+        put("x402Version", env["x402Version"]!!.jsonPrimitive.int)
+        put("hasAccepted", accepted != null)
+        put("payloadHasTransaction", payloadTx != null && payloadTx.isNotEmpty())
+        env["scheme"]?.jsonPrimitive?.contentOrNull?.let { put("scheme", it) }
+        env["network"]?.jsonPrimitive?.contentOrNull?.let { put("network", it) }
+        if (accepted != null) {
+            accepted["scheme"]?.jsonPrimitive?.contentOrNull?.let { put("acceptedScheme", it) }
+            accepted["network"]?.jsonPrimitive?.contentOrNull?.let { put("acceptedNetwork", it) }
+            accepted["asset"]?.jsonPrimitive?.contentOrNull?.let { put("acceptedAsset", it) }
+            accepted["payTo"]?.jsonPrimitive?.contentOrNull?.let { put("acceptedPayTo", it) }
+            accepted["amount"]?.jsonPrimitive?.contentOrNull?.let { put("acceptedAmount", it) }
+        }
+    }
 }
 
 /**
