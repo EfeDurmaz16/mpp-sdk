@@ -101,6 +101,39 @@ private fun runVector(vector: JsonObject): JsonObject {
     }
 }
 
+/**
+ * Maps the Kotlin SDK's native reject message onto the shared cross-SDK
+ * RejectCode vocabulary so the harness can assert a normalized reject CATEGORY
+ * regardless of per-SDK wording. Returns null when the message does not match a
+ * known category, in which case no rejectCode is emitted.
+ *
+ * Kotlin is a CLIENT-only SDK, so in practice only the build-path splits reject
+ * ("Splits consume the entire amount") is exercised today; the remaining arms
+ * keep the classifier complete against the shared vocabulary for future
+ * coverage and parity with the other runners.
+ */
+private fun classifyReject(message: String): String? {
+    val m = message.lowercase()
+    fun has(vararg needles: String): Boolean = needles.all { m.contains(it) }
+    return when {
+        has("splits consume the entire amount") -> "splits-exceed-amount"
+        has("primary", "positive") -> "splits-exceed-amount"
+        has("split", "exceed") -> "splits-exceed-amount"
+        has("too many splits") -> "too-many-splits"
+        has("compute unit price", "exceed") && (m.contains("cap") || m.contains("maximum")) ->
+            "compute-price-over-cap"
+        has("compute unit limit", "exceed") -> "compute-limit-over-cap"
+        has("fee payer cannot authorize") -> "fee-payer-not-authority"
+        (m.contains("no matching") || m.contains("unexpected")) && m.contains("transfer") ->
+            "no-matching-transfer"
+        m.contains("amount") && (m.contains("mismatch") || m.contains("does not match")) ->
+            "amount-mismatch"
+        m.contains("invalid") || m.contains("malformed") || m.contains("decode") ||
+            m.contains("payload") -> "invalid-payload"
+        else -> null
+    }
+}
+
 private fun accept(
     id: String,
     transactionShape: JsonObject? = null,
@@ -116,6 +149,8 @@ private fun reject(id: String, error: String): JsonObject = buildJsonObject {
     put("id", id)
     put("outcome", "reject")
     put("error", error)
+    val code = classifyReject(error)
+    if (code != null) put("rejectCode", code)
 }
 
 private fun unsupported(id: String, mode: String): JsonObject = buildJsonObject {
