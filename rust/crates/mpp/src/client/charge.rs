@@ -45,6 +45,10 @@ pub async fn build_charge_transaction(
 pub struct BuildChargeTransactionOptions {
     /// Optional root payment memo. Spec-aligned callers pass `ChargeRequest.externalId`.
     pub external_id: Option<String>,
+    /// Override the SetComputeUnitLimit value. Defaults to 200_000 when `None`.
+    pub compute_unit_limit: Option<u32>,
+    /// Override the SetComputeUnitPrice micro-lamport value. Defaults to 1 when `None`.
+    pub compute_unit_price: Option<u64>,
 }
 
 /// Options for selecting one Solana charge challenge from a challenge set.
@@ -106,8 +110,10 @@ pub async fn build_charge_transaction_with_options(
     let mut instructions = Vec::new();
 
     // Compute budget.
-    instructions.push(compute_unit_price_ix(1));
-    instructions.push(compute_unit_limit_ix(200_000));
+    instructions.push(compute_unit_price_ix(options.compute_unit_price.unwrap_or(1)));
+    instructions.push(compute_unit_limit_ix(
+        options.compute_unit_limit.unwrap_or(200_000),
+    ));
 
     let mint = resolve_mint(currency, method_details.network.as_deref());
     let has_ata_creation_splits = splits
@@ -222,6 +228,7 @@ pub async fn build_credential_header(
         &method_details,
         BuildChargeTransactionOptions {
             external_id: request.external_id.clone(),
+            ..Default::default()
         },
     )
     .await?;
