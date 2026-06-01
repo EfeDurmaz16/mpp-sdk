@@ -44,18 +44,29 @@ function loadVectors(): ConformanceVector[] {
 }
 
 // One CLI per SDK over stdin/stdout. The TS reference runner is invoked
-// via tsx; other languages will register their own command here.
+// via tsx; other languages register their own command here. The Ruby runner
+// is the server-only SDK's exe/conformance script, driven by `bundle exec`
+// from the ruby gem directory.
+const rubyRunnerDir = join(here, "..", "..", "ruby");
 const RUNNERS: Record<string, string[]> = {
   typescript: ["pnpm", "exec", "node", "--import", "tsx", tsRunner],
+  ruby: ["bundle", "exec", "ruby", "exe/conformance"],
+};
+
+// Per-runner working directory. Defaults to the harness root; the Ruby
+// runner must run from the ruby gem so `bundle exec` resolves its Gemfile.
+const RUNNER_CWD: Record<string, string> = {
+  ruby: rubyRunnerDir,
 };
 
 function runVector(
   command: string[],
   vector: ConformanceVector,
+  cwd: string,
 ): Promise<RunnerResult> {
   const [bin, ...args] = command;
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { cwd: join(here, "..") });
+    const child = spawn(bin, args, { cwd });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
@@ -177,11 +188,21 @@ describe("cross-SDK conformance vectors", () => {
   });
 
   for (const [language, command] of Object.entries(RUNNERS)) {
+    const runnerCwd = RUNNER_CWD[language] ?? join(here, "..");
     describe(`${language} reference runner`, () => {
       for (const vector of vectors) {
-        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async () => {
-          const result = await runVector(command, vector);
+        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async (ctx) => {
+          const result = await runVector(command, vector, runnerCwd);
           expect(result.id).toBe(vector.id);
+
+          // A runner may declare it does not support a vector's mode (e.g. a
+          // server-only SDK has no client builder for build-transaction
+          // vectors). Skip the vector for this SDK rather than fail it.
+          if (result.outcome === "unsupported-mode") {
+            ctx.skip();
+            return;
+          }
+
           expect(
             result.outcome,
             `expected ${vector.expect.outcome} but runner said ${result.outcome}: ${result.error ?? ""}`,
