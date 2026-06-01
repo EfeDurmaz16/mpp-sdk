@@ -35,9 +35,13 @@ package.path = table.concat({
 
 local json = require('pay_kit.util.json')
 local base64url = require('pay_kit.util.base64url')
+local base64_std = require('pay_kit.util.base64_std')
 local verifier = require('pay_kit.solana.verifier')
 local transaction = require('pay_kit.solana.transaction')
 local instructions = require('pay_kit.solana.instructions')
+local base58 = require('pay_kit.solana.base58')
+local ata = require('pay_kit.solana.ata')
+local mints = require('pay_kit.solana.mints')
 
 local UNSUPPORTED_MODE = 'unsupported-mode'
 
@@ -126,6 +130,180 @@ local function flatten_request(req)
     request.externalId = req.externalId
   end
   return request
+end
+
+-- ── wire transaction fixture builder ──
+--
+-- The Lua SDK is server-only: the verifier is the system under test, and a
+-- verify vector that omits `input.transaction` only pins the request +
+-- signer, expecting the runner to assemble the wire fixture the verifier
+-- then accepts. This mirrors the Ruby runner's TxFixtureBuilder and lays
+-- out instructions exactly how the Rust client builder emits them and the
+-- Lua verifier reads them: transferChecked accounts (source, mint, dest,
+-- authority); idempotent ATA create accounts (payer, ata, owner, mint,
+-- system, token program); memo program data is the raw memo bytes. No RPC,
+-- no signature: the verifier checks transaction shape, not signatures.
+
+-- Encode an unsigned decimal-string value as `width` little-endian bytes.
+local function le_bytes(value, width)
+  local digits = {}
+  local text = tostring(value)
+  if not text:match('^%d+$') then
+    error('invalid unsigned integer: ' .. text)
+  end
+  for i = 1, #text do
+    digits[i] = tonumber(text:sub(i, i))
+  end
+  local out = {}
+  for _ = 1, width do
+    -- Long division of the decimal digit array by 256 collects one byte.
+    local remainder = 0
+    local next_digits = {}
+    local started = false
+    for i = 1, #digits do
+      local acc = remainder * 10 + digits[i]
+      local q = math.floor(acc / 256)
+      remainder = acc % 256
+      if started or q ~= 0 then
+        next_digits[#next_digits + 1] = q
+        started = true
+      end
+    end
+    if #next_digits == 0 then
+      next_digits = { 0 }
+    end
+    out[#out + 1] = string.char(remainder)
+    digits = next_digits
+  end
+  for i = 1, #digits do
+    if digits[i] ~= 0 then
+      error('value does not fit in ' .. width .. ' bytes')
+    end
+  end
+  return table.concat(out)
+end
+
+-- Build a verify-transaction wire fixture from a flattened request and the
+-- vector's 64-byte signer secret key. Returns a standard base64 string.
+local function build_fixture(flat, signer_secret)
+  if #signer_secret ~= 64 then
+    error('signerSecretKey must be 64 bytes')
+  end
+  -- The public key is the trailing 32 bytes of the ed25519 secret key.
+  local pub_bytes = {}
+  for i = 33, 64 do
+    pub_bytes[#pub_bytes + 1] = string.char(signer_secret[i])
+  end
+  local signer = base58.encode(table.concat(pub_bytes))
+
+  local details = flat.methodDetails or {}
+  local currency = flat.currency
+  local recipient = flat.recipient
+  local network = details.network or 'mainnet'
+  local is_sol = type(currency) == 'string' and currency:upper() == 'SOL'
+
+  local splits = details.splits or {}
+  local total = tonumber(flat.amount)
+  local split_total = 0
+  for i = 1, #splits do
+    split_total = split_total + tonumber(splits[i].amount)
+  end
+  local primary = total - split_total
+
+  -- Instruction list: { program = base58, accounts = { base58... }, data = raw }
+  local ixs = {}
+  local function add_ix(program, accounts, data)
+    ixs[#ixs + 1] = { program = program, accounts = accounts, data = data }
+  end
+
+  if is_sol then
+    add_ix(SYSTEM_PROGRAM, { signer, recipient },
+      le_bytes(2, 4) .. le_bytes(primary, 8))
+    for i = 1, #splits do
+      add_ix(SYSTEM_PROGRAM, { signer, splits[i].recipient },
+        le_bytes(2, 4) .. le_bytes(splits[i].amount, 8))
+      if splits[i].memo and splits[i].memo ~= '' then
+        add_ix(MEMO_PROGRAM, {}, splits[i].memo)
+      end
+    end
+  else
+    local mint = mints.resolve_mint(currency, network) or currency
+    local token_program = details.tokenProgram
+      or mints.default_token_program_for_currency(currency, network)
+    local decimals = details.decimals or 6
+    local source_ata = ata.derive(signer, mint, token_program)
+    local dest_ata = ata.derive(recipient, mint, token_program)
+    add_ix(token_program, { source_ata, mint, dest_ata, signer },
+      string.char(12) .. le_bytes(primary, 8) .. string.char(decimals))
+    for i = 1, #splits do
+      local sr = splits[i].recipient
+      local sata = ata.derive(sr, mint, token_program)
+      if splits[i].ataCreationRequired == true then
+        add_ix(instructions.ASSOCIATED_TOKEN_PROGRAM,
+          { signer, sata, sr, mint, SYSTEM_PROGRAM, token_program },
+          string.char(1))
+      end
+      add_ix(token_program, { source_ata, mint, sata, signer },
+        string.char(12) .. le_bytes(splits[i].amount, 8) .. string.char(decimals))
+      if splits[i].memo and splits[i].memo ~= '' then
+        add_ix(MEMO_PROGRAM, {}, splits[i].memo)
+      end
+    end
+  end
+
+  -- Account key set: signer (lone signer / fee payer) at index 0, then every
+  -- instruction account and program id in first-seen order. The verifier
+  -- reads layout by index, so a single read-only-unsigned tail suffices.
+  local keys = { signer }
+  local seen = { [signer] = true }
+  local function push_key(k)
+    if not seen[k] then
+      seen[k] = true
+      keys[#keys + 1] = k
+    end
+  end
+  for _, ix in ipairs(ixs) do
+    for _, a in ipairs(ix.accounts) do
+      push_key(a)
+    end
+    push_key(ix.program)
+  end
+  local index = {}
+  for i, k in ipairs(keys) do
+    index[k] = i - 1
+  end
+
+  local blockhash = details.recentBlockhash or string.rep('1', 32)
+  local ok, blockhash_bytes = pcall(base58.decode, blockhash)
+  if not ok or #blockhash_bytes ~= 32 then
+    blockhash_bytes = base58.decode(string.rep('1', 32))
+  end
+
+  local signer_count = 1
+  local readonly_unsigned = #keys - 1
+
+  local parts = {}
+  parts[#parts + 1] = string.char(signer_count, 0, readonly_unsigned)
+  parts[#parts + 1] = transaction.compact_u16(#keys)
+  for _, k in ipairs(keys) do
+    parts[#parts + 1] = base58.decode(k)
+  end
+  parts[#parts + 1] = blockhash_bytes
+  parts[#parts + 1] = transaction.compact_u16(#ixs)
+  for _, ix in ipairs(ixs) do
+    parts[#parts + 1] = string.char(index[ix.program])
+    parts[#parts + 1] = transaction.compact_u16(#ix.accounts)
+    for _, a in ipairs(ix.accounts) do
+      parts[#parts + 1] = string.char(index[a])
+    end
+    parts[#parts + 1] = transaction.compact_u16(#ix.data)
+    parts[#parts + 1] = ix.data
+  end
+  local message = table.concat(parts)
+
+  local signatures = transaction.compact_u16(signer_count)
+    .. string.rep(string.char(0), 64 * signer_count)
+  return base64_std.encode(signatures .. message)
 end
 
 -- Decode a base64 wire transaction into the semantic shape the conformance
@@ -219,31 +397,34 @@ local function run_canonical_bytes(vector)
   return { id = vector.id, outcome = 'accept', exactBytes = exact }
 end
 
--- verify-transaction: the Lua SDK is server-only, so it can only verify a
--- transaction the vector hands it. A vector that expects the runner to
--- build the transaction first (no input.transaction) has no server-only
--- equivalent; emit unsupported-mode so the driver SKIPs it for Lua.
+-- verify-transaction: the Lua SDK is server-only, so the verifier is the
+-- system under test. When the vector pins a concrete `transaction` the
+-- runner verifies it directly; when it omits one (pinning only request +
+-- signerSecretKey) the runner assembles the wire fixture itself via
+-- build_fixture, exactly as the Ruby runner does, then runs the verifier
+-- over it. Either way the SDK verifier is what is exercised.
 local function run_verify_transaction(vector)
   local input = vector.input or {}
-  if type(input.transaction) ~= 'string' or input.transaction == '' then
-    return {
-      id = vector.id,
-      outcome = UNSUPPORTED_MODE,
-      error = 'lua SDK is server-only: cannot build a transaction to verify; '
-        .. 'this vector ships no concrete input.transaction',
-    }
-  end
   if type(input.request) ~= 'table' then
     error('verify vector is missing input.request')
   end
   local request = flatten_request(input.request)
+
+  local tx = input.transaction
+  if type(tx) ~= 'string' or tx == '' then
+    if type(input.signerSecretKey) ~= 'table' then
+      error('verify vector without input.transaction is missing input.signerSecretKey')
+    end
+    tx = build_fixture(request, input.signerSecretKey)
+  end
+
   -- Pure pre-broadcast structural verify: decode the wire bytes and assert
   -- the charge shape. No RPC, no HMAC, no broadcast.
-  verifier.verify_transaction_base64(input.transaction, request)
+  verifier.verify_transaction_base64(tx, request)
   return {
     id = vector.id,
     outcome = 'accept',
-    transactionShape = shape_from_transaction(input.transaction),
+    transactionShape = shape_from_transaction(tx),
   }
 end
 
