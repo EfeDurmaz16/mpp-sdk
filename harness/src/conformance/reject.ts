@@ -21,6 +21,12 @@ const PATTERNS: Array<[RegExp, RejectCode]> = [
   [/no matching (spl )?(transfer|transferchecked|sol transfer)/i, "no-matching-transfer"],
   [/unexpected .* (instruction|transfer)/i, "unexpected-instruction"],
   [/amount .* (mismatch|does not match)/i, "amount-mismatch"],
+  // x402-exact reject categories. `unsupported version` must be checked
+  // before the generic invalid/payload fallback (the message contains
+  // "invalid payload: Unsupported x402 version"). `network mismatch`
+  // likewise precedes the fallback.
+  [/unsupported x402 version/i, "unsupported-version"],
+  [/network mismatch/i, "wrong-network"],
 ];
 
 // Classify a runner's native reject message onto the shared vocabulary.

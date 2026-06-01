@@ -23,6 +23,7 @@ import type {
   ConformanceVector,
   RunnerResult,
   TransactionShape,
+  X402EnvelopeShape,
 } from "../src/conformance/schema";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -214,6 +215,45 @@ async function assertShape(
   }
 }
 
+// Assert the decoded x402 envelope shape. Only the fields the vector
+// pins are checked; presence/absence of scheme/network/accepted is part
+// of the contract (v1 carries scheme+network and no accepted; v2 carries
+// accepted and no top-level scheme/network).
+function assertEnvelopeShape(
+  expected: X402EnvelopeShape,
+  actual: X402EnvelopeShape | undefined,
+): void {
+  expect(actual, "runner did not emit an x402EnvelopeShape").toBeDefined();
+  if (!actual) return;
+
+  expect(actual.x402Version).toBe(expected.x402Version);
+  expect(actual.hasAccepted).toBe(expected.hasAccepted);
+  expect(actual.payloadHasTransaction).toBe(expected.payloadHasTransaction);
+
+  // scheme/network are pinned by presence: a vector that sets them
+  // requires the exact value; a vector that omits them requires the
+  // runner to have omitted them too (v2 must not leak a top-level
+  // scheme/network).
+  expect(actual.scheme).toBe(expected.scheme);
+  expect(actual.network).toBe(expected.network);
+
+  if (expected.acceptedScheme !== undefined) {
+    expect(actual.acceptedScheme).toBe(expected.acceptedScheme);
+  }
+  if (expected.acceptedNetwork !== undefined) {
+    expect(actual.acceptedNetwork).toBe(expected.acceptedNetwork);
+  }
+  if (expected.acceptedAsset !== undefined) {
+    expect(actual.acceptedAsset).toBe(expected.acceptedAsset);
+  }
+  if (expected.acceptedPayTo !== undefined) {
+    expect(actual.acceptedPayTo).toBe(expected.acceptedPayTo);
+  }
+  if (expected.acceptedAmount !== undefined) {
+    expect(actual.acceptedAmount).toBe(expected.acceptedAmount);
+  }
+}
+
 const vectors = loadVectors();
 
 describe("cross-SDK conformance vectors", () => {
@@ -284,6 +324,16 @@ describe("cross-SDK conformance vectors", () => {
             }
             if (wanted?.bytes !== undefined) {
               expect(result.exactBytes?.bytes).toEqual(wanted.bytes);
+            }
+            return;
+          }
+
+          if (vector.intent === "x402-exact") {
+            if (vector.expect.x402EnvelopeShape) {
+              assertEnvelopeShape(
+                vector.expect.x402EnvelopeShape,
+                result.x402EnvelopeShape,
+              );
             }
             return;
           }

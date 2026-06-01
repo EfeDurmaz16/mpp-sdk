@@ -21,6 +21,11 @@ import {
 import { decodeTransactionShape } from "./decode";
 import { base64UrlFromUtf8, canonicalizeJson } from "./jcs";
 import { classifyReject } from "./reject";
+import {
+  buildPaymentHeader,
+  decodeEnvelopeShape,
+  verifyPaymentHeader,
+} from "./x402";
 import type {
   ConformanceVector,
   RunnerResult,
@@ -128,7 +133,60 @@ function shapeFromDecoded(transactionBase64: string): RunnerResult["transactionS
   };
 }
 
+// x402-exact: the oracle is the decoded envelope shape, not a tx shape.
+// build -> wrap the selected offer into a v1/v2 payment header, decode the
+// shape. verify -> run the envelope-level verify against the server route.
+function runX402Vector(vector: ConformanceVector): RunnerResult {
+  const input = vector.input;
+  if (vector.mode === "build-transaction") {
+    if (!input.x402Offer) {
+      throw new Error("invalid payload: x402 build vector missing input.x402Offer");
+    }
+    const version = input.x402Version ?? 2;
+    // Deterministic, RPC-free: the conformance oracle is the envelope, so
+    // the signed-transaction proof is a pinned placeholder. A real SDK
+    // signs a Solana tx here; the interop matrix asserts that path.
+    const transaction =
+      input.x402PinnedTransaction ?? "AA==";
+    const header = buildPaymentHeader(version, input.x402Offer, transaction);
+    return {
+      id: vector.id,
+      outcome: "accept",
+      x402EnvelopeShape: decodeEnvelopeShape(header),
+    };
+  }
+
+  // verify-transaction (x402).
+  if (!input.x402PaymentHeader) {
+    throw new Error(
+      "invalid payload: x402 verify vector missing input.x402PaymentHeader",
+    );
+  }
+  if (
+    input.x402ServerNetwork === undefined ||
+    input.x402ServerRecipient === undefined ||
+    input.x402ServerCurrency === undefined ||
+    input.x402ServerAmount === undefined
+  ) {
+    throw new Error("invalid payload: x402 verify vector missing server route");
+  }
+  verifyPaymentHeader(input.x402PaymentHeader, {
+    network: input.x402ServerNetwork,
+    recipient: input.x402ServerRecipient,
+    currency: input.x402ServerCurrency,
+    amount: input.x402ServerAmount,
+  });
+  return {
+    id: vector.id,
+    outcome: "accept",
+    x402EnvelopeShape: decodeEnvelopeShape(input.x402PaymentHeader),
+  };
+}
+
 async function runVector(vector: ConformanceVector): Promise<RunnerResult> {
+  if (vector.intent === "x402-exact") {
+    return runX402Vector(vector);
+  }
   if (vector.mode === "canonical-bytes") {
     const exactBytes: NonNullable<RunnerResult["exactBytes"]> = {};
     if (vector.input.value !== undefined) {
