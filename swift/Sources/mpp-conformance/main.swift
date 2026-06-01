@@ -166,9 +166,10 @@ private struct RunnerResult: Encodable {
     var transactionShape: TransactionShape?
     var exactBytes: ExactBytes?
     var error: String?
+    var rejectCode: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, outcome, transactionShape, exactBytes, error
+        case id, outcome, transactionShape, exactBytes, error, rejectCode
     }
 
     func encode(to encoder: Encoder) throws {
@@ -178,7 +179,52 @@ private struct RunnerResult: Encodable {
         if let transactionShape { try c.encode(transactionShape, forKey: .transactionShape) }
         if let exactBytes { try c.encode(exactBytes, forKey: .exactBytes) }
         if let error { try c.encode(error, forKey: .error) }
+        if let rejectCode { try c.encode(rejectCode, forKey: .rejectCode) }
     }
+}
+
+// MARK: - Reject classification
+//
+// The harness asserts a normalized reject CATEGORY per reject vector. Map the
+// Swift SDK's native reject message (the `MppError` payload string) onto the
+// shared RejectCode vocabulary so the driver can compare categories across
+// SDKs rather than brittle prose. Swift is a CLIENT-only SDK, so the only
+// harness reject vector it actually processes is the splits-consume-amount
+// build vector; the rest of the vocabulary is mapped for completeness and
+// future build-path rejects. Returns nil for messages outside the vocabulary
+// (e.g. the unsupported-mode skip), and the runner omits `rejectCode` then.
+private func classifyReject(_ message: String) -> String? {
+    let m = message.lowercased()
+
+    func has(_ needle: String) -> Bool { m.contains(needle) }
+
+    if has("splits consume the entire amount")
+        || (has("primary") && has("positive"))
+        || (has("split") && has("exceed")) {
+        return "splits-exceed-amount"
+    }
+    if has("too many splits") {
+        return "too-many-splits"
+    }
+    if has("compute unit price") && has("exceed") && (has("cap") || has("maximum")) {
+        return "compute-price-over-cap"
+    }
+    if has("compute unit limit") && has("exceed") {
+        return "compute-limit-over-cap"
+    }
+    if has("fee payer cannot authorize") {
+        return "fee-payer-not-authority"
+    }
+    if (has("no matching") || has("unexpected")) && has("transfer") {
+        return "no-matching-transfer"
+    }
+    if has("amount") && (has("mismatch") || has("does not match")) {
+        return "amount-mismatch"
+    }
+    if has("invalid") || has("malformed") || has("decode") || has("payload") {
+        return "invalid-payload"
+    }
+    return nil
 }
 
 private enum RunnerError: Error, CustomStringConvertible {
@@ -546,7 +592,13 @@ private func runVector(_ vector: Vector, rawValue: Any?) async -> RunnerResult {
             )
         }
     } catch {
-        return RunnerResult(id: vector.id, outcome: "reject", error: String(describing: error))
+        let message = String(describing: error)
+        return RunnerResult(
+            id: vector.id,
+            outcome: "reject",
+            error: message,
+            rejectCode: classifyReject(message)
+        )
     }
 }
 
