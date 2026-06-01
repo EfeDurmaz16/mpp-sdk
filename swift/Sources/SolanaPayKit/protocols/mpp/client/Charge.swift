@@ -70,9 +70,12 @@ public enum Charge {
     /// missing required fields, which would otherwise surface as a late
     /// failure inside `buildChargeTransaction`.
     public static func pickChallenge(wwwAuthenticateHeaders: [String]) throws -> PaymentChallenge {
-        for header in wwwAuthenticateHeaders {
-            guard let challenge = try? MppHeaders.parseWWWAuthenticate(header),
-                  challenge.method == "solana", challenge.intent == "charge" else {
+        // Expand each header value into its constituent Payment challenges so
+        // a single combined `WWW-Authenticate` line carrying several
+        // `Payment ...` challenges is handled, matching the rust
+        // `parse_www_authenticate_all` split behaviour.
+        for challenge in MppHeaders.parseWWWAuthenticateAll(wwwAuthenticateHeaders) {
+            guard challenge.method == "solana", challenge.intent == "charge" else {
                 continue
             }
             // Schema-validate the embedded ChargeRequest before
@@ -84,31 +87,98 @@ public enum Charge {
         throw MppError.unsupportedChallenge(method: "(missing)", intent: "(missing)")
     }
 
-    /// Resolves a currency string (symbol or mint) to a mint base58 or
-    /// `nil` for native SOL. Mirrors `protocol::solana::resolve_stablecoin_mint`.
-    public static func resolveStablecoinMint(currency: String, network: String?) -> String? {
-        switch currency.uppercased() {
-        case "SOL": return nil
-        case "USDC":
-            switch network {
-            case "devnet": return "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
-            case "testnet": return "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
-            default: return "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-            }
-        case "USDT": return "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
-        case "USDG":
-            switch network {
-            case "devnet", "testnet": return "4F6PM96JJxngmHnZLBh9n58RH4aTVNWvDs2nuwrT5BP7"
-            default: return "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH"
-            }
-        case "PYUSD":
-            switch network {
-            case "devnet", "testnet": return "CXk2AMBfi3TwaEL2468s6zP8xq9NxTXjp9gjMgzeUynM"
-            default: return "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo"
-            }
-        case "CASH": return "CASHx9KJUStyftLFWGvEVf59SGeG9sh5FfcnZMVPCASH"
-        default: return currency
+    /// Options for selecting one Solana charge challenge from a challenge
+    /// set, mirroring the rust `SelectChargeChallengeOptions`
+    /// (`rust/crates/mpp/src/client/charge.rs:50`).
+    public struct SelectChallengeOptions: Sendable {
+        /// Currency symbol or mint address the client wants to pay with.
+        public var currency: String?
+        /// Currency symbols or mint addresses in client preference order.
+        public var currencyPreferences: [String]
+        /// Solana network identifier, e.g. "mainnet-beta", "devnet", or
+        /// "localnet".
+        public var network: String?
+
+        public init(
+            currency: String? = nil,
+            currencyPreferences: [String] = [],
+            network: String? = nil
+        ) {
+            self.currency = currency
+            self.currencyPreferences = currencyPreferences
+            self.network = network
         }
+    }
+
+    /// Select the Solana charge challenge the client should sign, filtering
+    /// by network and currency preferences while preserving server order.
+    ///
+    /// Mirrors the rust `select_charge_challenge`
+    /// (`rust/crates/mpp/src/client/charge.rs:246`): keep only schema-valid
+    /// `solana`/`charge` challenges on the requested network; with no
+    /// currency preference return the first survivor; otherwise return the
+    /// first challenge whose currency resolves to the same mint as a listed
+    /// preference (in preference order). Returns `nil` when nothing matches.
+    public static func selectChallenge(
+        challenges: [PaymentChallenge],
+        options: SelectChallengeOptions = SelectChallengeOptions()
+    ) throws -> PaymentChallenge? {
+        var candidates: [(challenge: PaymentChallenge, request: ChargeRequest)] = []
+        for challenge in challenges {
+            guard challenge.method == "solana", challenge.intent == "charge" else { continue }
+            guard let request = try? challenge.chargeRequest else { continue }
+            guard matchesNetwork(request.methodDetails, network: options.network) else { continue }
+            candidates.append((challenge, request))
+        }
+
+        let preferences = currencyPreferences(options)
+        if preferences.isEmpty {
+            return candidates.first?.challenge
+        }
+
+        for expected in preferences {
+            for candidate in candidates {
+                if currenciesMatch(
+                    candidate.request.currency,
+                    expected,
+                    network: candidate.request.methodDetails.network
+                ) {
+                    return candidate.challenge
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func matchesNetwork(
+        _ methodDetails: SolanaChargeMethodDetails,
+        network: String?
+    ) -> Bool {
+        guard let expected = network else { return true }
+        return (methodDetails.network ?? "mainnet-beta") == expected
+    }
+
+    private static func currencyPreferences(_ options: SelectChallengeOptions) -> [String] {
+        if !options.currencyPreferences.isEmpty { return options.currencyPreferences }
+        if let currency = options.currency { return [currency] }
+        return []
+    }
+
+    private static func currenciesMatch(
+        _ challengeCurrency: String,
+        _ expectedCurrency: String,
+        network: String?
+    ) -> Bool {
+        resolveStablecoinMint(currency: challengeCurrency, network: network)
+            == resolveStablecoinMint(currency: expectedCurrency, network: network)
+    }
+
+    /// Resolves a currency string (symbol or mint) to a mint base58 or
+    /// `nil` for native SOL. Uses the MPP charge rule (`Mints.resolveChargeMint`),
+    /// which maps `localnet` to the mainnet mint, unlike the x402 `exact`
+    /// rule. Both share the single mint registry in the paycore layer.
+    public static func resolveStablecoinMint(currency: String, network: String?) -> String? {
+        Mints.resolveChargeMint(currency: currency, network: network)
     }
 
     /// Builds and signs the Solana transaction for an MPP charge request,
@@ -174,13 +244,16 @@ public enum Charge {
             }
         }
 
-        let serverPaysFees = methodDetails.feePayer == true
+        // Match the rust client: a server fee payer is used only when
+        // `feePayer == true` AND `feePayerKey` is present. When `feePayer`
+        // is true but the key is missing, silently fall back to the signer
+        // as fee payer rather than throwing (rust
+        // `use_fee_payer = fee_payer.unwrap_or(false) && fee_payer_key.is_some()`,
+        // `rust/crates/mpp/src/client/charge.rs:96`).
+        let useFeePayer = methodDetails.feePayer == true && methodDetails.feePayerKey != nil
         let feePayerPubkey: Pubkey?
-        if serverPaysFees {
-            guard let key = methodDetails.feePayerKey else {
-                throw MppError.invalidTransaction("feePayer=true requires feePayerKey in methodDetails")
-            }
-            feePayerPubkey = try Pubkey(base58: key)
+        if useFeePayer {
+            feePayerPubkey = try Pubkey(base58: methodDetails.feePayerKey!)
         } else {
             feePayerPubkey = nil
         }
@@ -218,7 +291,6 @@ public enum Charge {
             try appendSplTransfer(
                 into: &instructions,
                 payer: actualFeePayer,
-                serverPaysFees: serverPaysFees,
                 signer: signerPubkey,
                 sourceAta: sourceAta,
                 mint: mintPk,
@@ -230,17 +302,22 @@ public enum Charge {
             )
             try appendMemo(into: &instructions, memo: request.externalId)
 
+            // Spine semantics: when no server fee payer is actually set,
+            // every split owner gets an idempotent ATA-create; when a server
+            // fee payer is present, only splits with ataCreationRequired ==
+            // true do. Rust keys this off `fee_payer.is_none()`
+            // (`rust/crates/mpp/src/client/charge.rs:413`), where `fee_payer`
+            // is `None` whenever the key is missing — so a `feePayer == true`
+            // request without a `feePayerKey` still creates ATAs for all
+            // splits.
+            let hasServerFeePayer = feePayerPubkey != nil
             for split in splits {
                 let destinationOwner = try Pubkey(base58: split.recipient)
                 let splitAmount = try parseU64(split.amount, field: "split amount")
-                // Spine semantics: when no server fee payer, every split
-                // owner gets an idempotent ATA-create; when server pays
-                // fees, only splits with ataCreationRequired == true do.
-                let createAta = !serverPaysFees || split.ataCreationRequired == true
+                let createAta = !hasServerFeePayer || split.ataCreationRequired == true
                 try appendSplTransfer(
                     into: &instructions,
                     payer: actualFeePayer,
-                    serverPaysFees: serverPaysFees,
                     signer: signerPubkey,
                     sourceAta: sourceAta,
                     mint: mintPk,
@@ -381,7 +458,6 @@ public enum Charge {
     private static func appendSplTransfer(
         into instructions: inout [SolanaInstruction],
         payer: Pubkey,
-        serverPaysFees: Bool,
         signer: Pubkey,
         sourceAta: Pubkey,
         mint: Pubkey,

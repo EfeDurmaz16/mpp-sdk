@@ -1,18 +1,7 @@
 import Foundation
 
-public enum MppError: Error, Equatable {
-    case invalidBase64URL
-    case invalidBase58
-    case invalidHeader
-    case invalidJSON(String)
-    case invalidPaymentScheme
-    case invalidPubkey(String)
-    case invalidTransaction(String)
-    case missingField(String)
-    case rpcFailure(String)
-    case signingFailure(String)
-    case unsupportedChallenge(method: String, intent: String)
-}
+// MppError moved to PayCore/Errors.swift (shared payment-core error consumed by
+// both the MPP and x402 protocol layers; keeps the protocols decoupled).
 
 public struct PaymentChallenge: Codable, Equatable, Sendable {
     public let id: String

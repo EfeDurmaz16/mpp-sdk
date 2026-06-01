@@ -59,14 +59,16 @@ function loadVectors(): ConformanceVector[] {
 // runs from its own SDK directory (see RUNNER_CWD) so the suite needs no
 // separate build step beyond the per-language toolchain caches. The Kotlin
 // runner is the `application` plugin start script produced by
-// `gradle installDist`, so the suite invokes that start script per vector
-// instead of paying gradle startup on every spawn.
+// `gradle installDist`; the Swift runner is the SolanaPayKit
+// `mpp-conformance` executable driven by `swift run` (SwiftPM caches the
+// build), so the suite invokes them directly per vector.
 const goRunnerDir = join(here, "..", "..", "go");
 const pythonRunnerDir = join(here, "..", "..", "python");
 const rubyRunnerDir = join(here, "..", "..", "ruby");
 const phpRunnerDir = join(here, "..", "..", "php");
 const luaRunnerDir = join(here, "..", "..", "lua");
 const rustWorkspaceDir = join(here, "..", "..", "rust");
+const swiftRunnerDir = join(here, "..", "..", "swift");
 const RUNNERS: Record<string, string[]> = {
   typescript: ["pnpm", "exec", "node", "--import", "tsx", tsRunner],
   go: ["go", "run", "./cmd/conformance"],
@@ -76,13 +78,15 @@ const RUNNERS: Record<string, string[]> = {
   lua: ["luajit", "cmd/conformance/main.lua"],
   rust: ["cargo", "run", "-q", "-p", "solana-mpp", "--bin", "conformance"],
   kotlin: [kotlinRunner],
+  swift: ["swift", "run", "-c", "release", "mpp-conformance"],
 };
 
 // Per-runner working directory. Defaults to the harness root; each
 // non-TypeScript runner must run from its own SDK tree so its toolchain
 // resolves the project (go module, uv venv, bundler Gemfile, vendor
-// autoloader, lua package path, cargo workspace). The Kotlin start script
-// resolves its lib/ relative to its own location, so the harness root is fine.
+// autoloader, lua package path, cargo workspace, swift package). The Kotlin
+// start script resolves its lib/ relative to its own location, so the harness
+// root is fine for it.
 const RUNNER_CWD: Record<string, string> = {
   go: goRunnerDir,
   python: pythonRunnerDir,
@@ -90,6 +94,7 @@ const RUNNER_CWD: Record<string, string> = {
   php: phpRunnerDir,
   lua: luaRunnerDir,
   rust: rustWorkspaceDir,
+  swift: swiftRunnerDir,
 };
 
 function runVector(
