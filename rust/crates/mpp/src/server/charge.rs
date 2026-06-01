@@ -1003,6 +1003,38 @@ pub fn check_network_blockhash(
 // Inspects the raw Transaction instructions to verify amounts and recipients
 // BEFORE broadcasting, preventing fund loss on invalid credentials.
 
+/// Verify a base64 charge transaction against the charge request without any
+/// network access, HMAC challenge check, or broadcast.
+///
+/// This is the pure pre-broadcast instruction check: it decodes the wire
+/// transaction (legacy or v0 static-key), rejects a localnet-signed
+/// transaction routed at a non-localnet server, and runs the full
+/// instruction allowlist (transfer amounts, recipients, decimals,
+/// compute-budget caps, fee-payer-as-authority guard, ATA-creation policy,
+/// memos). It is the RPC-free verification surface the cross-SDK conformance
+/// runner drives; the live settlement path in [`Mpp::verify`] wraps the same
+/// check before co-signing and broadcasting.
+pub fn verify_charge_transaction_pre_broadcast(
+    transaction_b64: &str,
+    request: &ChargeRequest,
+    method_details: &MethodDetails,
+    network: &str,
+) -> Result<(), VerificationError> {
+    let tx_bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, transaction_b64)
+            .map_err(|e| {
+                VerificationError::invalid_payload(format!("Invalid base64 transaction: {e}"))
+            })?;
+
+    let tx: VersionedTransaction = bincode::deserialize::<Transaction>(&tx_bytes)
+        .map(VersionedTransaction::from)
+        .or_else(|_| bincode::deserialize::<VersionedTransaction>(&tx_bytes))
+        .map_err(|e| VerificationError::invalid_payload(format!("Invalid transaction: {e}")))?;
+
+    check_network_blockhash(network, &tx.message.recent_blockhash().to_string())?;
+    verify_versioned_transaction_pre_broadcast(&tx, request, method_details)
+}
+
 #[cfg(test)]
 fn verify_transaction_pre_broadcast(
     tx: &Transaction,

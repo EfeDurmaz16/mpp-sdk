@@ -12,4 +12,7 @@ pub mod session;
 #[cfg(feature = "axum")]
 pub mod axum;
 
-pub use charge::{check_network_blockhash, ChargeOptions, Config, Mpp, VerificationError};
+pub use charge::{
+    check_network_blockhash, verify_charge_transaction_pre_broadcast, ChargeOptions, Config, Mpp,
+    VerificationError,
+};
