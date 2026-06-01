@@ -1,6 +1,7 @@
 plugins {
     kotlin("jvm") version "2.3.21"
     kotlin("plugin.serialization") version "2.3.21"
+    application
     jacoco
 }
 
@@ -42,6 +43,15 @@ dependencies {
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
 
+// The cross-SDK conformance runner is a CLI entry point driven by the harness
+// (harness/test/conformance.test.ts) over stdin/stdout, not by the SDK's own
+// callers. `installDist` builds a start script once so the harness can invoke
+// plain `java` per vector instead of paying gradle startup on every spawn.
+application {
+    mainClass.set("com.solana.paykit.conformance.ConformanceRunnerKt")
+    applicationName = "conformance-runner"
+}
+
 tasks.test {
     useJUnitPlatform()
     finalizedBy(tasks.jacocoTestReport)
@@ -55,8 +65,27 @@ tasks.jacocoTestReport {
     }
 }
 
+// The conformance runner is exercised by the harness conformance suite over a
+// spawned process, not by the Kotlin unit tests, so exclude it from the SDK's
+// own line-coverage gate rather than letting an un-unit-tested CLI entry point
+// drag the published library coverage below the threshold.
+private val conformanceCoverageExclusions = listOf("com/solana/paykit/conformance/**")
+
+tasks.jacocoTestReport {
+    classDirectories.setFrom(
+        files(classDirectories.files.map { dir ->
+            fileTree(dir) { exclude(conformanceCoverageExclusions) }
+        }),
+    )
+}
+
 tasks.jacocoTestCoverageVerification {
     dependsOn(tasks.jacocoTestReport)
+    classDirectories.setFrom(
+        files(classDirectories.files.map { dir ->
+            fileTree(dir) { exclude(conformanceCoverageExclusions) }
+        }),
+    )
     violationRules {
         rule {
             limit {
