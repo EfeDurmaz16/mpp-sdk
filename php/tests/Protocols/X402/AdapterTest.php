@@ -123,6 +123,91 @@ final class AdapterTest extends TestCase
         $req = (new Psr17Factory())->createServerRequest('GET', '/paid')
             ->withHeader('Payment-Signature', $envelope);
         $this->expectException(InvalidProofException::class);
+        $this->expectExceptionMessage('unsupported_x402_version');
+        $adapter->verifyAndSettle($gate, $req);
+    }
+
+    /**
+     * A legacy v1 envelope (x402Version=1, top-level scheme="exact" +
+     * legacy network string, NO `accepted`) read from the X-PAYMENT header
+     * must pass the version/scheme/network gate and proceed to the
+     * structural verifier. We submit a bogus transaction so the verifier
+     * rejects it AFTER the gate, proving the v1 arm was accepted (it does
+     * NOT reject with unsupported_x402_version or a network/scheme
+     * mismatch). Mirrors rust exact.rs:316-327.
+     */
+    public function testVerifyAndSettleAcceptsLegacyV1FromXPaymentHeader(): void
+    {
+        $cfg = $this->makeConfig(); // SolanaDevnet
+        $adapter = new Adapter($cfg, recentBlockhashProvider: fn () => null);
+        $gate = new Gate(amount: Price::usd('0.10'));
+        $envelope = base64_encode((string) json_encode([
+            'x402Version' => 1,
+            'scheme'      => 'exact',
+            // v1 legacy devnet network string; normalizes to the devnet
+            // CAIP-2 id the SolanaDevnet server advertises.
+            'network'     => 'solana-devnet',
+            // Proof nests under `payload` (PaymentSignatureEnvelope.payload
+            // is NOT serde(flatten) in the rust spine; same shape as v2).
+            'payload'     => ['transaction' => base64_encode('not-a-real-solana-transaction')],
+        ]));
+        $req = (new Psr17Factory())->createServerRequest('GET', '/paid')
+            ->withHeader('X-PAYMENT', $envelope);
+
+        try {
+            $adapter->verifyAndSettle($gate, $req);
+            $this->fail('expected the structural verifier to reject the bogus transaction');
+        } catch (InvalidProofException $e) {
+            // Gate passed: we reached settlement and failed on the bogus tx,
+            // not on the version/scheme/network checks.
+            $this->assertStringNotContainsString('unsupported_x402_version', $e->getMessage());
+            $this->assertStringNotContainsString('Network mismatch', $e->getMessage());
+            $this->assertStringNotContainsString('payload_type', $e->getMessage());
+        }
+    }
+
+    /**
+     * A v1 envelope carrying a scheme other than "exact" is rejected at the
+     * parse gate (rust exact.rs:318-320).
+     */
+    public function testVerifyAndSettleRejectsV1WithWrongScheme(): void
+    {
+        $cfg = $this->makeConfig();
+        $adapter = new Adapter($cfg, recentBlockhashProvider: fn () => null);
+        $gate = new Gate(amount: Price::usd('0.10'));
+        $envelope = base64_encode((string) json_encode([
+            'x402Version' => 1,
+            'scheme'      => 'upto',
+            'network'     => 'solana-devnet',
+            'payload'     => ['transaction' => base64_encode('x')],
+        ]));
+        $req = (new Psr17Factory())->createServerRequest('GET', '/paid')
+            ->withHeader('X-PAYMENT', $envelope);
+        $this->expectException(InvalidProofException::class);
+        $this->expectExceptionMessage('invalid_exact_svm_payload_type');
+        $adapter->verifyAndSettle($gate, $req);
+    }
+
+    /**
+     * A v1 envelope whose legacy network normalizes to a different CAIP-2
+     * chain than the server's is rejected at the parse gate
+     * (rust exact.rs:322-326). "solana" -> mainnet, server is devnet.
+     */
+    public function testVerifyAndSettleRejectsV1WithNetworkMismatch(): void
+    {
+        $cfg = $this->makeConfig(); // SolanaDevnet
+        $adapter = new Adapter($cfg, recentBlockhashProvider: fn () => null);
+        $gate = new Gate(amount: Price::usd('0.10'));
+        $envelope = base64_encode((string) json_encode([
+            'x402Version' => 1,
+            'scheme'      => 'exact',
+            'network'     => 'solana', // legacy mainnet string
+            'payload'     => ['transaction' => base64_encode('x')],
+        ]));
+        $req = (new Psr17Factory())->createServerRequest('GET', '/paid')
+            ->withHeader('X-PAYMENT', $envelope);
+        $this->expectException(InvalidProofException::class);
+        $this->expectExceptionMessage('Network mismatch');
         $adapter->verifyAndSettle($gate, $req);
     }
 }
