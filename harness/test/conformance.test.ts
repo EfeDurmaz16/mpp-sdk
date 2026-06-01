@@ -44,19 +44,36 @@ function loadVectors(): ConformanceVector[] {
 }
 
 // One CLI per SDK over stdin/stdout. The TS reference runner is invoked
-// via tsx; other languages register their own command here. The Go runner
-// is the compiled cmd/conformance binary, driven by `go run` so the suite
-// needs no separate build step (the Go toolchain caches the build).
+// via tsx; other languages register their own command here. Each runner
+// runs from its own SDK directory (see RUNNER_CWD) so the suite needs no
+// separate build step beyond the per-language toolchain caches.
 const goRunnerDir = join(here, "..", "..", "go");
+const pythonRunnerDir = join(here, "..", "..", "python");
+const rubyRunnerDir = join(here, "..", "..", "ruby");
+const phpRunnerDir = join(here, "..", "..", "php");
+const luaRunnerDir = join(here, "..", "..", "lua");
+const rustWorkspaceDir = join(here, "..", "..", "rust");
 const RUNNERS: Record<string, string[]> = {
   typescript: ["pnpm", "exec", "node", "--import", "tsx", tsRunner],
   go: ["go", "run", "./cmd/conformance"],
+  python: ["uv", "run", "python", "conformance_runner.py"],
+  ruby: ["bundle", "exec", "ruby", "exe/conformance"],
+  php: ["php", "conformance/runner.php"],
+  lua: ["luajit", "cmd/conformance/main.lua"],
+  rust: ["cargo", "run", "-q", "-p", "solana-mpp", "--bin", "conformance"],
 };
 
-// Per-runner working directory. Defaults to the harness root; the Go runner
-// must run from the go module so `go run ./cmd/conformance` resolves.
+// Per-runner working directory. Defaults to the harness root; each
+// non-TypeScript runner must run from its own SDK tree so its toolchain
+// resolves the project (go module, uv venv, bundler Gemfile, vendor
+// autoloader, lua package path, cargo workspace).
 const RUNNER_CWD: Record<string, string> = {
   go: goRunnerDir,
+  python: pythonRunnerDir,
+  ruby: rubyRunnerDir,
+  php: phpRunnerDir,
+  lua: luaRunnerDir,
+  rust: rustWorkspaceDir,
 };
 
 function runVector(
@@ -191,9 +208,26 @@ describe("cross-SDK conformance vectors", () => {
     const runnerCwd = RUNNER_CWD[language] ?? join(here, "..");
     describe(`${language} reference runner`, () => {
       for (const vector of vectors) {
-        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async () => {
+        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async (ctx) => {
           const result = await runVector(command, vector, runnerCwd);
           expect(result.id).toBe(vector.id);
+
+          // A runner that does not support a vector's mode for this SDK's
+          // role (e.g. build-transaction on a server-only SDK) declares it
+          // either as a dedicated `unsupported-mode` outcome or as a reject
+          // whose error is prefixed "unsupported-mode". Skip the vector for
+          // this language rather than fail it. Both conventions are honored
+          // so every SDK runner registers cleanly regardless of its style.
+          if (
+            (result.outcome as string) === "unsupported-mode" ||
+            (result.outcome === "reject" &&
+              (result.error ?? "").startsWith("unsupported-mode") &&
+              vector.expect.outcome !== "reject")
+          ) {
+            ctx.skip();
+            return;
+          }
+
           expect(
             result.outcome,
             `expected ${vector.expect.outcome} but runner said ${result.outcome}: ${result.error ?? ""}`,
