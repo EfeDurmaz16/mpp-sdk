@@ -3,7 +3,44 @@ import Foundation
 // MARK: - x402 wire types (exact scheme)
 
 /// x402 protocol version constant emitted in the `Payment-Signature` envelope.
-public let X402Version: Int = 2
+///
+/// Defaults to the canonical v2 version (`X402VersionV2`). Kept for source
+/// compatibility with existing call sites.
+public let X402Version: Int = X402VersionV2
+
+/// Legacy x402 protocol version (`X402_VERSION_V1` in the rust spine,
+/// `rust/crates/x402/src/constants.rs:10`).
+public let X402VersionV1: Int = 1
+
+/// Canonical x402 protocol version used by current payments
+/// (`X402_VERSION_V2` in the rust spine,
+/// `rust/crates/x402/src/constants.rs:13`).
+public let X402VersionV2: Int = 2
+
+/// Canonical `exact` scheme name (`EXACT_SCHEME` in the rust spine,
+/// `rust/crates/x402/src/protocol/schemes/exact/types.rs:6`). Stamped at the
+/// top level of a legacy v1 `X-PAYMENT` envelope.
+public let X402ExactScheme = "exact"
+
+// MARK: - Header names (rust `constants.rs`)
+
+/// Legacy v1 client payment header (`X402_V1_PAYMENT_HEADER`).
+public let X402V1PaymentHeader = "X-PAYMENT"
+
+/// Legacy v1 payment-required (challenge) header (`X402_V1_PAYMENT_REQUIRED_HEADER`).
+public let X402V1PaymentRequiredHeader = "X-PAYMENT-REQUIRED"
+
+/// Legacy v1 settlement response header (`X402_V1_PAYMENT_RESPONSE_HEADER`).
+public let X402V1PaymentResponseHeader = "X-PAYMENT-RESPONSE"
+
+/// v2 client payment header (`X402_V2_PAYMENT_HEADER`); the unqualified default.
+public let X402V2PaymentHeader = "PAYMENT-SIGNATURE"
+
+/// v2 payment-required (challenge) header (`X402_V2_PAYMENT_REQUIRED_HEADER`).
+public let X402V2PaymentRequiredHeader = "PAYMENT-REQUIRED"
+
+/// v2 settlement response header (`X402_V2_PAYMENT_RESPONSE_HEADER`).
+public let X402V2PaymentResponseHeader = "PAYMENT-RESPONSE"
 
 /// One entry in the `accepts` array of a `PAYMENT-REQUIRED` challenge.
 ///
@@ -352,25 +389,42 @@ public struct X402PaymentPayload: Codable, Sendable {
     }
 }
 
-/// The `Payment-Signature` header value (base64 of this JSON).
+/// The `Payment-Signature` / `X-PAYMENT` header value (base64 of this JSON).
 ///
-/// Mirrors the rust `PaymentSignatureEnvelope`:
-/// `{ x402Version, accepted, resource?, payload }`. The `resource` field is
-/// populated from the offer's resource metadata
-/// (`rust/crates/x402/src/client/exact/payment.rs:136`) and omitted from the
-/// wire when absent.
+/// Mirrors the rust `PaymentSignatureEnvelope`
+/// (`rust/crates/x402/src/protocol/schemes/exact/types.rs:480`):
+/// `{ scheme?, network?, x402Version, accepted?, resource?, payload }`. The
+/// envelope is version-discriminated by `x402Version`:
+///
+/// - v2 (default): `scheme`/`network` omitted, `accepted` carries the
+///   canonical requirements, `resource` carries resource metadata. Written to
+///   `PAYMENT-SIGNATURE`.
+/// - v1 (legacy): top-level `scheme="exact"` and a legacy `network` string,
+///   no `accepted`, no `resource`. Written to `X-PAYMENT`. The proof payload
+///   is byte-for-byte identical to v2; only the envelope differs.
+///
+/// All optional fields are omitted from the wire when absent
+/// (`skip_serializing_if = Option::is_none` in the rust spine).
 public struct X402PaymentSignatureEnvelope: Codable, Sendable {
+    /// Top-level scheme (`"exact"`), present only on the legacy v1 envelope.
+    public let scheme: String?
+    /// Top-level legacy network string, present only on the legacy v1 envelope.
+    public let network: String?
     public let x402Version: Int
     public let accepted: X402AcceptsEntry?
     public let resource: X402ResourceInfo?
     public let payload: X402PaymentPayload
 
     public init(
+        scheme: String? = nil,
+        network: String? = nil,
         x402Version: Int,
         accepted: X402AcceptsEntry?,
         resource: X402ResourceInfo? = nil,
         payload: X402PaymentPayload
     ) {
+        self.scheme = scheme
+        self.network = network
         self.x402Version = x402Version
         self.accepted = accepted
         self.resource = resource
@@ -378,11 +432,13 @@ public struct X402PaymentSignatureEnvelope: Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case x402Version, accepted, resource, payload
+        case scheme, network, x402Version, accepted, resource, payload
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        scheme = try container.decodeIfPresent(String.self, forKey: .scheme)
+        network = try container.decodeIfPresent(String.self, forKey: .network)
         x402Version = try container.decode(Int.self, forKey: .x402Version)
         accepted = try container.decodeIfPresent(X402AcceptsEntry.self, forKey: .accepted)
         resource = try container.decodeIfPresent(X402ResourceInfo.self, forKey: .resource)
@@ -391,12 +447,15 @@ public struct X402PaymentSignatureEnvelope: Codable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(scheme, forKey: .scheme)
+        try container.encodeIfPresent(network, forKey: .network)
         try container.encode(x402Version, forKey: .x402Version)
         // Echo the offered requirement verbatim when we captured it on the
         // wire (preserves maxTimeoutSeconds / resource / server extras the
         // typed entry does not model); fall back to the typed encoding for
         // in-code entries. Mirrors the rust client's `to_accepted_value`,
-        // which returns the original parsed object unchanged.
+        // which returns the original parsed object unchanged. v1 envelopes
+        // pass `accepted == nil`, so nothing is emitted (rust v1 arm).
         if let raw = accepted?.raw {
             try container.encode(raw, forKey: .accepted)
         } else {
