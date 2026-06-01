@@ -45,9 +45,29 @@ from pay_kit.protocols.mpp.core import json as wire_json
 from pay_kit.protocols.mpp.core.base64url import encode as base64url_encode
 from pay_kit.protocols.mpp.intents.charge import ChargeRequest
 from pay_kit.protocols.mpp.server._verify import _verify_local_transaction_intent
+from pay_kit.protocols.x402 import _caip2_network_for_cluster
+from pay_kit.protocols.x402.client.exact.payment import (
+    build_payment_header,
+    build_payment_header_v1,
+)
+from pay_kit.protocols.x402.exact.verify import (
+    X402_VERSION_V1,
+    X402_VERSION_V2,
+)
+from pay_kit.signer import LocalSigner
 
 DEFAULT_NETWORK = "mainnet"
 DEFAULT_SPL_DECIMALS = 6
+
+# x402-exact build determinism: the conformance oracle is the DECODED
+# ENVELOPE shape, never the signed-transaction bytes inside
+# payload.transaction (that is the interop matrix's job). So the build path
+# is pinned with a fixed blockhash + memo nonce and an ephemeral signer; the
+# resulting transaction is real and well-formed but its bytes are not
+# asserted. Mirrors the rust spine x402 client and the TS reference oracle
+# (harness/src/conformance/x402.ts).
+_X402_PINNED_BLOCKHASH = "4vJ9JU1bJJQpUgJ8V6hYz7xXKz4F2tN6aBrZEcD3xKhs"
+_X402_PINNED_MEMO_NONCE = "00112233445566778899aabbccddeeff"
 
 _PROGRAMS = {
     TOKEN_PROGRAM,
@@ -323,9 +343,165 @@ def _run_canonical_bytes(vector: dict[str, Any]) -> dict[str, Any]:
     return exact
 
 
+# ── x402-exact intent ──────────────────────────────────────────────────────
+#
+# The x402 charge is HTTP-shaped, not transaction-shaped: a CLIENT build
+# produces a base64(JSON) payment header and a SERVER verify consumes one.
+# So the cross-SDK oracle is the DECODED ENVELOPE shape (x402Version, v1
+# top-level scheme/network vs v2 accepted, payloadHasTransaction), never the
+# signed Solana transaction inside payload.transaction. This mirrors the
+# rust spine and the TS reference oracle (harness/src/conformance/x402.ts):
+#   - build v2 -> pay_kit build_payment_header    (PAYMENT-SIGNATURE)
+#   - build v1 -> pay_kit build_payment_header_v1 (X-PAYMENT)
+#   - verify   -> the envelope-level version dispatch + network gate + the
+#                 v2 accepted-vs-route field comparison from the pay_kit
+#                 X402Adapter.verify_and_settle pre-broadcast surface.
+
+
+def _decode_envelope_shape(header_b64: str) -> dict[str, Any]:
+    """Decode a base64(JSON) payment header into the X402EnvelopeShape oracle.
+
+    Mirrors decodeEnvelopeShape in harness/src/conformance/x402.ts: presence
+    of top-level scheme/network is meaningful (v1 carries them, v2 must not
+    leak them); hasAccepted is true iff a v2 ``accepted`` object is present;
+    payloadHasTransaction is true iff payload carries a non-empty transaction.
+    """
+    env = json.loads(base64.b64decode(header_b64, validate=True))
+    accepted = env.get("accepted")
+    payload = env.get("payload") or {}
+    transaction = payload.get("transaction") if isinstance(payload, dict) else None
+    shape: dict[str, Any] = {
+        "x402Version": env.get("x402Version"),
+        "hasAccepted": isinstance(accepted, dict),
+        "payloadHasTransaction": isinstance(transaction, str) and transaction != "",
+    }
+    if "scheme" in env:
+        shape["scheme"] = env["scheme"]
+    if "network" in env:
+        shape["network"] = env["network"]
+    if isinstance(accepted, dict):
+        shape["acceptedScheme"] = accepted.get("scheme")
+        shape["acceptedNetwork"] = accepted.get("network")
+        shape["acceptedAsset"] = accepted.get("asset")
+        shape["acceptedPayTo"] = accepted.get("payTo")
+        shape["acceptedAmount"] = accepted.get("amount")
+    return shape
+
+
+async def _x402_build_header(vector: dict[str, Any]) -> str:
+    """Drive the real pay_kit x402 client to build a v1/v2 payment header.
+
+    The offer is the vector's ``x402Offer``; ``x402Version`` selects the wire
+    version. An ephemeral signer + pinned blockhash + pinned memo nonce keep
+    the build deterministic and RPC-free; the resulting transaction is real
+    but its bytes are not asserted (the envelope shape is the oracle).
+    """
+    inp = vector.get("input") or {}
+    offer = inp.get("x402Offer")
+    if not offer:
+        raise ValueError("x402 build vector is missing input.x402Offer")
+    version = inp.get("x402Version", X402_VERSION_V2)
+
+    signer = LocalSigner.generate()
+    builder = build_payment_header_v1 if version == X402_VERSION_V1 else build_payment_header
+    return await builder(
+        signer,
+        OfflineRPC(),
+        offer,
+        recent_blockhash_provider=lambda: _X402_PINNED_BLOCKHASH,
+        memo_nonce=lambda: _X402_PINNED_MEMO_NONCE,
+    )
+
+
+def _x402_verify(vector: dict[str, Any]) -> dict[str, Any]:
+    """Drive the envelope-level x402 server verify against the route.
+
+    Mirrors the pre-broadcast surface of pay_kit X402Adapter.verify_and_settle
+    and the rust spine ``parse_payment_signature`` + ``verify_envelope_payload``:
+    version dispatch, the network gate (v1 legacy slug / v2 accepted.network),
+    and the v2 accepted-vs-route field comparison. The signed-transaction
+    settlement inside payload.transaction is intentionally out of scope (the
+    interop matrix's job), so a structurally valid, route-matching envelope is
+    accepted here. Returns the decoded envelope shape on accept; raises with a
+    classifiable message on reject.
+    """
+    inp = vector.get("input") or {}
+    header = inp.get("x402PaymentHeader")
+    if not header:
+        raise ValueError("x402 verify vector is missing input.x402PaymentHeader")
+
+    try:
+        env = json.loads(base64.b64decode(header, validate=True))
+    except Exception as exc:  # noqa: BLE001 - any decode failure is invalid payload
+        raise ValueError(f"invalid payload: undecodable payment header ({exc})") from exc
+    if not isinstance(env, dict):
+        raise ValueError("invalid payload: payment header is not a JSON object")
+
+    expected_network = _caip2_network_for_cluster(inp.get("x402ServerNetwork") or DEFAULT_NETWORK)
+    version = env.get("x402Version")
+
+    if version == X402_VERSION_V1:
+        scheme = env.get("scheme") or ""
+        if scheme != "exact":
+            raise ValueError(f"invalid payload: unexpected scheme {scheme}")
+        network = env.get("network") or ""
+        if _caip2_network_for_cluster(network) != expected_network:
+            raise ValueError(f"Network mismatch: expected {expected_network}, got {network}")
+    elif version == X402_VERSION_V2:
+        accepted = env.get("accepted")
+        if not isinstance(accepted, dict):
+            raise ValueError("invalid payload: v2 envelope missing accepted")
+        accepted_network = accepted.get("network") or ""
+        if accepted_network != expected_network:
+            raise ValueError(f"Network mismatch: expected {expected_network}, got {accepted_network}")
+        # accepted-vs-route field comparison (rust verify_envelope_payload).
+        if (accepted.get("amount") or "") != (inp.get("x402ServerAmount") or ""):
+            raise ValueError(
+                f"Amount mismatch: expected {inp.get('x402ServerAmount')}, got {accepted.get('amount')}"
+            )
+        if (accepted.get("payTo") or "") != (inp.get("x402ServerRecipient") or ""):
+            raise ValueError("Recipient mismatch: credential claims a different recipient")
+        if (accepted.get("asset") or "") != (inp.get("x402ServerCurrency") or ""):
+            raise ValueError(
+                f"Currency mismatch: expected {inp.get('x402ServerCurrency')}, got {accepted.get('asset')}"
+            )
+    else:
+        raise ValueError(f"invalid payload: Unsupported x402 version: {version}")
+
+    payload = env.get("payload") or {}
+    transaction = payload.get("transaction") if isinstance(payload, dict) else None
+    if not isinstance(transaction, str) or transaction == "":
+        raise ValueError("invalid payload: missing transaction proof")
+
+    return _decode_envelope_shape(header)
+
+
+def _run_x402(vector: dict[str, Any]) -> dict[str, Any]:
+    vector_id = vector.get("id", "")
+    mode = vector.get("mode")
+
+    if mode == "build-transaction":
+        header = asyncio.run(_x402_build_header(vector))
+        return {
+            "id": vector_id,
+            "outcome": "accept",
+            "x402EnvelopeShape": _decode_envelope_shape(header),
+        }
+
+    if mode == "verify-transaction":
+        shape = _x402_verify(vector)
+        return {"id": vector_id, "outcome": "accept", "x402EnvelopeShape": shape}
+
+    # Any other mode for the x402 intent has no Python equivalent.
+    raise ValueError(f"unsupported-mode: {mode}")
+
+
 def _run_vector(vector: dict[str, Any]) -> dict[str, Any]:
     vector_id = vector.get("id", "")
     mode = vector.get("mode")
+
+    if vector.get("intent") == "x402-exact":
+        return _run_x402(vector)
 
     if mode == "canonical-bytes":
         return {"id": vector_id, "outcome": "accept", "exactBytes": _run_canonical_bytes(vector)}
@@ -360,6 +536,12 @@ _REJECT_PATTERNS: list[tuple[str, str]] = [
     (r"no matching (spl )?(token )?transfer", "no-matching-transfer"),
     (r"unexpected .* (instruction|transfer)", "unexpected-instruction"),
     (r"amount .* (mismatch|does not match)", "amount-mismatch"),
+    # x402-exact reject categories. ``unsupported x402 version`` must be
+    # matched before the generic invalid/payload fallback (the message reads
+    # "invalid payload: Unsupported x402 version"); ``network mismatch``
+    # likewise precedes the fallback. Mirrors harness/src/conformance/reject.ts.
+    (r"unsupported x402 version", "unsupported-version"),
+    (r"network mismatch", "wrong-network"),
 ]
 
 
