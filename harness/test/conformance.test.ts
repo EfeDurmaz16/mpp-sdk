@@ -44,18 +44,29 @@ function loadVectors(): ConformanceVector[] {
 }
 
 // One CLI per SDK over stdin/stdout. The TS reference runner is invoked
-// via tsx; other languages will register their own command here.
+// via tsx; other languages register their own command here. The Go runner
+// is the compiled cmd/conformance binary, driven by `go run` so the suite
+// needs no separate build step (the Go toolchain caches the build).
+const goRunnerDir = join(here, "..", "..", "go");
 const RUNNERS: Record<string, string[]> = {
   typescript: ["pnpm", "exec", "node", "--import", "tsx", tsRunner],
+  go: ["go", "run", "./cmd/conformance"],
+};
+
+// Per-runner working directory. Defaults to the harness root; the Go runner
+// must run from the go module so `go run ./cmd/conformance` resolves.
+const RUNNER_CWD: Record<string, string> = {
+  go: goRunnerDir,
 };
 
 function runVector(
   command: string[],
   vector: ConformanceVector,
+  cwd: string,
 ): Promise<RunnerResult> {
   const [bin, ...args] = command;
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { cwd: join(here, "..") });
+    const child = spawn(bin, args, { cwd });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
@@ -177,10 +188,11 @@ describe("cross-SDK conformance vectors", () => {
   });
 
   for (const [language, command] of Object.entries(RUNNERS)) {
+    const runnerCwd = RUNNER_CWD[language] ?? join(here, "..");
     describe(`${language} reference runner`, () => {
       for (const vector of vectors) {
         it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async () => {
-          const result = await runVector(command, vector);
+          const result = await runVector(command, vector, runnerCwd);
           expect(result.id).toBe(vector.id);
           expect(
             result.outcome,
