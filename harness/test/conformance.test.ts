@@ -208,6 +208,7 @@ describe("cross-SDK conformance vectors", () => {
     const runnerCwd = RUNNER_CWD[language] ?? join(here, "..");
     describe(`${language} reference runner`, () => {
       for (const vector of vectors) {
+<<<<<<< HEAD
         it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async (ctx) => {
           const result = await runVector(command, vector, runnerCwd);
           expect(result.id).toBe(vector.id);
@@ -228,6 +229,21 @@ describe("cross-SDK conformance vectors", () => {
             return;
           }
 
+=======
+        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async ({
+          skip,
+        }) => {
+          const result = await runVector(command, vector, runnerCwd);
+          expect(result.id).toBe(vector.id);
+          // A runner that does not support a vector's mode (e.g. a
+          // server-only SDK asked to build a transaction) reports
+          // "unsupported-mode"; skip rather than fail so the matrix only
+          // asserts the modes each SDK actually exercises.
+          if ((result.outcome as string) === "unsupported-mode") {
+            skip(`${language} does not support ${vector.mode}: ${result.error ?? ""}`);
+            return;
+          }
+>>>>>>> fork/conf/php-runner
           expect(
             result.outcome,
             `expected ${vector.expect.outcome} but runner said ${result.outcome}: ${result.error ?? ""}`,

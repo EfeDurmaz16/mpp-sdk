@@ -18,6 +18,7 @@ return (new Config())
                 __DIR__ . '/src',
                 __DIR__ . '/tests',
                 __DIR__ . '/examples',
+                __DIR__ . '/conformance',
                 __DIR__ . '/../harness/php-server',
             ])
             ->exclude(['laravel'])
