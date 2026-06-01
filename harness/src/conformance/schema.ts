@@ -15,6 +15,12 @@ export type VectorMode = "build-transaction" | "verify-transaction" | "canonical
 
 export type VectorOutcome = "accept" | "reject";
 
+// A runner may additionally report that it has no equivalent for a vector's
+// mode (e.g. a server-only SDK asked to build a transaction). This is NOT a
+// conformance failure: the driver SKIPs the vector for that runner. It is
+// distinct from "reject", which is a genuine, asserted policy decision.
+export type RunnerOutcome = VectorOutcome | "unsupported-mode";
+
 export type VectorSplit = {
   recipient: string;
   amount: string;
@@ -152,6 +158,8 @@ export type RunnerOutcome = VectorOutcome | "unsupported-mode";
 // The result a runner emits to stdout for one vector.
 export type RunnerResult = {
   id: string;
+  // "accept" | "reject" assert against the vector's expect block;
+  // "unsupported-mode" tells the driver to SKIP this vector for the runner.
   outcome: RunnerOutcome;
   // Present on build/verify accept. The decoded semantic shape.
   transactionShape?: TransactionShape;
