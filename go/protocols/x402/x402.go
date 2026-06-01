@@ -29,7 +29,19 @@ const (
 	paymentRequiredHeader = "payment-required"
 	paymentResponseHeader = "payment-response"
 	settlementHeader      = "x-payment-settlement-signature"
-	x402Version           = 2
+
+	// Version constants mirror the Rust spine constants.rs
+	// X402_VERSION_V1/X402_VERSION_V2: integers on the wire, not
+	// strings. v2 is the default the server emits; v1 inbound is
+	// accepted for backward compatibility (no v1 challenge emission).
+	x402VersionV1 = 1
+	x402VersionV2 = 2
+	x402Version   = x402VersionV2
+
+	// exactScheme is the only scheme the x402 adapter accepts. A v1
+	// envelope must carry scheme=="exact" at the top level
+	// (server/exact.rs:318, EXACT_SCHEME types.rs:6).
+	exactScheme = "exact"
 
 	// stablecoinDecimals is the mint decimal count advertised in the
 	// challenge. Every stablecoin in the paycore table (USDC, USDT, USDG,
@@ -129,6 +141,16 @@ type AcceptsEntry struct {
 	// field without dropping unknown keys. Empty for server-constructed
 	// entries (which marshal from the typed fields).
 	raw json.RawMessage
+
+	// rawCluster and rawNetwork retain the offer's ORIGINAL cluster and
+	// network slugs (pre-normalization) so the legacy v1 network mapping
+	// can reproduce the Rust v1_network_for_requirements selector exactly:
+	// it prefers cluster over network and distinguishes "localnet" (-> the
+	// "solana" bucket) from "devnet" (-> the "solana-devnet" bucket). The
+	// normalized Network field collapses both into the devnet CAIP-2 id, so
+	// it cannot drive that mapping. Empty for server-constructed entries.
+	rawCluster string
+	rawNetwork string
 }
 
 // Extra carries x402's optional metadata. RecentBlockhash is the
@@ -160,6 +182,7 @@ type rawAcceptsEntry struct {
 	Protocol          string    `json:"protocol"`
 	Scheme            string    `json:"scheme"`
 	Network           string    `json:"network"`
+	Cluster           string    `json:"cluster"`
 	Asset             string    `json:"asset"`
 	Currency          string    `json:"currency"`
 	Amount            string    `json:"amount"`
@@ -207,6 +230,10 @@ func (e *AcceptsEntry) UnmarshalJSON(data []byte) error {
 	e.Protocol = r.Protocol
 	e.Scheme = r.Scheme
 	e.Network = normalizeNetwork(r.Network)
+	// Retain the original slugs (pre-normalization) for the legacy v1
+	// network selector, which must distinguish localnet from devnet.
+	e.rawCluster = r.Cluster
+	e.rawNetwork = r.Network
 
 	// asset := asset || currency (top-level currency, then offered asset).
 	e.Asset = firstNonEmpty(r.Asset, r.Currency)
@@ -306,6 +333,33 @@ func (e AcceptsEntry) MarshalJSON() ([]byte, error) {
 // nil for a server-constructed entry. The client echoes this in the
 // credential's `accepted` field so unknown keys survive the round-trip.
 func (e AcceptsEntry) RawAccepted() json.RawMessage { return e.raw }
+
+// LegacyNetworkString reports the legacy x402 v1 network string for this
+// offer, mirroring the Rust v1_network_for_requirements selector
+// (client/exact/payment.rs:383-394): pick the original cluster slug if
+// present, else the original network slug, then collapse the full CAIP-2
+// space into two buckets. Only {"devnet","solana-devnet",devnet-CAIP-2}
+// map to "solana-devnet"; everything else (mainnet, testnet, LOCALNET,
+// unknown) maps to "solana".
+//
+// The selector reads the ORIGINAL slugs, not the normalized Network
+// field, because normalization collapses "localnet" into the devnet
+// CAIP-2 id and would otherwise misroute a localnet offer to
+// "solana-devnet". For a server-constructed entry (no parsed source
+// slugs) it falls back to the normalized Network, where localnet is
+// already indistinguishable from devnet.
+func (e AcceptsEntry) LegacyNetworkString() string {
+	selector := firstNonEmpty(e.rawCluster, e.rawNetwork)
+	if selector == "" {
+		selector = e.Network
+	}
+	switch selector {
+	case "devnet", "solana-devnet", solanaDevnetCAIP2:
+		return "solana-devnet"
+	default:
+		return "solana"
+	}
+}
 
 // firstNonEmpty returns the first non-empty string argument.
 func firstNonEmpty(values ...string) string {
@@ -441,7 +495,19 @@ func (a *Adapter) VerifyAndSettle(req *paykit.AdapterRequest) (*paykit.Payment, 
 	if err := json.Unmarshal(credBytes, &credential); err != nil {
 		return nil, &paykit.PaymentError{Code: "invalid_payload", Err: fmt.Errorf("decode credential: %w", err), Gate: req.Gate}
 	}
-	if credential.X402Version != x402Version {
+	// Branch on the wire version, mirroring the Rust spine
+	// parse_payment_signature (server/exact.rs:315-347). v1 (legacy)
+	// carries the scheme + network at the top level and no `accepted`
+	// object; v2 carries the `accepted` requirements. Anything else,
+	// including a genuinely-unknown version, is rejected.
+	switch credential.X402Version {
+	case x402VersionV1:
+		if err := a.verifyV1Envelope(req.Gate, &credential); err != nil {
+			return nil, &paykit.PaymentError{Code: "charge_request_mismatch", Err: err, Gate: req.Gate}
+		}
+	case x402VersionV2:
+		// handled by the accepted-binding block below.
+	default:
 		return nil, &paykit.PaymentError{Code: "version_mismatch", Err: fmt.Errorf("unsupported x402Version %d", credential.X402Version), Gate: req.Gate}
 	}
 
@@ -547,6 +613,26 @@ func (a *Adapter) VerifyAndSettle(req *paykit.AdapterRequest) (*paykit.Payment, 
 		SettlementHeaders: headers,
 		Raw:               sig,
 	}, nil
+}
+
+// verifyV1Envelope validates a legacy v1 credential at parse time,
+// mirroring the Rust X402_VERSION_V1 arm (server/exact.rs:316-327). v1
+// has no `accepted` object; the only top-level commitments are the
+// scheme and network. The scheme must be "exact", and the legacy
+// network string must normalize (through the same CAIP-2 mapping the
+// offer parser uses) to this server's configured CAIP-2 network. The
+// route's expected requirements always come from the gate, never the
+// credential, so no per-field amount/recipient binding runs for v1.
+func (a *Adapter) verifyV1Envelope(_ *paykit.Gate, credential *Credential) error {
+	if credential.Scheme != exactScheme {
+		return fmt.Errorf("invalid payload type: expected scheme %q, got %q", exactScheme, credential.Scheme)
+	}
+	expected := a.cfg.Network.CAIP2()
+	got := normalizeNetwork(credential.Network)
+	if got != expected {
+		return fmt.Errorf("network mismatch: expected %s, got %s", expected, credential.Network)
+	}
+	return nil
 }
 
 // verifyAcceptedBinding rejects a credential whose echoed `accepted`
