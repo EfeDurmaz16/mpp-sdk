@@ -44,18 +44,30 @@ function loadVectors(): ConformanceVector[] {
 }
 
 // One CLI per SDK over stdin/stdout. The TS reference runner is invoked
-// via tsx; other languages will register their own command here.
+// via tsx; other languages register their own command here. The Rust runner
+// is the `conformance` bin in the solana-mpp crate, driven by `cargo run` so
+// the suite needs no separate build step (the Cargo toolchain caches the
+// build).
+const rustWorkspaceDir = join(here, "..", "..", "rust");
 const RUNNERS: Record<string, string[]> = {
   typescript: ["pnpm", "exec", "node", "--import", "tsx", tsRunner],
+  rust: ["cargo", "run", "-q", "-p", "solana-mpp", "--bin", "conformance"],
+};
+
+// Per-runner working directory. Defaults to the harness root; the Rust runner
+// must run from the rust workspace so `cargo run -p solana-mpp` resolves.
+const RUNNER_CWD: Record<string, string> = {
+  rust: rustWorkspaceDir,
 };
 
 function runVector(
   command: string[],
   vector: ConformanceVector,
+  cwd: string,
 ): Promise<RunnerResult> {
   const [bin, ...args] = command;
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { cwd: join(here, "..") });
+    const child = spawn(bin, args, { cwd });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
@@ -177,11 +189,25 @@ describe("cross-SDK conformance vectors", () => {
   });
 
   for (const [language, command] of Object.entries(RUNNERS)) {
+    const cwd = RUNNER_CWD[language] ?? join(here, "..");
     describe(`${language} reference runner`, () => {
       for (const vector of vectors) {
         it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async () => {
-          const result = await runVector(command, vector);
+          const result = await runVector(command, vector, cwd);
           expect(result.id).toBe(vector.id);
+
+          // A runner that does not support a vector's mode for its role
+          // (e.g. a server-only SDK asked to build) emits a reject whose
+          // error is prefixed `unsupported-mode`. Skip rather than fail so
+          // the matrix only asserts the modes each SDK actually covers.
+          if (
+            result.outcome === "reject" &&
+            result.error?.startsWith("unsupported-mode") &&
+            vector.expect.outcome !== "reject"
+          ) {
+            return;
+          }
+
           expect(
             result.outcome,
             `expected ${vector.expect.outcome} but runner said ${result.outcome}: ${result.error ?? ""}`,
