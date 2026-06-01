@@ -67,6 +67,16 @@ type VectorInput struct {
 	RPCFixtures     *RPCFixtures     `json:"rpcFixtures"`
 	Value           json.RawMessage  `json:"value"`
 	EncodeBase64URL *EncodeBase64URL `json:"encodeBase64Url"`
+
+	// x402-exact inputs (mirror schema.ts VectorInput x402 fields).
+	X402Offer             *X402Offer `json:"x402Offer"`
+	X402Version           int        `json:"x402Version"`
+	X402PinnedTransaction string     `json:"x402PinnedTransaction"`
+	X402ServerNetwork     string     `json:"x402ServerNetwork"`
+	X402ServerRecipient   string     `json:"x402ServerRecipient"`
+	X402ServerCurrency    string     `json:"x402ServerCurrency"`
+	X402ServerAmount      string     `json:"x402ServerAmount"`
+	X402PaymentHeader     string     `json:"x402PaymentHeader"`
 }
 
 // ChargeRequest mirrors schema.ts VectorChargeRequest.
@@ -135,12 +145,13 @@ type ExactBytes struct {
 
 // RunnerResult mirrors schema.ts RunnerResult.
 type RunnerResult struct {
-	ID               string            `json:"id"`
-	Outcome          string            `json:"outcome"`
-	TransactionShape *TransactionShape `json:"transactionShape,omitempty"`
-	ExactBytes       *ExactBytes       `json:"exactBytes,omitempty"`
-	Error            string            `json:"error,omitempty"`
-	RejectCode       string            `json:"rejectCode,omitempty"`
+	ID                string             `json:"id"`
+	Outcome           string             `json:"outcome"`
+	TransactionShape  *TransactionShape  `json:"transactionShape,omitempty"`
+	X402EnvelopeShape *X402EnvelopeShape `json:"x402EnvelopeShape,omitempty"`
+	ExactBytes        *ExactBytes        `json:"exactBytes,omitempty"`
+	Error             string             `json:"error,omitempty"`
+	RejectCode        string             `json:"rejectCode,omitempty"`
 }
 
 // rejectPattern pairs a compiled regex with the normalized RejectCode it
@@ -168,6 +179,12 @@ var rejectPatterns = []rejectPattern{
 	{regexp.MustCompile(`(?i)no matching (spl )?(token )?(transfer|transferchecked|sol transfer)`), "no-matching-transfer"},
 	{regexp.MustCompile(`(?i)unexpected .* (instruction|transfer)`), "unexpected-instruction"},
 	{regexp.MustCompile(`(?i)amount .* (mismatch|does not match)`), "amount-mismatch"},
+	// x402-exact reject categories. `unsupported x402 version` must be
+	// checked before the generic invalid/payload fallback (the message is
+	// "invalid payload: unsupported x402 version: N"). `network mismatch`
+	// likewise precedes the fallback. Mirrors harness/src/conformance/reject.ts.
+	{regexp.MustCompile(`(?i)unsupported x402 version`), "unsupported-version"},
+	{regexp.MustCompile(`(?i)network mismatch`), "wrong-network"},
 }
 
 var invalidPayloadPattern = regexp.MustCompile(`(?i)invalid|malformed|decode|payload`)
@@ -242,6 +259,9 @@ func run() error {
 }
 
 func runVector(vector Vector) RunnerResult {
+	if vector.Intent == "x402-exact" {
+		return runX402(vector)
+	}
 	switch vector.Mode {
 	case "canonical-bytes":
 		eb, err := runCanonicalBytes(vector)
