@@ -7,11 +7,11 @@ plugins {
 }
 
 android {
-    namespace = "com.solana.mpp.demo"
+    namespace = "com.solana.paykit.demo"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.solana.mpp.demo"
+        applicationId = "com.solana.paykit.demo"
         minSdk = 26
         targetSdk = 34
         versionCode = 1
@@ -62,6 +62,11 @@ kotlin {
 }
 
 tasks.withType<KotlinCompile>().configureEach {
+    // This demo exercises MPP charge only. Exclude the vendored x402 client
+    // sources: they depend on com.solanamobile:web3-solana, whose Kotlin 2.x
+    // metadata is unreadable by this demo's Kotlin 1.9 toolchain (pinned for
+    // Mobile Wallet Adapter 2.0.0 compatibility).
+    exclude("**/protocols/x402/**")
     kotlinOptions {
         jvmTarget = "17"
     }
@@ -82,7 +87,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
-    // multimult ships Base58 used by com.solana.mpp.crypto.Base58. The SDK
+    // multimult ships Base58 used by com.solana.paykit.paycore.Base58. The SDK
     // sources are vendored into this Android module via sourceSets, so the
     // dependency cannot be inherited from kotlin/build.gradle.kts and must
     // be declared explicitly here. We pin the Android variant (not -jvm)

@@ -28,6 +28,17 @@ import type {
 const here = dirname(fileURLToPath(import.meta.url));
 const vectorsDir = join(here, "..", "vectors");
 const tsRunner = join(here, "..", "src", "conformance", "ts-runner.ts");
+const kotlinRunner = join(
+  here,
+  "..",
+  "..",
+  "kotlin",
+  "build",
+  "install",
+  "conformance-runner",
+  "bin",
+  "conformance-runner",
+);
 
 function loadVectors(): ConformanceVector[] {
   const files = readdirSync(vectorsDir).filter((name) => name.endsWith(".json"));
@@ -46,7 +57,10 @@ function loadVectors(): ConformanceVector[] {
 // One CLI per SDK over stdin/stdout. The TS reference runner is invoked
 // via tsx; other languages register their own command here. Each runner
 // runs from its own SDK directory (see RUNNER_CWD) so the suite needs no
-// separate build step beyond the per-language toolchain caches.
+// separate build step beyond the per-language toolchain caches. The Kotlin
+// runner is the `application` plugin start script produced by
+// `gradle installDist`, so the suite invokes that start script per vector
+// instead of paying gradle startup on every spawn.
 const goRunnerDir = join(here, "..", "..", "go");
 const pythonRunnerDir = join(here, "..", "..", "python");
 const rubyRunnerDir = join(here, "..", "..", "ruby");
@@ -61,12 +75,14 @@ const RUNNERS: Record<string, string[]> = {
   php: ["php", "conformance/runner.php"],
   lua: ["luajit", "cmd/conformance/main.lua"],
   rust: ["cargo", "run", "-q", "-p", "solana-mpp", "--bin", "conformance"],
+  kotlin: [kotlinRunner],
 };
 
 // Per-runner working directory. Defaults to the harness root; each
 // non-TypeScript runner must run from its own SDK tree so its toolchain
 // resolves the project (go module, uv venv, bundler Gemfile, vendor
-// autoloader, lua package path, cargo workspace).
+// autoloader, lua package path, cargo workspace). The Kotlin start script
+// resolves its lib/ relative to its own location, so the harness root is fine.
 const RUNNER_CWD: Record<string, string> = {
   go: goRunnerDir,
   python: pythonRunnerDir,
