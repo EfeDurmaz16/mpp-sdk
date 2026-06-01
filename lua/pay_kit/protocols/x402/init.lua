@@ -260,23 +260,20 @@ end
 -- Client-side helper mirroring rust `build_payment_header_v1`
 -- (payment.rs:144-160). The proof is byte-for-byte identical to v2 (same
 -- build_payment); only the envelope differs: x402Version=1, top-level
--- scheme="exact" + legacy network string, NO accepted, NO resource, then the
--- flattened proof. The encoded value is written to the X-PAYMENT header.
+-- scheme="exact" + legacy network string, NO accepted, NO resource, plus the
+-- proof nested under `payload`. The encoded value is written to the X-PAYMENT
+-- header.
 local function build_payment_header_v1(requirements, proof)
+  -- The rust PaymentSignatureEnvelope carries `payload: PaymentProof` as a
+  -- NESTED object (types.rs:480-493, parsed via `match envelope.payload` at
+  -- exact.rs:544). The proof itself is the untagged PaymentProof, i.e. an
+  -- object with a `transaction` xor `signature` key. Nest it, do not flatten.
   local envelope = {
     scheme      = EXACT_SCHEME,
     network     = legacy_network_for_requirements(requirements),
     x402Version = X402_VERSION_V1,
+    payload     = proof,
   }
-  -- Flatten the proof (transaction xor signature) into the envelope, matching
-  -- the rust untagged PaymentProof flatten (types.rs:429-444, payment.rs:159).
-  if type(proof) == 'table' then
-    if proof.transaction ~= nil then
-      envelope.transaction = proof.transaction
-    elseif proof.signature ~= nil then
-      envelope.signature = proof.signature
-    end
-  end
   return base64_std.encode(cjson_safe.encode(envelope))
 end
 

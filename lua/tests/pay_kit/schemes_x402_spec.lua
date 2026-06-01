@@ -220,16 +220,22 @@ helper.test('build_payment_header_v1 emits the X-PAYMENT envelope shape', functi
   helper.assert_equal(env.network, 'solana-devnet')
   helper.assert_equal(env.accepted, nil)
   helper.assert_equal(env.resource, nil)
-  helper.assert_equal(env.transaction, proof.transaction)
+  -- The proof is NESTED under `payload`, matching the rust
+  -- PaymentSignatureEnvelope (types.rs:480-493). It is NOT flattened.
+  helper.assert_equal(env.payload.transaction, proof.transaction)
+  helper.assert_equal(env.transaction, nil)
+  helper.assert_equal(env.signature, nil)
 end)
 
-helper.test('build_payment_header_v1 flattens a signature proof', function()
+helper.test('build_payment_header_v1 nests a signature proof under payload', function()
   local base64 = require('pay_kit.util.base64_std')
   local encoded = x402._private.build_payment_header_v1(
     {network = 'solana'}, {signature = 'SiGbAsE58'})
   local env = cjson.decode(base64.decode(encoded))
   helper.assert_equal(env.network, 'solana')
-  helper.assert_equal(env.signature, 'SiGbAsE58')
+  helper.assert_equal(env.payload.signature, 'SiGbAsE58')
+  helper.assert_equal(env.payload.transaction, nil)
+  helper.assert_equal(env.signature, nil)
   helper.assert_equal(env.transaction, nil)
 end)
 
@@ -277,15 +283,17 @@ helper.test('verify_and_settle accepts a v1 credential past the version gate', f
   local adapter = assert(x402.new({config_resolver = pay_kit.config}))
   local base64 = require('pay_kit.util.base64_std')
   -- A v1 credential carries no `accepted`; the route offer is the sole source
-  -- of truth, so the accepted-mismatch path must NOT fire. The flow then
-  -- proceeds to proof decoding, where this placeholder fails with a proof
-  -- error (not a version / mismatch / scheme error), proving v1 is accepted
-  -- through the version + scheme + network gates.
+  -- of truth, so the accepted-mismatch path must NOT fire. The proof is nested
+  -- under `payload` (the rust envelope shape, types.rs:480-493), so the flow
+  -- reaches proof decoding/verification, where this placeholder transaction
+  -- fails with a proof-verification error (not a version / mismatch / scheme
+  -- error, and crucially NOT 'payload missing transaction'), proving the v1
+  -- proof actually reaches verification through the version+scheme+network gates.
   local cred = {
     x402Version = 1,
     scheme      = 'exact',
     network     = 'solana-devnet',
-    transaction = base64.encode('placeholder'),
+    payload     = {transaction = base64.encode('placeholder')},
   }
   local headers = {['x-payment'] = base64.encode(cjson.encode(cred))}
   local _, err = adapter:verify_and_settle(gate, {headers = headers, path = '/paid'})
@@ -296,6 +304,10 @@ helper.test('verify_and_settle accepts a v1 credential past the version gate', f
     'v1 must pass the version gate: ' .. tostring(err))
   helper.assert_true(not err:find('unsupported payment scheme', 1, true),
     'v1 exact scheme must pass: ' .. tostring(err))
+  -- The nested payload must be consumed: this must NOT short-circuit on a
+  -- missing-transaction error; it must be a real proof/verification failure.
+  helper.assert_true(not err:find('payment payload missing transaction', 1, true),
+    'v1 proof must reach verification, not bail on missing transaction: ' .. tostring(err))
 end)
 
 helper.test('verify_and_settle rejects a v1 credential on the wrong network', function()
