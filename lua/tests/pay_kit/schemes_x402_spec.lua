@@ -135,9 +135,9 @@ helper.test('decode_payment_signature rejects empty header', function()
   helper.assert_true(err and err:find('payment required', 1, true), err)
 end)
 
-helper.test('decode_payment_signature rejects unsupported version', function()
+helper.test('decode_payment_signature rejects genuinely-unknown version', function()
   local base64 = require('pay_kit.util.base64_std')
-  local encoded = base64.encode(cjson.encode({x402Version = 1}))
+  local encoded = base64.encode(cjson.encode({x402Version = 9}))
   local _, err = x402._private.decode_payment_signature(encoded)
   helper.assert_true(err and err:find('unsupported x402Version', 1, true), err)
 end)
@@ -150,6 +150,182 @@ helper.test('decode_payment_signature accepts v2 envelope', function()
   helper.assert_equal(env.x402Version, 2)
 end)
 
+-- --- legacy v1 wire shape (inbound credential) ----------------------
+
+helper.test('decode_payment_signature accepts a v1 envelope (scheme + network)', function()
+  local base64 = require('pay_kit.util.base64_std')
+  local body = {
+    x402Version = 1,
+    scheme      = 'exact',
+    network     = 'solana-devnet',
+    transaction = base64.encode('placeholder'),
+  }
+  local encoded = base64.encode(cjson.encode(body))
+  -- With the server's devnet CAIP-2 expectation the legacy string normalizes
+  -- back and the credential is accepted (no `accepted` object required).
+  local env = assert(x402._private.decode_payment_signature(
+    encoded, x402._private.caip2_for('solana_devnet')))
+  helper.assert_equal(env.x402Version, 1)
+  helper.assert_equal(env.scheme, 'exact')
+  helper.assert_equal(env.accepted, nil)
+end)
+
+helper.test('decode_payment_signature rejects a v1 envelope with wrong scheme', function()
+  local base64 = require('pay_kit.util.base64_std')
+  local body = {x402Version = 1, scheme = 'other', network = 'solana'}
+  local encoded = base64.encode(cjson.encode(body))
+  local _, err = x402._private.decode_payment_signature(encoded)
+  helper.assert_true(err and err:find('unsupported payment scheme', 1, true), err)
+end)
+
+helper.test('decode_payment_signature rejects a v1 envelope on the wrong network', function()
+  local base64 = require('pay_kit.util.base64_std')
+  -- "solana" normalizes to mainnet CAIP-2, but the server expects devnet.
+  local body = {x402Version = 1, scheme = 'exact', network = 'solana'}
+  local encoded = base64.encode(cjson.encode(body))
+  local _, err = x402._private.decode_payment_signature(
+    encoded, x402._private.caip2_for('solana_devnet'))
+  helper.assert_true(err and err:find('wrong network', 1, true), err)
+end)
+
+-- --- legacy v1 network string mapping (payment.rs:383) -------------
+
+helper.test('legacy_network_for_requirements maps devnet to solana-devnet', function()
+  local fn = x402._private.legacy_network_for_requirements
+  helper.assert_equal(fn({cluster = 'devnet'}), 'solana-devnet')
+  helper.assert_equal(fn({network = 'solana-devnet'}), 'solana-devnet')
+  helper.assert_equal(fn({network = x402._private.caip2_for('solana_devnet')}), 'solana-devnet')
+end)
+
+helper.test('legacy_network_for_requirements maps everything else to solana', function()
+  local fn = x402._private.legacy_network_for_requirements
+  helper.assert_equal(fn({cluster = 'mainnet'}), 'solana')
+  helper.assert_equal(fn({cluster = 'localnet'}), 'solana')           -- localnet -> solana
+  helper.assert_equal(fn({cluster = 'testnet'}), 'solana')
+  helper.assert_equal(fn({network = x402._private.caip2_for('solana_mainnet')}), 'solana')
+  -- cluster takes precedence over network when both present.
+  helper.assert_equal(fn({cluster = 'devnet', network = 'solana'}), 'solana-devnet')
+end)
+
+-- --- legacy v1 producer (build_payment_header_v1) ------------------
+
+helper.test('build_payment_header_v1 emits the X-PAYMENT envelope shape', function()
+  local base64 = require('pay_kit.util.base64_std')
+  local requirements = {cluster = 'devnet'}
+  local proof = {transaction = base64.encode('signed-tx-bytes')}
+  local encoded = x402._private.build_payment_header_v1(requirements, proof)
+  local env = cjson.decode(base64.decode(encoded))
+  helper.assert_equal(env.x402Version, 1)
+  helper.assert_equal(env.scheme, 'exact')
+  helper.assert_equal(env.network, 'solana-devnet')
+  helper.assert_equal(env.accepted, nil)
+  helper.assert_equal(env.resource, nil)
+  -- The proof is NESTED under `payload`, matching the rust
+  -- PaymentSignatureEnvelope (types.rs:480-493). It is NOT flattened.
+  helper.assert_equal(env.payload.transaction, proof.transaction)
+  helper.assert_equal(env.transaction, nil)
+  helper.assert_equal(env.signature, nil)
+end)
+
+helper.test('build_payment_header_v1 nests a signature proof under payload', function()
+  local base64 = require('pay_kit.util.base64_std')
+  local encoded = x402._private.build_payment_header_v1(
+    {network = 'solana'}, {signature = 'SiGbAsE58'})
+  local env = cjson.decode(base64.decode(encoded))
+  helper.assert_equal(env.network, 'solana')
+  helper.assert_equal(env.payload.signature, 'SiGbAsE58')
+  helper.assert_equal(env.payload.transaction, nil)
+  helper.assert_equal(env.signature, nil)
+  helper.assert_equal(env.transaction, nil)
+end)
+
+-- --- legacy v1 challenge parse (flat PaymentRequirements) ----------
+
+helper.test('parse_challenge_header_v1 reads a flat PaymentRequirements (v1 aliases)', function()
+  -- Raw JSON, no base64, no accepts[] wrapper. v1 flat aliases:
+  -- recipient / currency / maxAmountRequired with a legacy network string.
+  local raw = cjson.encode({
+    scheme            = 'exact',
+    network           = 'solana-devnet',
+    recipient         = SELLER,
+    maxAmountRequired = '1000',
+    currency          = 'MintAddr',
+    maxTimeoutSeconds = 60,
+  })
+  local req = assert(x402._private.parse_challenge_header_v1(raw))
+  helper.assert_equal(req.scheme, 'exact')
+  helper.assert_equal(req.network, x402._private.caip2_for('solana_devnet'))  -- normalized
+  helper.assert_equal(req.recipient, SELLER)
+  helper.assert_equal(req.amount, '1000')
+  helper.assert_equal(req.currency, 'MintAddr')
+  helper.assert_equal(req.maxAge, 60)
+  helper.assert_equal(req.accepted, nil)            -- v1 flat yields no accepted
+end)
+
+helper.test('parse_payment_requirements retains accepted for the v2 shape', function()
+  local req = assert(x402._private.parse_payment_requirements({
+    scheme = 'exact',
+    network = x402._private.caip2_for('solana_devnet'),
+    payTo  = SELLER,
+    amount = '1000',
+    asset  = 'MintAddr',
+  }))
+  helper.assert_equal(req.recipient, SELLER)        -- payTo alias
+  helper.assert_equal(req.currency, 'MintAddr')     -- asset alias
+  helper.assert_true(req.accepted ~= nil)           -- v2 shape retains accepted
+end)
+
+-- --- server accepts a v1 credential end-to-end --------------------
+
+helper.test('verify_and_settle accepts a v1 credential past the version gate', function()
+  setup()
+  local gate = make_gate('0.001')
+  local adapter = assert(x402.new({config_resolver = pay_kit.config}))
+  local base64 = require('pay_kit.util.base64_std')
+  -- A v1 credential carries no `accepted`; the route offer is the sole source
+  -- of truth, so the accepted-mismatch path must NOT fire. The proof is nested
+  -- under `payload` (the rust envelope shape, types.rs:480-493), so the flow
+  -- reaches proof decoding/verification, where this placeholder transaction
+  -- fails with a proof-verification error (not a version / mismatch / scheme
+  -- error, and crucially NOT 'payload missing transaction'), proving the v1
+  -- proof actually reaches verification through the version+scheme+network gates.
+  local cred = {
+    x402Version = 1,
+    scheme      = 'exact',
+    network     = 'solana-devnet',
+    payload     = {transaction = base64.encode('placeholder')},
+  }
+  local headers = {['x-payment'] = base64.encode(cjson.encode(cred))}
+  local _, err = adapter:verify_and_settle(gate, {headers = headers, path = '/paid'})
+  helper.assert_true(err ~= nil, 'expected proof error, got success')
+  helper.assert_true(not err:find('does not match', 1, true),
+    'v1 must skip the accepted-mismatch check: ' .. tostring(err))
+  helper.assert_true(not err:find('unsupported x402Version', 1, true),
+    'v1 must pass the version gate: ' .. tostring(err))
+  helper.assert_true(not err:find('unsupported payment scheme', 1, true),
+    'v1 exact scheme must pass: ' .. tostring(err))
+  -- The nested payload must be consumed: this must NOT short-circuit on a
+  -- missing-transaction error; it must be a real proof/verification failure.
+  helper.assert_true(not err:find('payment payload missing transaction', 1, true),
+    'v1 proof must reach verification, not bail on missing transaction: ' .. tostring(err))
+end)
+
+helper.test('verify_and_settle rejects a v1 credential on the wrong network', function()
+  setup()                                            -- server is devnet
+  local gate = make_gate('0.001')
+  local adapter = assert(x402.new({config_resolver = pay_kit.config}))
+  local base64 = require('pay_kit.util.base64_std')
+  local cred = {x402Version = 1, scheme = 'exact', network = 'solana'}  -- mainnet
+  local headers = {['x-payment'] = base64.encode(cjson.encode(cred))}
+  local _, err = adapter:verify_and_settle(gate, {headers = headers, path = '/paid'})
+  helper.assert_true(err and err:find('wrong network', 1, true), tostring(err))
+end)
+
+helper.test('detect: returns true for non-empty X-PAYMENT (v1) header', function()
+  helper.assert_equal(x402.detect({['x-payment'] = 'abc'}), true)
+  helper.assert_equal(x402.detect({['X-PAYMENT'] = 'abc'}), true)
+end)
+
 -- --- mismatch flow --------------------------------------------------
 
 helper.test('verify_and_settle rejects unmatched accepted', function()
@@ -157,12 +333,19 @@ helper.test('verify_and_settle rejects unmatched accepted', function()
   local gate = make_gate('0.001')
   local adapter = assert(x402.new({config_resolver = pay_kit.config}))
   local base64 = require('pay_kit.util.base64_std')
+  -- Network matches the server (so the decode-time network check passes) but
+  -- the asset/payTo do not, exercising the accepted-mismatch path.
   local cred = {
     x402Version = 2,
-    accepted    = {scheme = 'exact', network = 'solana:wrong', asset = 'wrong', payTo = 'wrong'},
+    accepted    = {
+      scheme  = 'exact',
+      network = x402._private.caip2_for('solana_devnet'),
+      asset   = 'wrong',
+      payTo   = 'wrong',
+    },
     payload     = {transaction = base64.encode('placeholder')},
   }
   local headers = {['payment-signature'] = base64.encode(cjson.encode(cred))}
   local _, err = adapter:verify_and_settle(gate, {headers = headers, path = '/paid'})
-  helper.assert_true(err and err:find('does not match', 1, true), err)
+  helper.assert_true(err and err:find('does not match server challenge', 1, true), tostring(err))
 end)
