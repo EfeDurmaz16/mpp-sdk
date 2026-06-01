@@ -34,16 +34,30 @@ from pay_kit._paycore.solana import (
     is_native_sol,
 )
 from pay_kit.protocols.x402.exact.types import X402AcceptsEntry, X402Envelope, X402PayloadField
-from pay_kit.protocols.x402.exact.verify import COMPUTE_BUDGET_PROGRAM, X402_VERSION
+from pay_kit.protocols.x402.exact.verify import (
+    COMPUTE_BUDGET_PROGRAM,
+    X402_V1_PAYMENT_REQUIRED_HEADER,
+    X402_VERSION,
+    X402_VERSION_FIELD,
+    X402_VERSION_V1,
+)
 
 if TYPE_CHECKING:
     from pay_kit.signer import LocalSigner
+
+#: Legacy network identifier used by older Solana x402 integrations
+#: (rust ``SOLANA_NETWORK``, constants.rs:4). The v1 producer collapses the full
+#: CAIP-2 space into this string for everything that is not devnet.
+_SOLANA_LEGACY_NETWORK = "solana"
+#: Legacy devnet network identifier emitted in the v1 envelope.
+_SOLANA_DEVNET_LEGACY_NETWORK = "solana-devnet"
 
 __all__ = [
     "ChallengeSelection",
     "parse_x402_challenge",
     "build_payment",
     "build_payment_header",
+    "build_payment_header_v1",
 ]
 
 #: ComputeBudget SetComputeUnitLimit (disc 2, u32 LE). Matches the rust spine
@@ -138,12 +152,48 @@ def parse_x402_challenge(
         if offer is not None:
             return offer
 
+    # Legacy v1 challenge: the ``X-PAYMENT-REQUIRED`` header carries a raw-JSON
+    # flat ``PaymentRequirements`` (no base64, no ``accepts[]`` wrapper). Mirrors
+    # rust ``parse_x402_challenge_with_selection`` (payment.rs:236-243) which
+    # parses the value directly via ``serde_json::from_str::<PaymentRequirements>``
+    # and returns the single requirement without a selection step.
+    v1_header = _lookup_header(headers, X402_V1_PAYMENT_REQUIRED_HEADER.lower())
+    if v1_header:
+        offer = _parse_v1_flat_requirement(v1_header)
+        if offer is not None:
+            return offer
+
     if body is not None:
         offer = _select_from_body(body, selection)
         if offer is not None:
             return offer
 
     return None
+
+
+def _parse_v1_flat_requirement(header_value: str) -> X402AcceptsEntry | None:
+    """Parse a legacy v1 ``X-PAYMENT-REQUIRED`` raw-JSON flat requirement.
+
+    The v1 challenge is a single flat ``PaymentRequirements`` object using the
+    legacy field names (``recipient``/``maxAmountRequired``/``currency``) and a
+    legacy network string (``solana``/``solana-devnet``). The flat shape is
+    accepted directly by :func:`build_payment` (the dual-shape field precedence
+    already reads ``recipient``/``maxAmountRequired``/``currency``); the only
+    normalization needed here is the legacy network string to a CAIP-2 id so the
+    downstream client network/cluster handling matches the v2 path. Returns
+    ``None`` when the value is not a JSON object (no challenge here).
+    """
+    try:
+        parsed = json.loads(header_value)
+    except Exception:  # noqa: BLE001 - any decode failure means "no challenge here"
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    requirement = cast("dict[str, object]", parsed)
+    network = requirement.get("network")
+    if isinstance(network, str) and not network.startswith("solana:"):
+        requirement["network"] = _caip2_for_selection(network)
+    return cast("X402AcceptsEntry", requirement)
 
 
 def _lookup_header(headers: Mapping[str, str], name: str) -> str | None:
@@ -576,3 +626,56 @@ async def build_payment_header(
     )
     payload = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(payload).decode("ascii")
+
+
+def _legacy_network_for_requirement(requirement: X402AcceptsEntry) -> str:
+    """Map an offer's cluster/network to the legacy v1 network string.
+
+    Mirrors rust ``v1_network_for_requirements`` (payment.rs:383-394): select on
+    ``cluster`` when present, else ``network``; devnet (``devnet`` /
+    ``solana-devnet`` / the devnet CAIP-2 id) maps to ``"solana-devnet"``, and
+    every other value (mainnet, testnet, localnet, any unrecognized id) collapses
+    to ``"solana"``. The v1 wire space is only these two legacy strings.
+    """
+    req = cast("dict[str, object]", requirement)
+    selector = _str_field(req, "cluster") or _str_field(req, "network") or ""
+    if selector in ("devnet", "solana-devnet", SOLANA_DEVNET_CAIP2):
+        return _SOLANA_DEVNET_LEGACY_NETWORK
+    return _SOLANA_LEGACY_NETWORK
+
+
+async def build_payment_header_v1(
+    signer: LocalSigner,
+    rpc: Any,
+    requirement: X402AcceptsEntry,
+    *,
+    recent_blockhash_provider: Callable[[], Awaitable[str] | str] | None = None,
+    memo_nonce: Callable[[], str] | None = None,
+) -> str:
+    """Build the standard-base64 legacy ``X-PAYMENT`` header value (x402 v1).
+
+    Wraps :func:`build_payment` to produce the identical signed-transaction proof
+    as the default v2 producer, then wraps it in the legacy v1 envelope: top-level
+    ``scheme="exact"`` and ``network`` (the legacy string from
+    :func:`_legacy_network_for_requirement`), ``x402Version=1``, NO ``accepted``
+    and NO ``resource`` object, plus the flattened proof. Mirrors rust
+    ``build_payment_header_v1`` (payment.rs:144-160). The encoded value is written
+    to the ``X-PAYMENT`` header (constants.rs:16); v2 stays the default.
+    """
+    proof_envelope = await build_payment(
+        signer,
+        rpc,
+        requirement,
+        recent_blockhash_provider=recent_blockhash_provider,
+        memo_nonce=memo_nonce,
+    )
+    proof = cast("dict[str, object]", proof_envelope)
+    payload = proof.get("payload")
+    envelope: dict[str, object] = {
+        "scheme": "exact",
+        "network": _legacy_network_for_requirement(requirement),
+        X402_VERSION_FIELD: X402_VERSION_V1,
+        "payload": payload,
+    }
+    encoded = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+    return base64.b64encode(encoded).decode("ascii")
