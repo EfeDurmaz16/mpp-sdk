@@ -47,6 +47,7 @@ use PayKit\Protocols\Mpp\Core\Json;
 use PayKit\Protocols\Mpp\Intent\ChargeRequest;
 use PayKit\Protocols\Mpp\Server\SolanaChargeTransactionVerifier;
 use SolanaPhpSdk\Keypair\PublicKey;
+use SolanaPhpSdk\Programs\AssociatedTokenProgram;
 use SolanaPhpSdk\Programs\MemoProgram;
 use SolanaPhpSdk\Programs\SystemProgram;
 use SolanaPhpSdk\Programs\TokenProgram;
@@ -323,6 +324,170 @@ function read_u64_le(string $bytes): int
 }
 
 /**
+ * Encode an integer as `width` little-endian bytes.
+ */
+function encode_uint_le(int $value, int $width): string
+{
+    $out = '';
+    for ($i = 0; $i < $width; $i += 1) {
+        $out .= chr($value & 0xff);
+        $value >>= 8;
+    }
+    if ($value !== 0) {
+        throw new InvalidArgumentException('value does not fit in ' . $width . ' bytes');
+    }
+    return $out;
+}
+
+/**
+ * Solana shortvec (compact-u16) length prefix.
+ */
+function compact_u16(int $value): string
+{
+    $out = '';
+    while (true) {
+        $byte = $value & 0x7f;
+        $value >>= 7;
+        if ($value === 0) {
+            $out .= chr($byte);
+            break;
+        }
+        $out .= chr($byte | 0x80);
+    }
+    return $out;
+}
+
+/**
+ * Assemble a verify-transaction wire fixture from a flattened ChargeRequest
+ * and the vector's 64-byte signer secret key, returning the base64 wire
+ * transaction the PHP verifier (the system under test) then accepts.
+ *
+ * PHP is a server-only SDK: a verify vector that omits input.transaction
+ * pins only the request + signer and expects the runner to assemble the
+ * transaction itself, exactly as the Ruby runner does. The layout mirrors
+ * the Rust client builder and matches what the PHP verifier reads:
+ * transferChecked accounts (source, mint, dest, authority); idempotent ATA
+ * create accounts (payer, ata, owner, mint, system, token program); memo
+ * program data is the raw memo bytes. No RPC, no signature: the verifier
+ * checks transaction shape, not signatures.
+ *
+ * @param array<int, int> $signerSecretKey
+ */
+function build_fixture(ChargeRequest $request, array $signerSecretKey): string
+{
+    if (count($signerSecretKey) !== 64) {
+        throw new InvalidArgumentException('signerSecretKey must be 64 bytes');
+    }
+    // The ed25519 public key is the trailing 32 bytes of the secret key.
+    $pubBytes = '';
+    for ($i = 32; $i < 64; $i += 1) {
+        $pubBytes .= chr($signerSecretKey[$i] & 0xff);
+    }
+    $signer = PublicKey::fromBytes($pubBytes)->toBase58();
+
+    $md = $request->methodDetails;
+    $network = is_string($md['network'] ?? null) ? $md['network'] : DEFAULT_NETWORK;
+    $currency = (string) $request->currency;
+    $recipient = (string) $request->recipient;
+    $isSol = strtoupper($currency) === 'SOL';
+
+    $total = (int) $request->amount;
+    $splits = is_array($md['splits'] ?? null) ? $md['splits'] : [];
+    $splitTotal = 0;
+    foreach ($splits as $split) {
+        $splitTotal += (int) $split['amount'];
+    }
+    $primary = $total - $splitTotal;
+
+    /** @var array<int, array{program: string, accounts: array<int, string>, data: string}> $instructions */
+    $instructions = [];
+    $add = static function (string $program, array $accounts, string $data) use (&$instructions): void {
+        $instructions[] = ['program' => $program, 'accounts' => $accounts, 'data' => $data];
+    };
+
+    if ($isSol) {
+        $add(SystemProgram::PROGRAM_ID, [$signer, $recipient], encode_uint_le(2, 4) . encode_uint_le($primary, 8));
+        foreach ($splits as $split) {
+            $add(SystemProgram::PROGRAM_ID, [$signer, (string) $split['recipient']], encode_uint_le(2, 4) . encode_uint_le((int) $split['amount'], 8));
+            if (isset($split['memo']) && $split['memo'] !== '') {
+                $add(MemoProgram::PROGRAM_ID_V2, [], (string) $split['memo']);
+            }
+        }
+    } else {
+        $mint = Mints::resolve($currency, $network) ?? $currency;
+        $tokenProgram = is_string($md['tokenProgram'] ?? null) && $md['tokenProgram'] !== ''
+            ? $md['tokenProgram']
+            : Mints::tokenProgramFor($currency, $network);
+        $decimals = isset($md['decimals']) ? (int) $md['decimals'] : 6;
+        $sourceAta = Mints::deriveAta($signer, $mint, $tokenProgram);
+        $destAta = Mints::deriveAta($recipient, $mint, $tokenProgram);
+        $add($tokenProgram, [$sourceAta, $mint, $destAta, $signer], chr(12) . encode_uint_le($primary, 8) . chr($decimals));
+        foreach ($splits as $split) {
+            $sr = (string) $split['recipient'];
+            $sata = Mints::deriveAta($sr, $mint, $tokenProgram);
+            if (($split['ataCreationRequired'] ?? false) === true) {
+                $add(AssociatedTokenProgram::PROGRAM_ID, [$signer, $sata, $sr, $mint, SystemProgram::PROGRAM_ID, $tokenProgram], chr(1));
+            }
+            $add($tokenProgram, [$sourceAta, $mint, $sata, $signer], chr(12) . encode_uint_le((int) $split['amount'], 8) . chr($decimals));
+            if (isset($split['memo']) && $split['memo'] !== '') {
+                $add(MemoProgram::PROGRAM_ID_V2, [], (string) $split['memo']);
+            }
+        }
+    }
+
+    // Account key set: signer (lone signer / fee payer) at index 0, then every
+    // instruction account and program id in first-seen order. The verifier
+    // reads layout by index, so a single read-only-unsigned tail suffices.
+    $keys = [$signer];
+    $seen = [$signer => true];
+    foreach ($instructions as $ix) {
+        foreach ($ix['accounts'] as $a) {
+            if (!isset($seen[$a])) {
+                $seen[$a] = true;
+                $keys[] = $a;
+            }
+        }
+        if (!isset($seen[$ix['program']])) {
+            $seen[$ix['program']] = true;
+            $keys[] = $ix['program'];
+        }
+    }
+    $index = array_flip($keys);
+
+    $blockhash = is_string($md['recentBlockhash'] ?? null) && $md['recentBlockhash'] !== ''
+        ? $md['recentBlockhash']
+        : str_repeat('1', 32);
+    try {
+        $blockhashBytes = PublicKey::fromBase58($blockhash)->toBytes();
+    } catch (Throwable) {
+        $blockhashBytes = PublicKey::fromBase58(str_repeat('1', 32))->toBytes();
+    }
+
+    $signerCount = 1;
+    $readonlyUnsigned = count($keys) - 1;
+
+    $message = chr($signerCount) . chr(0) . chr($readonlyUnsigned);
+    $message .= compact_u16(count($keys));
+    foreach ($keys as $k) {
+        $message .= PublicKey::fromBase58($k)->toBytes();
+    }
+    $message .= $blockhashBytes;
+    $message .= compact_u16(count($instructions));
+    foreach ($instructions as $ix) {
+        $message .= chr($index[$ix['program']]);
+        $message .= compact_u16(count($ix['accounts']));
+        foreach ($ix['accounts'] as $a) {
+            $message .= chr($index[$a]);
+        }
+        $message .= compact_u16(strlen($ix['data']));
+        $message .= $ix['data'];
+    }
+
+    $signatures = compact_u16($signerCount) . str_repeat(chr(0), 64 * $signerCount);
+    return base64_encode($signatures . $message);
+}
+
+/**
  * @param array<string, mixed> $input
  * @return array<string, mixed>
  */
@@ -378,19 +543,25 @@ function run_vector(array $vector): array
             ];
 
         case 'verify-transaction':
+            $request = flatten_request(is_array($input['request'] ?? null) ? Json::object($input['request'], 'request') : []);
             $transaction = $input['transaction'] ?? null;
             if (!is_string($transaction) || $transaction === '') {
-                // No wire transaction pinned: the vector expects the runner
-                // to BUILD a transaction first, then verify it. PHP is a
-                // server-only SDK with no client build path, so this vector
-                // is out of scope for PHP.
-                return [
-                    'id' => $id,
-                    'outcome' => 'unsupported-mode',
-                    'error' => 'php is server-only: verify-transaction without a pinned input.transaction requires a client build path php does not ship',
-                ];
+                // No wire transaction pinned: the verifier is the system
+                // under test, so the runner assembles the wire fixture from
+                // the request + signer (exactly as the Ruby runner does) and
+                // verifies it. PHP ships no client build path, but a fixture
+                // builder is not a client SDK surface; it only feeds the
+                // server verifier deterministic, RPC-free input.
+                $secret = $input['signerSecretKey'] ?? null;
+                if (!is_array($secret)) {
+                    return [
+                        'id' => $id,
+                        'outcome' => 'unsupported-mode',
+                        'error' => 'php verify-transaction without a pinned input.transaction requires input.signerSecretKey to assemble the fixture',
+                    ];
+                }
+                $transaction = build_fixture($request, array_map('intval', $secret));
             }
-            $request = flatten_request(is_array($input['request'] ?? null) ? Json::object($input['request'], 'request') : []);
             verify_transaction($request, $transaction);
             return [
                 'id' => $id,
