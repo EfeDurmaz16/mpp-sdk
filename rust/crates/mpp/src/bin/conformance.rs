@@ -43,6 +43,8 @@ struct Vector {
     id: String,
     mode: String,
     #[serde(default)]
+    intent: Option<String>,
+    #[serde(default)]
     input: VectorInput,
 }
 
@@ -60,6 +62,36 @@ struct VectorInput {
     value: Option<Value>,
     #[serde(rename = "encodeBase64Url", default)]
     encode_base64_url: Option<EncodeBase64Url>,
+    // x402-exact intent inputs (mirrors harness/src/conformance/schema.ts).
+    #[serde(rename = "x402Version", default)]
+    x402_version: Option<i64>,
+    #[serde(rename = "x402Offer", default)]
+    x402_offer: Option<X402Offer>,
+    #[serde(rename = "x402PinnedTransaction", default)]
+    x402_pinned_transaction: Option<String>,
+    #[serde(rename = "x402PaymentHeader", default)]
+    x402_payment_header: Option<String>,
+    #[serde(rename = "x402ServerNetwork", default)]
+    x402_server_network: Option<String>,
+    #[serde(rename = "x402ServerRecipient", default)]
+    x402_server_recipient: Option<String>,
+    #[serde(rename = "x402ServerCurrency", default)]
+    x402_server_currency: Option<String>,
+    #[serde(rename = "x402ServerAmount", default)]
+    x402_server_amount: Option<String>,
+}
+
+/// x402 `exact` offer, mirrors schema.ts X402Offer. Retained as a raw
+/// `serde_json::Value` map under `extra` so the v2 `accepted` echo carries the
+/// offer verbatim, matching the Go/TS reference runners.
+#[derive(Deserialize)]
+struct X402Offer {
+    scheme: String,
+    network: String,
+    amount: String,
+    asset: String,
+    #[serde(rename = "payTo")]
+    pay_to: String,
 }
 
 #[derive(Deserialize)]
@@ -172,6 +204,39 @@ struct RunnerResult {
     error: Option<String>,
     #[serde(rename = "rejectCode", skip_serializing_if = "Option::is_none")]
     reject_code: Option<String>,
+    #[serde(
+        rename = "x402EnvelopeShape",
+        skip_serializing_if = "Option::is_none"
+    )]
+    x402_envelope_shape: Option<X402EnvelopeShape>,
+}
+
+/// Decoded semantic shape of an x402 `exact` envelope, mirrors
+/// schema.ts X402EnvelopeShape and the Go runner's X402EnvelopeShape. v1
+/// carries top-level scheme+network and no accepted; v2 carries accepted and
+/// must not leak top-level scheme/network.
+#[derive(Serialize)]
+struct X402EnvelopeShape {
+    #[serde(rename = "x402Version")]
+    x402_version: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network: Option<String>,
+    #[serde(rename = "hasAccepted")]
+    has_accepted: bool,
+    #[serde(rename = "payloadHasTransaction")]
+    payload_has_transaction: bool,
+    #[serde(rename = "acceptedScheme", skip_serializing_if = "Option::is_none")]
+    accepted_scheme: Option<String>,
+    #[serde(rename = "acceptedNetwork", skip_serializing_if = "Option::is_none")]
+    accepted_network: Option<String>,
+    #[serde(rename = "acceptedAsset", skip_serializing_if = "Option::is_none")]
+    accepted_asset: Option<String>,
+    #[serde(rename = "acceptedPayTo", skip_serializing_if = "Option::is_none")]
+    accepted_pay_to: Option<String>,
+    #[serde(rename = "acceptedAmount", skip_serializing_if = "Option::is_none")]
+    accepted_amount: Option<String>,
 }
 
 /// Map the Rust SDK's native reject error string onto the shared, normalized
@@ -204,6 +269,15 @@ fn classify_reject(message: &str) -> Option<&'static str> {
     {
         return Some("no-matching-transfer");
     }
+    // x402 envelope-gate categories. The version check precedes the network
+    // check so an unknown-version envelope reports unsupported-version even
+    // though its network would also fail to resolve.
+    if lower.contains("unsupported x402 version") || lower.contains("unsupported-version") {
+        return Some("unsupported-version");
+    }
+    if lower.contains("network mismatch") || lower.contains("wrong network") {
+        return Some("wrong-network");
+    }
     if lower.contains("amount") && (lower.contains("mismatch") || lower.contains("does not match"))
     {
         return Some("amount-mismatch");
@@ -227,6 +301,7 @@ fn rejected(id: &str, message: String) -> RunnerResult {
         exact_bytes: None,
         error: Some(message),
         reject_code,
+        x402_envelope_shape: None,
     }
 }
 
@@ -261,6 +336,14 @@ async fn main() {
 }
 
 async fn run_vector(vector: &Vector) -> RunnerResult {
+    // x402-exact is an HTTP-shaped intent: its build/verify vectors carry an
+    // x402 envelope (offer / payment header), not a charge `request`. Dispatch
+    // it before the charge mode switch so it never falls into the
+    // missing-request path. Mirrors go/cmd/conformance (runX402) and the TS
+    // reference (harness/src/conformance/x402.ts).
+    if vector.intent.as_deref() == Some("x402-exact") {
+        return run_x402(vector);
+    }
     match vector.mode.as_str() {
         "canonical-bytes" => match run_canonical_bytes(vector) {
             Ok(eb) => RunnerResult {
@@ -270,6 +353,7 @@ async fn run_vector(vector: &Vector) -> RunnerResult {
                 exact_bytes: Some(eb),
                 error: None,
                 reject_code: None,
+                x402_envelope_shape: None,
             },
             Err(e) => rejected(&vector.id, e),
         },
@@ -282,6 +366,7 @@ async fn run_vector(vector: &Vector) -> RunnerResult {
                     exact_bytes: None,
                     error: None,
                     reject_code: None,
+                    x402_envelope_shape: None,
                 },
                 Err(e) => rejected(&vector.id, e),
             },
@@ -306,6 +391,7 @@ async fn run_vector(vector: &Vector) -> RunnerResult {
                     exact_bytes: None,
                     error: None,
                     reject_code: None,
+                    x402_envelope_shape: None,
                 },
                 Err(e) => rejected(&vector.id, e),
             }
@@ -611,4 +697,274 @@ fn shape_from_transaction(transaction_b64: &str) -> Result<TransactionShape, Str
     }
 
     Ok(shape)
+}
+
+// ── x402-exact intent support ──
+//
+// The x402 charge is HTTP-shaped, not transaction-shaped: a CLIENT build
+// produces a base64(JSON) payment header and a SERVER verify consumes one. The
+// cross-SDK oracle is the DECODED ENVELOPE shape, never the signed Solana
+// transaction inside `payload.transaction`. This path mirrors the Go runner
+// (go/cmd/conformance/x402.go) and the TS reference
+// (harness/src/conformance/x402.ts): v2 echoes the offer in `accepted` with no
+// top-level scheme/network leakage; v1 carries top-level scheme="exact" + the
+// legacy network slug and no accepted; verify runs the version dispatch +
+// network gate + accepted-vs-route comparison the production
+// Adapter::verify_and_settle performs at the envelope level.
+
+const X402_VERSION_V1: i64 = 1;
+const X402_VERSION_V2: i64 = 2;
+
+/// Standard base64 (not URL-safe): x402 payment headers are standard-base64
+/// JSON, matching `base64.StdEncoding` in the Go runner.
+fn base64_standard_encode(bytes: &[u8]) -> String {
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+}
+
+fn base64_standard_decode(header: &str) -> Result<Vec<u8>, base64::DecodeError> {
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, header)
+}
+
+fn run_x402(vector: &Vector) -> RunnerResult {
+    match vector.mode.as_str() {
+        "build-transaction" => match build_x402_envelope(vector) {
+            Ok(shape) => x402_accept(&vector.id, shape),
+            Err(e) => rejected(&vector.id, e),
+        },
+        "verify-transaction" => match verify_x402_envelope(vector) {
+            Ok(shape) => x402_accept(&vector.id, shape),
+            Err(e) => rejected(&vector.id, e),
+        },
+        other => rejected(&vector.id, format!("unsupported x402 mode {other:?}")),
+    }
+}
+
+fn x402_accept(id: &str, shape: X402EnvelopeShape) -> RunnerResult {
+    RunnerResult {
+        id: id.to_string(),
+        outcome: "accept".to_string(),
+        transaction_shape: None,
+        exact_bytes: None,
+        error: None,
+        reject_code: None,
+        x402_envelope_shape: Some(shape),
+    }
+}
+
+/// Build a v1 or v2 envelope from the offer, base64(JSON)-encode it, then
+/// decode it back into the conformance shape oracle. Mirrors the Go runner's
+/// build_x402_envelope: v1 carries top-level scheme="exact" + the legacy
+/// network slug and no accepted; v2 carries no top-level scheme/network and an
+/// `accepted` object echoing the offer verbatim.
+fn build_x402_envelope(vector: &Vector) -> Result<X402EnvelopeShape, String> {
+    let input = &vector.input;
+    let offer = input
+        .x402_offer
+        .as_ref()
+        .ok_or_else(|| "x402 build vector is missing input.x402Offer".to_string())?;
+    let version = input
+        .x402_version
+        .ok_or_else(|| "x402 build vector is missing input.x402Version".to_string())?;
+    if version != X402_VERSION_V1 && version != X402_VERSION_V2 {
+        return Err(format!(
+            "x402 build vector has unsupported input.x402Version {version}"
+        ));
+    }
+    let tx = input
+        .x402_pinned_transaction
+        .as_deref()
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "x402 build vector is missing input.x402PinnedTransaction".to_string())?;
+
+    let credential = if version == X402_VERSION_V1 {
+        serde_json::json!({
+            "x402Version": X402_VERSION_V1,
+            "scheme": "exact",
+            "network": legacy_network_slug(&offer.network),
+            "payload": { "transaction": tx },
+        })
+    } else {
+        serde_json::json!({
+            "x402Version": X402_VERSION_V2,
+            "accepted": {
+                "scheme": offer.scheme,
+                "network": offer.network,
+                "amount": offer.amount,
+                "asset": offer.asset,
+                "payTo": offer.pay_to,
+            },
+            "payload": { "transaction": tx },
+        })
+    };
+
+    let raw = serde_json::to_vec(&credential)
+        .map_err(|e| format!("x402: marshal credential: {e}"))?;
+    let header = base64_standard_encode(&raw);
+    decode_x402_envelope_shape(&header)
+}
+
+/// Run the server-side envelope gate against the configured route. Mirrors the
+/// Go runner's verify_x402_envelope and the version dispatch + network gate +
+/// accepted-vs-route comparison in the production verify path.
+fn verify_x402_envelope(vector: &Vector) -> Result<X402EnvelopeShape, String> {
+    let input = &vector.input;
+    let header = input
+        .x402_payment_header
+        .as_deref()
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| "x402 verify vector is missing input.x402PaymentHeader".to_string())?;
+    let shape = decode_x402_envelope_shape(header)?;
+
+    let expected_network =
+        caip2_network_for_cluster(input.x402_server_network.as_deref().unwrap_or(""));
+
+    match shape.x402_version {
+        X402_VERSION_V1 => {
+            if shape.scheme.as_deref() != Some("exact") {
+                return Err(format!(
+                    "invalid payload: unexpected scheme {:?}",
+                    shape.scheme.as_deref().unwrap_or("")
+                ));
+            }
+            let net = shape.network.as_deref().unwrap_or("");
+            if caip2_network_for_cluster(net) != expected_network {
+                return Err(format!(
+                    "network mismatch: expected {expected_network}, got {net}"
+                ));
+            }
+        }
+        X402_VERSION_V2 => {
+            if !shape.has_accepted {
+                return Err("invalid payload: v2 envelope missing accepted".to_string());
+            }
+            let net = shape.accepted_network.as_deref().unwrap_or("");
+            if caip2_network_for_cluster(net) != expected_network {
+                return Err(format!(
+                    "network mismatch: expected {expected_network}, got {net}"
+                ));
+            }
+            let server_amount = input.x402_server_amount.as_deref().unwrap_or("");
+            if shape.accepted_amount.as_deref().unwrap_or("") != server_amount {
+                return Err(format!(
+                    "amount mismatch: expected {server_amount}, got {}",
+                    shape.accepted_amount.as_deref().unwrap_or("")
+                ));
+            }
+            if shape.accepted_pay_to.as_deref().unwrap_or("")
+                != input.x402_server_recipient.as_deref().unwrap_or("")
+            {
+                return Err(
+                    "recipient mismatch: credential claims a different recipient".to_string(),
+                );
+            }
+            let server_currency = input.x402_server_currency.as_deref().unwrap_or("");
+            if shape.accepted_asset.as_deref().unwrap_or("") != server_currency {
+                return Err(format!(
+                    "currency mismatch: expected {server_currency}, got {}",
+                    shape.accepted_asset.as_deref().unwrap_or("")
+                ));
+            }
+        }
+        other => {
+            return Err(format!("unsupported x402 version: {other}"));
+        }
+    }
+
+    if !shape.payload_has_transaction {
+        return Err("invalid payload: missing transaction proof".to_string());
+    }
+    Ok(shape)
+}
+
+/// Decode a base64(JSON) envelope header into the conformance shape oracle.
+/// Mirrors decodeEnvelopeShape (TS) / decodeX402EnvelopeShape (Go):
+/// scheme/network are reported only when present (v1 carries them, v2 must
+/// not), hasAccepted is true iff a non-null accepted object exists,
+/// payloadHasTransaction is true iff a non-empty proof is present, and the
+/// accepted* fields echo the v2 offer.
+fn decode_x402_envelope_shape(header: &str) -> Result<X402EnvelopeShape, String> {
+    let bytes = base64_standard_decode(header)
+        .map_err(|e| format!("invalid payload: undecodable payment header: {e}"))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("invalid payload: malformed envelope JSON: {e}"))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "invalid payload: envelope is not an object".to_string())?;
+
+    let x402_version = obj.get("x402Version").and_then(Value::as_i64).unwrap_or(0);
+    let scheme = obj
+        .get("scheme")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let network = obj
+        .get("network")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let accepted = obj.get("accepted").filter(|v| !v.is_null());
+    let has_accepted = accepted.is_some();
+    let transaction = obj
+        .get("payload")
+        .and_then(Value::as_object)
+        .and_then(|p| p.get("transaction"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let mut shape = X402EnvelopeShape {
+        x402_version,
+        scheme,
+        network,
+        has_accepted,
+        payload_has_transaction: !transaction.is_empty(),
+        accepted_scheme: None,
+        accepted_network: None,
+        accepted_asset: None,
+        accepted_pay_to: None,
+        accepted_amount: None,
+    };
+
+    if let Some(accepted) = accepted {
+        let a = accepted
+            .as_object()
+            .ok_or_else(|| "invalid payload: malformed accepted object".to_string())?;
+        let get = |k: &str| a.get(k).and_then(Value::as_str).map(str::to_string);
+        shape.accepted_scheme = get("scheme");
+        shape.accepted_network = get("network");
+        shape.accepted_asset = get("asset");
+        shape.accepted_pay_to = get("payTo");
+        shape.accepted_amount = get("amount");
+    }
+
+    Ok(shape)
+}
+
+/// Map a CAIP-2 network identifier to the legacy `solana-<cluster>` slug a v1
+/// X-PAYMENT envelope carries. Mirrors the AcceptsEntry::legacy_network_string
+/// mapping the Go runner uses; unknown ids fall back to the input verbatim.
+fn legacy_network_slug(network: &str) -> String {
+    const MAINNET: &str = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
+    const DEVNET: &str = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+    const TESTNET: &str = "solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z";
+    match network {
+        MAINNET | "solana" | "mainnet" | "mainnet-beta" => "solana".to_string(),
+        TESTNET | "testnet" => "solana-testnet".to_string(),
+        DEVNET | "devnet" | "localnet" => "solana-devnet".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Collapse a cluster / legacy slug / CAIP-2 id to a canonical CAIP-2 id so the
+/// network gate compares like with like. Mirrors caip2NetworkForCluster in the
+/// Go and TS reference runners.
+fn caip2_network_for_cluster(cluster: &str) -> &'static str {
+    const MAINNET: &str = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
+    const DEVNET: &str = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
+    const TESTNET: &str = "solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z";
+    match cluster {
+        MAINNET | "solana" | "mainnet" | "mainnet-beta" | "solana_mainnet" => MAINNET,
+        TESTNET | "testnet" | "solana-testnet" => TESTNET,
+        DEVNET | "devnet" | "localnet" | "solana-devnet" | "solana_devnet" | "solana_localnet" => {
+            DEVNET
+        }
+        _ => MAINNET,
+    }
 }
