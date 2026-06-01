@@ -272,6 +272,60 @@ local function run_vector(vector)
   }
 end
 
+-- Map the Lua SDK's native reject message onto the shared cross-SDK
+-- RejectCode vocabulary the interop harness asserts per reject vector
+-- (see harness/vectors/charge-rejects.json `expect.rejectCode`). The
+-- match is done on the lowercased message with plain substring checks
+-- (string.find with `plain = true`) so Lua-pattern magic characters in
+-- the message are treated literally.
+--
+-- The Lua SDK is server-only: it processes verify-transaction reject
+-- vectors that ship a concrete `transaction`, so the only reject vector
+-- it actually classifies today is the transferChecked decimals mismatch
+-- (which surfaces as a no-matching-transfer reject). The remaining
+-- branches stay in place so the classifier matches the other reject
+-- families once a built-transaction path exists.
+local function has(msg, needle)
+  return string.find(msg, needle, 1, true) ~= nil
+end
+
+local function classify_reject(message)
+  if type(message) ~= 'string' then
+    return nil
+  end
+  local m = message:lower()
+
+  if has(m, 'compute unit price') and has(m, 'exceed')
+    and (has(m, 'cap') or has(m, 'maximum')) then
+    return 'compute-price-over-cap'
+  end
+  if has(m, 'compute unit limit') and has(m, 'exceed') then
+    return 'compute-limit-over-cap'
+  end
+  if has(m, 'fee payer cannot authorize') then
+    return 'fee-payer-not-authority'
+  end
+  if has(m, 'splits consume the entire amount')
+    or has(m, 'split amounts exceed total amount') then
+    return 'splits-exceed-amount'
+  end
+  if has(m, 'too many splits') then
+    return 'too-many-splits'
+  end
+  if (has(m, 'no matching') and has(m, 'transfer'))
+    or (has(m, 'unexpected') and has(m, 'transfer')) then
+    return 'no-matching-transfer'
+  end
+  if has(m, 'amount') and (has(m, 'mismatch') or has(m, 'does not match')) then
+    return 'amount-mismatch'
+  end
+  if has(m, 'invalid') or has(m, 'malformed')
+    or has(m, 'decode') or has(m, 'payload') then
+    return 'invalid-payload'
+  end
+  return nil
+end
+
 local function main()
   local raw = read_stdin()
   raw = raw:gsub('^%s+', ''):gsub('%s+$', '')
@@ -301,6 +355,10 @@ local function main()
       message = tostring(run_err)
     end
     result = { id = vector.id, outcome = 'reject', error = message }
+    local code = classify_reject(message)
+    if code ~= nil then
+      result.rejectCode = code
+    end
   end
 
   emit(result)
