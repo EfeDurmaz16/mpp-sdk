@@ -185,15 +185,50 @@ class X402V1WireTest {
     }
 
     @Test
-    fun v1FlatHeaderFallsThroughToBodyWhenNotSolanaExact() {
-        // A non-Solana v1 flat header is rejected and parsing falls through to
-        // the body.
+    fun v1FlatHeaderOmittingSchemeIsAccepted() {
+        // The canonical rust PaymentRequirements struct has NO scheme field
+        // (types.rs:308-385), so a real legacy server may emit a flat object
+        // with no `scheme`. The rust v1 fallback returns ANY parseable object
+        // directly (payment.rs:236-242) with no scheme check, so the Kotlin
+        // client must accept a flat header that omits `scheme` rather than
+        // silently dropping it to the body.
+        val v1Flat = """{"network":"solana-devnet","maxAmountRequired":"3300",""" +
+            """"currency":"USDC","recipient":"$devnetRecipient"}"""
+        val headers = mapOf("X-Payment-Required" to v1Flat)
+        val result = parseX402Challenge(headers, null, ChallengeSelection(network = "devnet"))
+        assertNotNull(result, "a v1 flat header without `scheme` must be accepted")
+        assertEquals("3300", result.maxAmountRequired)
+        assertEquals(Network.SOLANA_DEVNET, result.network)
+    }
+
+    @Test
+    fun v1FlatHeaderWithCustomSolanaClusterIsAccepted() {
+        // normalize_network_identifier passes a `solana:`-prefixed custom
+        // cluster through unchanged (types.rs:387-395), and the rust v1 path
+        // applies no Solana allow-set filter, so a non-standard solana: id is
+        // returned verbatim rather than dropped.
+        val custom = "solana:CustomClusterGenesisHash11111111111111"
+        val v1Flat = """{"scheme":"exact","network":"$custom","amount":"42","asset":"SOL","payTo":"$devnetRecipient"}"""
+        val headers = mapOf("X-Payment-Required" to v1Flat)
+        val result = parseX402Challenge(headers, null, ChallengeSelection())
+        assertNotNull(result, "a custom solana: cluster v1 flat header must be accepted")
+        assertEquals("42", result.amount)
+        assertEquals(custom, result.network, "custom solana: cluster passes through unchanged")
+    }
+
+    @Test
+    fun v1FlatHeaderReturnsNonSolanaObjectDirectly() {
+        // The rust v1 fallback applies NO scheme check and NO Solana-network
+        // allow-set (payment.rs:236-242): it returns the first parseable object
+        // directly. A non-Solana flat object (e.g. ethereum:1) is therefore
+        // returned as-is and does NOT fall through to the body.
         val v1Flat = """{"scheme":"exact","network":"ethereum:1","maxAmountRequired":"1","currency":"ETH","recipient":"0x0"}"""
         val body = """{"accepts":[{"scheme":"exact","network":"${Network.SOLANA_DEVNET}","amount":"5","asset":"SOL","payTo":"$devnetRecipient"}]}"""
         val headers = mapOf("X-Payment-Required" to v1Flat)
         val result = parseX402Challenge(headers, body, ChallengeSelection(network = "devnet"))
         assertNotNull(result)
-        assertEquals("5", result.amount, "non-Solana v1 header must fall through to the body")
+        assertEquals("1", result.maxAmountRequired, "the v1 flat object is returned directly, no body fallthrough")
+        assertEquals("ethereum:1", result.network, "non-Solana network passes through unchanged")
     }
 
     @Test

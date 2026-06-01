@@ -176,22 +176,30 @@ fun parseX402Challenge(
  * Parses a raw-JSON flat [X402AcceptsEntry] from the legacy v1
  * ``X-PAYMENT-REQUIRED`` header. The value is parsed directly (no base64
  * decode, no ``accepts[]`` wrapper) and the verbatim wire object is retained
- * as [X402AcceptsEntry.raw]. Returns ``null`` when the value is not a Solana
- * ``exact`` requirement or fails to parse.
+ * as [X402AcceptsEntry.raw]. Returns ``null`` only when the value fails to
+ * parse as JSON.
+ *
+ * Mirrors the rust spine v1 fallback (payment.rs:236-242), which does
+ * ``serde_json::from_str::<PaymentRequirements>(&header.1)`` and returns ANY
+ * parseable object directly: no scheme check, no Solana-network allow-set, no
+ * selection step. The rust ``PaymentRequirements`` struct has no ``scheme``
+ * field at all (types.rs:308-385) and ``normalize_network_identifier`` passes
+ * unknown/custom networks through unchanged, so a legacy server that omits
+ * ``scheme`` or uses a non-standard ``solana:``-prefixed cluster is accepted.
+ * Applying [isSolanaExact] here would over-filter relative to the spine and
+ * silently drop legitimate v1 challenges, so it is deliberately NOT called on
+ * this single-requirement path.
  */
 private fun parseFlatRequirement(headerValue: String): X402AcceptsEntry? =
     try {
         val element = json.parseToJsonElement(headerValue)
         // The v1 flat shape carries a legacy network string ("solana" /
         // "solana-devnet"), not a CAIP-2 id. Normalize it to CAIP-2 so the
-        // Solana allow-set check and the downstream payment builder treat it
-        // identically to a v2 offer (rust normalize_network_identifier,
-        // types.rs:387-395). The wire object is otherwise retained verbatim in
-        // `raw` for the echoed envelope.
+        // downstream payment builder treats it identically to a v2 offer (rust
+        // normalize_network_identifier, types.rs:387-395). The wire object is
+        // otherwise retained verbatim in `raw` for the echoed envelope.
         val rawEntry = json.decodeFromJsonElement(X402AcceptsEntry.serializer(), element)
-        val entry = rawEntry
-            .copy(network = normalizeNetworkIdentifier(rawEntry.network), raw = element)
-        if (isSolanaExact(entry)) entry else null
+        rawEntry.copy(network = normalizeNetworkIdentifier(rawEntry.network), raw = element)
     } catch (_: Exception) {
         null
     }
@@ -240,8 +248,8 @@ private fun selectFromJsonText(text: String, selection: ChallengeSelection): X40
  * field. This is DELIBERATELY distinct from [Network.toCaip2]
  * (``caip2_network_for_cluster``): an unrecognized value passes through
  * UNCHANGED here rather than collapsing to mainnet, so a non-Solana v1 flat
- * requirement (e.g. ``ethereum:1``) stays non-Solana and is rejected by the
- * downstream [isSolanaExact] check.
+ * requirement (e.g. ``ethereum:1``) or a custom ``solana:``-prefixed cluster
+ * keeps its wire identity verbatim, matching the rust deserializer.
  */
 private fun normalizeNetworkIdentifier(network: String?): String? {
     // Absent network defaults to "solana" then normalizes to mainnet, matching
