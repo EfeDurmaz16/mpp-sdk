@@ -35,6 +35,99 @@ public enum MppHeaders {
         )
     }
 
+    /// Parse every `Payment` challenge carried across one or more
+    /// `WWW-Authenticate` header values, splitting combined values that pack
+    /// multiple `Payment ...` challenges into a single header line.
+    ///
+    /// Mirrors the rust `parse_www_authenticate_all`
+    /// (`rust/crates/mpp/src/protocol/core/headers.rs:70`): each header value
+    /// is split at quote-aware `Payment`-scheme boundaries, then each chunk
+    /// is parsed. Chunks that fail to parse are dropped, matching the
+    /// client's tolerant selection behaviour.
+    public static func parseWWWAuthenticateAll(_ headers: [String]) -> [PaymentChallenge] {
+        var result: [PaymentChallenge] = []
+        for header in headers {
+            for chunk in splitPaymentChallengeValues(header) {
+                if let challenge = try? parseWWWAuthenticate(chunk) {
+                    result.append(challenge)
+                }
+            }
+        }
+        return result
+    }
+
+    /// Split a single `WWW-Authenticate` value into its constituent
+    /// `Payment ...` challenge substrings. A boundary is a `Payment` token
+    /// (case-insensitive) followed by whitespace, located outside any quoted
+    /// string and either at the start of the value or right after a comma.
+    /// Mirrors the rust `split_payment_challenge_values`.
+    static func splitPaymentChallengeValues(_ header: String) -> [String] {
+        let chars = Array(header)
+        var starts: [Int] = []
+        var inQuote = false
+        var escaped = false
+        var i = 0
+        let scheme = Array(paymentScheme)
+
+        func isSchemeStart(_ index: Int) -> Bool {
+            let end = index + scheme.count
+            guard end < chars.count else { return false }
+            for offset in 0..<scheme.count {
+                if String(chars[index + offset]).lowercased()
+                    != String(scheme[offset]).lowercased() {
+                    return false
+                }
+            }
+            guard chars[end].isWhitespace else { return false }
+            var previous = index
+            while previous > 0, chars[previous - 1].isWhitespace {
+                previous -= 1
+            }
+            return previous == 0 || chars[previous - 1] == ","
+        }
+
+        while i < chars.count {
+            let char = chars[i]
+            if inQuote {
+                if escaped {
+                    escaped = false
+                } else if char == "\\" {
+                    escaped = true
+                } else if char == "\"" {
+                    inQuote = false
+                }
+                i += 1
+                continue
+            }
+            if char == "\"" {
+                inQuote = true
+                i += 1
+                continue
+            }
+            if isSchemeStart(i) {
+                starts.append(i)
+                i += scheme.count
+                continue
+            }
+            i += 1
+        }
+
+        var chunks: [String] = []
+        for (index, start) in starts.enumerated() {
+            let end = index + 1 < starts.count ? starts[index + 1] : chars.count
+            var chunk = String(chars[start..<end])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            while chunk.hasSuffix(",") {
+                chunk = String(chunk.dropLast())
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if !chunk.isEmpty {
+                chunks.append(chunk)
+            }
+        }
+        return chunks
+    }
+
     public static func formatAuthorization(_ credential: PaymentCredential) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
