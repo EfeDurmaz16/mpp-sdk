@@ -137,9 +137,15 @@ struct TransactionShape {
     transfers: Vec<Transfer>,
     #[serde(rename = "forbiddenPrograms")]
     forbidden_programs: Vec<String>,
-    #[serde(rename = "maxComputeUnitLimit", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maxComputeUnitLimit",
+        skip_serializing_if = "Option::is_none"
+    )]
     max_compute_unit_limit: Option<u32>,
-    #[serde(rename = "maxComputeUnitPrice", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "maxComputeUnitPrice",
+        skip_serializing_if = "Option::is_none"
+    )]
     max_compute_unit_price: Option<String>,
     memo: Vec<String>,
 }
@@ -164,15 +170,63 @@ struct RunnerResult {
     exact_bytes: Option<ExactBytes>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(rename = "rejectCode", skip_serializing_if = "Option::is_none")]
+    reject_code: Option<String>,
+}
+
+/// Map the Rust SDK's native reject error string onto the shared, normalized
+/// `RejectCode` vocabulary the interop harness asserts against. The Rust crates
+/// are the canonical spine, so this classifier is the source of truth for the
+/// category each native message belongs to. Matching is case-insensitive on the
+/// lowercased message; the most specific patterns are checked first.
+fn classify_reject(message: &str) -> Option<&'static str> {
+    let lower = message.to_lowercase();
+    if lower.contains("compute unit price")
+        && lower.contains("exceed")
+        && (lower.contains("cap") || lower.contains("maximum"))
+    {
+        return Some("compute-price-over-cap");
+    }
+    if lower.contains("compute unit limit") && lower.contains("exceed") {
+        return Some("compute-limit-over-cap");
+    }
+    if lower.contains("fee payer cannot authorize") {
+        return Some("fee-payer-not-authority");
+    }
+    if lower.contains("splits consume the entire amount") {
+        return Some("splits-exceed-amount");
+    }
+    if lower.contains("too many splits") {
+        return Some("too-many-splits");
+    }
+    if (lower.contains("no matching") && lower.contains("transfer"))
+        || (lower.contains("unexpected") && lower.contains("transfer"))
+    {
+        return Some("no-matching-transfer");
+    }
+    if lower.contains("amount") && (lower.contains("mismatch") || lower.contains("does not match"))
+    {
+        return Some("amount-mismatch");
+    }
+    if lower.contains("invalid")
+        || lower.contains("malformed")
+        || lower.contains("decode")
+        || lower.contains("payload")
+    {
+        return Some("invalid-payload");
+    }
+    None
 }
 
 fn rejected(id: &str, message: String) -> RunnerResult {
+    let reject_code = classify_reject(&message).map(|c| c.to_string());
     RunnerResult {
         id: id.to_string(),
         outcome: "reject".to_string(),
         transaction_shape: None,
         exact_bytes: None,
         error: Some(message),
+        reject_code,
     }
 }
 
@@ -215,6 +269,7 @@ async fn run_vector(vector: &Vector) -> RunnerResult {
                 transaction_shape: None,
                 exact_bytes: Some(eb),
                 error: None,
+                reject_code: None,
             },
             Err(e) => rejected(&vector.id, e),
         },
@@ -226,6 +281,7 @@ async fn run_vector(vector: &Vector) -> RunnerResult {
                     transaction_shape: Some(shape),
                     exact_bytes: None,
                     error: None,
+                    reject_code: None,
                 },
                 Err(e) => rejected(&vector.id, e),
             },
@@ -249,6 +305,7 @@ async fn run_vector(vector: &Vector) -> RunnerResult {
                     transaction_shape: Some(shape),
                     exact_bytes: None,
                     error: None,
+                    reject_code: None,
                 },
                 Err(e) => rejected(&vector.id, e),
             }
@@ -294,17 +351,15 @@ fn flatten_request(
     let is_sol = currency.eq_ignore_ascii_case("sol");
 
     if details.token_program.is_none() && !is_sol {
-        let resolved_mint =
-            solana_mpp::resolve_stablecoin_mint(&currency, Some(network.as_str()))
-                .unwrap_or(currency.as_str())
-                .to_string();
+        let resolved_mint = solana_mpp::resolve_stablecoin_mint(&currency, Some(network.as_str()))
+            .unwrap_or(currency.as_str())
+            .to_string();
         details.token_program = Some(match mint_owners.and_then(|m| m.get(&resolved_mint)) {
             Some(owner) => owner.clone(),
-            None => solana_mpp::default_token_program_for_currency(
-                &currency,
-                Some(network.as_str()),
-            )
-            .to_string(),
+            None => {
+                solana_mpp::default_token_program_for_currency(&currency, Some(network.as_str()))
+                    .to_string()
+            }
         });
     }
 
@@ -363,13 +418,7 @@ async fn build_transaction(vector: &Vector) -> Result<String, String> {
     let rpc = RpcClient::new("http://127.0.0.1:1".to_string());
 
     let payload = build_charge_transaction_with_options(
-        &signer,
-        &rpc,
-        &amount,
-        &currency,
-        &recipient,
-        &details,
-        options,
+        &signer, &rpc, &amount, &currency, &recipient, &details, options,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -472,9 +521,8 @@ fn hex_nibble(c: u8) -> Result<u8, String> {
 /// (discriminator 2), memos from the Memo Program, compute caps from the
 /// ComputeBudget program.
 fn shape_from_transaction(transaction_b64: &str) -> Result<TransactionShape, String> {
-    let bytes =
-        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, transaction_b64)
-            .map_err(|e| format!("invalid base64 transaction: {e}"))?;
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, transaction_b64)
+        .map_err(|e| format!("invalid base64 transaction: {e}"))?;
     let tx: Transaction =
         bincode::deserialize(&bytes).map_err(|e| format!("invalid transaction: {e}"))?;
 
