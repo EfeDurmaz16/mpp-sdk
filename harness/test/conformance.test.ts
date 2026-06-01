@@ -234,16 +234,19 @@ describe("cross-SDK conformance vectors", () => {
           expect(result.id).toBe(vector.id);
 
           // A runner that does not support a vector's mode for this SDK's
-          // role (e.g. build-transaction on a server-only SDK) declares it
+          // role (e.g. verify-transaction on a client-only SDK) declares it
           // either as a dedicated `unsupported-mode` outcome or as a reject
-          // whose error is prefixed "unsupported-mode". Skip the vector for
-          // this language rather than fail it. Both conventions are honored
-          // so every SDK runner registers cleanly regardless of its style.
+          // whose error is prefixed "unsupported-mode". Both conventions are
+          // honored so every SDK runner registers cleanly regardless of its
+          // style. The prefix is a deliberate sentinel and never a real
+          // reject category, so it skips even when the vector itself expects
+          // a reject (a client-only SDK cannot exercise a verify-reject
+          // vector at all). Skip the vector for this language rather than
+          // fail it.
           if (
             (result.outcome as string) === "unsupported-mode" ||
             (result.outcome === "reject" &&
-              (result.error ?? "").startsWith("unsupported-mode") &&
-              vector.expect.outcome !== "reject")
+              (result.error ?? "").startsWith("unsupported-mode"))
           ) {
             ctx.skip();
             return;
