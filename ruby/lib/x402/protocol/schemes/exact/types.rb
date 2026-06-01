@@ -6,6 +6,7 @@ require "json"
 require "securerandom"
 
 require "pay_core/solana/base58"
+require "pay_core/solana/caip2"
 require "pay_core/solana/mints"
 require "pay_core/solana/programs"
 require "pay_core/solana/public_key"
@@ -93,6 +94,53 @@ module X402
           envelope[:resource] = resource if resource.is_a?(Hash)
 
           Base64.strict_encode64(JSON.generate(envelope))
+        end
+
+        # Build a client-signed x402 *legacy v1* payment envelope. The
+        # proof is byte-for-byte identical to the v2 producer above (same
+        # `build_transaction`); only the envelope differs:
+        #   - `x402Version` is 1
+        #   - top-level `scheme` is "exact" (present)
+        #   - top-level `network` is the legacy network string (section 5
+        #     of the spec; see `legacy_network_for_requirement`)
+        #   - NO `accepted`, NO `resource`
+        # Mirrors the spine `build_payment_header_v1`
+        # (rust/crates/x402/src/client/exact/payment.rs:144-160).
+        def build_exact_payment_signature_legacy(requirement:, client_secret_key:, recent_blockhash:)
+          raise ArgumentError, "only exact payment requirements can be signed" unless requirement["scheme"] == "exact"
+
+          private_key = private_key_from_json(client_secret_key)
+          transaction = build_transaction(
+            requirement: requirement,
+            private_key: private_key,
+            recent_blockhash: recent_blockhash
+          )
+          envelope = {
+            scheme: ::X402::Constants::EXACT_SCHEME,
+            network: legacy_network_for_requirement(requirement),
+            x402Version: ::X402::Constants::X402_VERSION_V1,
+            payload: {transaction: Base64.strict_encode64(transaction)}
+          }
+
+          Base64.strict_encode64(JSON.generate(envelope))
+        end
+
+        # Map a payment requirement to its legacy v1 network string.
+        # Selector is the requirement's `cluster` when present, otherwise
+        # `network`. Devnet (in any of its spellings, including the devnet
+        # CAIP-2 ID) collapses to "solana-devnet"; every other value
+        # (mainnet, testnet, localnet, unknown) collapses to "solana".
+        # Mirrors the spine `v1_network_for_requirements`
+        # (rust/crates/x402/src/client/exact/payment.rs:383-394).
+        def legacy_network_for_requirement(requirement)
+          selector = requirement["cluster"]
+          selector = requirement["network"] if selector.nil? || selector.to_s.empty?
+          case selector.to_s
+          when "devnet", ::PayCore::Solana::Caip2::SOLANA_DEVNET_LABEL, ::PayCore::Solana::Caip2::DEVNET
+            ::PayCore::Solana::Caip2::SOLANA_DEVNET_LABEL
+          else
+            ::PayCore::Solana::Caip2::SOLANA_NETWORK
+          end
         end
 
         # Apply the facilitator-managed (fee-payer) signature to a
