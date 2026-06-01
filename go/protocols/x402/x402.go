@@ -29,7 +29,19 @@ const (
 	paymentRequiredHeader = "payment-required"
 	paymentResponseHeader = "payment-response"
 	settlementHeader      = "x-payment-settlement-signature"
-	x402Version           = 2
+
+	// Version constants mirror the Rust spine constants.rs
+	// X402_VERSION_V1/X402_VERSION_V2: integers on the wire, not
+	// strings. v2 is the default the server emits; v1 inbound is
+	// accepted for backward compatibility (no v1 challenge emission).
+	x402VersionV1 = 1
+	x402VersionV2 = 2
+	x402Version   = x402VersionV2
+
+	// exactScheme is the only scheme the x402 adapter accepts. A v1
+	// envelope must carry scheme=="exact" at the top level
+	// (server/exact.rs:318, EXACT_SCHEME types.rs:6).
+	exactScheme = "exact"
 
 	// stablecoinDecimals is the mint decimal count advertised in the
 	// challenge. Every stablecoin in the paycore table (USDC, USDT, USDG,
@@ -441,7 +453,19 @@ func (a *Adapter) VerifyAndSettle(req *paykit.AdapterRequest) (*paykit.Payment, 
 	if err := json.Unmarshal(credBytes, &credential); err != nil {
 		return nil, &paykit.PaymentError{Code: "invalid_payload", Err: fmt.Errorf("decode credential: %w", err), Gate: req.Gate}
 	}
-	if credential.X402Version != x402Version {
+	// Branch on the wire version, mirroring the Rust spine
+	// parse_payment_signature (server/exact.rs:315-347). v1 (legacy)
+	// carries the scheme + network at the top level and no `accepted`
+	// object; v2 carries the `accepted` requirements. Anything else,
+	// including a genuinely-unknown version, is rejected.
+	switch credential.X402Version {
+	case x402VersionV1:
+		if err := a.verifyV1Envelope(req.Gate, &credential); err != nil {
+			return nil, &paykit.PaymentError{Code: "charge_request_mismatch", Err: err, Gate: req.Gate}
+		}
+	case x402VersionV2:
+		// handled by the accepted-binding block below.
+	default:
 		return nil, &paykit.PaymentError{Code: "version_mismatch", Err: fmt.Errorf("unsupported x402Version %d", credential.X402Version), Gate: req.Gate}
 	}
 
@@ -547,6 +571,26 @@ func (a *Adapter) VerifyAndSettle(req *paykit.AdapterRequest) (*paykit.Payment, 
 		SettlementHeaders: headers,
 		Raw:               sig,
 	}, nil
+}
+
+// verifyV1Envelope validates a legacy v1 credential at parse time,
+// mirroring the Rust X402_VERSION_V1 arm (server/exact.rs:316-327). v1
+// has no `accepted` object; the only top-level commitments are the
+// scheme and network. The scheme must be "exact", and the legacy
+// network string must normalize (through the same CAIP-2 mapping the
+// offer parser uses) to this server's configured CAIP-2 network. The
+// route's expected requirements always come from the gate, never the
+// credential, so no per-field amount/recipient binding runs for v1.
+func (a *Adapter) verifyV1Envelope(_ *paykit.Gate, credential *Credential) error {
+	if credential.Scheme != exactScheme {
+		return fmt.Errorf("invalid payload type: expected scheme %q, got %q", exactScheme, credential.Scheme)
+	}
+	expected := a.cfg.Network.CAIP2()
+	got := normalizeNetwork(credential.Network)
+	if got != expected {
+		return fmt.Errorf("network mismatch: expected %s, got %s", expected, credential.Network)
+	}
+	return nil
 }
 
 // verifyAcceptedBinding rejects a credential whose echoed `accepted`

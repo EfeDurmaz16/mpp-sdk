@@ -12,9 +12,10 @@ type fakeAccepts struct{ s Scheme }
 func (a fakeAccepts) AcceptsProtocol() Scheme { return a.s }
 
 type fakeAdapter struct {
-	scheme Scheme
-	pmt    *Payment
-	err    error
+	scheme   Scheme
+	pmt      *Payment
+	err      error
+	captured *string // when set, records the forwarded PaymentSig
 }
 
 func (f *fakeAdapter) Scheme() Scheme                  { return f.scheme }
@@ -22,7 +23,10 @@ func (f *fakeAdapter) AcceptsEntry(*Gate) AcceptsEntry { return fakeAccepts{f.sc
 func (f *fakeAdapter) ChallengeHeaders(*Gate) map[string]string {
 	return map[string]string{"x-fake": "1"}
 }
-func (f *fakeAdapter) VerifyAndSettle(*AdapterRequest) (*Payment, error) {
+func (f *fakeAdapter) VerifyAndSettle(req *AdapterRequest) (*Payment, error) {
+	if f.captured != nil {
+		*f.captured = req.PaymentSig
+	}
 	return f.pmt, f.err
 }
 
@@ -31,6 +35,51 @@ func newTestClient(adapter Adapter) *Client {
 		Config:       Config{Network: SolanaLocalnet, Accept: []Scheme{MPP}},
 		mppAdapter:   adapter,
 		errorHandler: DefaultErrorHandler,
+	}
+}
+
+// TestPaymentSigFallsBackToXPaymentHeader proves the v1 legacy X-PAYMENT
+// header reaches the x402 adapter as PaymentSig when Payment-Signature is
+// absent, and that Payment-Signature takes precedence when both are set.
+func TestPaymentSigFallsBackToXPaymentHeader(t *testing.T) {
+	cases := []struct {
+		name      string
+		paymentV2 string
+		paymentV1 string
+		want      string
+	}{
+		{name: "v1 only", paymentV1: "v1-cred", want: "v1-cred"},
+		{name: "v2 only", paymentV2: "v2-cred", want: "v2-cred"},
+		{name: "v2 wins", paymentV2: "v2-cred", paymentV1: "v1-cred", want: "v2-cred"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			adapter := &fakeAdapter{scheme: X402, pmt: &Payment{Scheme: X402, Gate: "g"}, captured: &got}
+			c := &Client{
+				Config:       Config{Network: SolanaLocalnet, Accept: []Scheme{X402}},
+				x402Adapter:  adapter,
+				errorHandler: DefaultErrorHandler,
+			}
+			r := httptest.NewRequest(http.MethodGet, "/x", nil)
+			if tc.paymentV2 != "" {
+				r.Header.Set("Payment-Signature", tc.paymentV2)
+			}
+			if tc.paymentV1 != "" {
+				r.Header.Set("X-PAYMENT", tc.paymentV1)
+			}
+			rec := httptest.NewRecorder()
+			c.RequireFunc(func(*http.Request) (Gate, error) {
+				return Gate{Amount: MustParseUSD("0.10")}, nil
+			})(okHandler()).ServeHTTP(rec, r)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status: got %d want 200 (adapter should have been selected and run)", rec.Code)
+			}
+			if got != tc.want {
+				t.Errorf("forwarded PaymentSig: got %q want %q", got, tc.want)
+			}
+		})
 	}
 }
 

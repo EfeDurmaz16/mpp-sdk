@@ -49,7 +49,28 @@ var nonceSource = func() ([]byte, error) {
 const (
 	paymentRequiredHeader  = "Payment-Required"
 	paymentSignatureHeader = "Payment-Signature"
-	x402Version            = 2
+
+	// Legacy v1 header names mirror the Rust spine constants.rs
+	// X402_V1_PAYMENT_REQUIRED_HEADER / X402_V1_PAYMENT_HEADER. The v1
+	// challenge is a raw-JSON flat PaymentRequirements (no base64, no
+	// accepts[] wrapper); the v1 credential is written to X-PAYMENT.
+	paymentRequiredHeaderV1 = "X-PAYMENT-REQUIRED"
+	paymentHeaderV1         = "X-PAYMENT"
+
+	// exactScheme is the scheme a v1 credential commits to at the top
+	// level (Rust EXACT_SCHEME, server/exact.rs:318).
+	exactScheme = "exact"
+
+	// Legacy v1 network strings. The Rust v1_network_for_requirements
+	// (payment.rs:383-394) collapses the full CAIP-2 space into just
+	// these two: devnet -> "solana-devnet", everything else (mainnet,
+	// testnet, localnet, unknown) -> "solana".
+	networkLegacyDevnet = "solana-devnet"
+	networkLegacy       = "solana"
+
+	x402VersionV1 = 1
+	x402VersionV2 = 2
+	x402Version   = x402VersionV2
 
 	// Compute-budget values mirror the Rust client: a small fixed limit
 	// and a 1 microLamport priority price, both well under the server
@@ -127,6 +148,16 @@ func ParseChallenge(h http.Header, body []byte, sel ChallengeSelection) (*x402.A
 			if entry := selectFromJSON(decoded, sel); entry != nil {
 				return entry, true
 			}
+		}
+	}
+	// Legacy v1 fallback: the X-PAYMENT-REQUIRED header carries a raw-JSON
+	// flat PaymentRequirements object (no base64, no accepts[] wrapper).
+	// Parsed directly into a single offer with no selection step, matching
+	// the Rust X402_V1_PAYMENT_REQUIRED_HEADER arm (payment.rs:236-243).
+	if raw := h.Get(paymentRequiredHeaderV1); raw != "" {
+		var entry x402.AcceptsEntry
+		if err := json.Unmarshal([]byte(raw), &entry); err == nil {
+			return &entry, true
 		}
 	}
 	if len(body) > 0 {
@@ -271,6 +302,56 @@ func BuildPaymentHeader(
 		return "", fmt.Errorf("x402 client: marshal credential: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+// BuildPaymentHeaderV1 builds and signs the same transaction as
+// BuildPaymentHeader but wraps it in the legacy v1 credential envelope
+// for older integrations: x402Version=1, top-level scheme="exact",
+// top-level legacy network string (section 5 mapping), and NO `accepted`
+// or `resource` object. The proof is byte-for-byte identical to v2; only
+// the envelope differs. The returned value is written to the X-PAYMENT
+// header. Mirrors Rust build_payment_header_v1 (payment.rs:144-160).
+func BuildPaymentHeaderV1(
+	ctx context.Context,
+	signer solanatx.Signer,
+	rpc solanatx.RPCClient,
+	entry *x402.AcceptsEntry,
+) (string, error) {
+	if entry == nil {
+		return "", errors.New("x402 client: nil accept entry")
+	}
+	txBase64, err := buildTransaction(ctx, signer, rpc, entry)
+	if err != nil {
+		return "", err
+	}
+	credential := x402.Credential{
+		X402Version: x402VersionV1,
+		Scheme:      exactScheme,
+		Network:     v1NetworkForEntry(entry),
+		Payload:     x402.CredentialPayload{Transaction: txBase64},
+		// No accepted/resource in v1.
+	}
+	raw, err := json.Marshal(credential)
+	if err != nil {
+		return "", fmt.Errorf("x402 client: marshal credential: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+// v1NetworkForEntry maps an offer's network to the legacy v1 network
+// string, mirroring Rust v1_network_for_requirements (payment.rs:383-394):
+// devnet (in any of its forms, including the devnet CAIP-2 id) maps to
+// "solana-devnet"; everything else maps to "solana". The Rust selector
+// prefers cluster over network; the Go AcceptsEntry has already
+// normalized the offer network to CAIP-2, so devnet is identified by the
+// devnet CAIP-2 id or any devnet alias.
+func v1NetworkForEntry(entry *x402.AcceptsEntry) string {
+	switch entry.Network {
+	case "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", "devnet", "solana-devnet":
+		return networkLegacyDevnet
+	default:
+		return networkLegacy
+	}
 }
 
 func buildTransaction(
