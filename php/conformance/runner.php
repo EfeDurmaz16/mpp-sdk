@@ -12,9 +12,9 @@ declare(strict_types=1);
  * RunnerResult line as JSON on stdout.
  *
  * ROLE: PHP is a SERVER-only SDK. It ships the MPP charge pre-broadcast
- * verifier (SolanaChargeTransactionVerifier) and the canonical-JSON /
- * base64url wire encoders, but it has NO client-side transaction build path.
- * Consequently:
+ * verifier (SolanaChargeTransactionVerifier), the x402 exact server adapter
+ * (PayKit\Protocols\X402\Adapter), and the canonical-JSON / base64url wire
+ * encoders, but it has NO client-side transaction build path. Consequently:
  *
  *   - canonical-bytes        -> supported (JCS + base64url + fixed-width bytes)
  *   - verify-transaction     -> supported ONLY when input.transaction is
@@ -23,6 +23,23 @@ declare(strict_types=1);
  *                               transaction expects the runner to BUILD one
  *                               first, which a server-only SDK cannot do.
  *   - build-transaction      -> unsupported (no client build path)
+ *
+ * x402-exact (intent === "x402-exact"): the cross-SDK oracle is the decoded
+ * ENVELOPE shape, not the signed Solana transaction inside
+ * payload.transaction (that is the interop matrix's job). PHP is server-only,
+ * so:
+ *
+ *   - build-transaction (x402)  -> unsupported (no client envelope builder)
+ *   - verify-transaction (x402) -> supported: drive the x402 envelope verify
+ *                                  (version dispatch + network gate + v2
+ *                                  accepted-vs-route comparison) and emit
+ *                                  accept (with x402EnvelopeShape) or reject
+ *                                  (with rejectCode). Mirrors the PHP x402
+ *                                  Adapter's parse/dispatch/gate
+ *                                  (Protocols\X402\Adapter::verifyAndSettle)
+ *                                  and the rust spine line-for-line. The
+ *                                  inner-transaction 11-rule structural check
+ *                                  and broadcast are out of scope here.
  *
  * For any mode this SDK cannot exercise, the runner emits a RunnerResult with
  * outcome "unsupported-mode" so the driver SKIPs that vector for PHP rather
@@ -260,13 +277,16 @@ function shape_from_transaction(string $transactionBase64): array
  * classifyReject: the patterns are tuned against the real strings the PHP
  * verifier emits.
  *
- * PHP is a server-only SDK, so in practice the only reject vector it actually
- * processes is the transferChecked decimals mismatch, which surfaces as
- * "No matching SPL transferChecked of ..." and so honestly classifies as the
- * generic no-matching-transfer category (the decimals field is enforced
- * through the transfer match key, exactly as in the reference). The remaining
- * patterns are kept in lockstep with the shared vocabulary so any future
- * server-verifiable reject reason classifies without further tuning.
+ * For MPP charge, the only reject vector PHP actually processes is the
+ * transferChecked decimals mismatch, which surfaces as "No matching SPL
+ * transferChecked of ..." and so honestly classifies as the generic
+ * no-matching-transfer category (the decimals field is enforced through the
+ * transfer match key, exactly as in the reference). For x402-exact, the
+ * server-verifiable rejects are an unsupported x402Version
+ * (-> unsupported-version) and a credential whose network does not match the
+ * server route (-> wrong-network). The remaining patterns are kept in
+ * lockstep with the shared vocabulary so any future server-verifiable reject
+ * reason classifies without further tuning.
  *
  * Returns null when no pattern matches so the harness can surface an
  * unclassified rejection instead of silently passing it.
@@ -287,6 +307,11 @@ function classify_reject(string $message): ?string
         '/no matching (spl )?(token )?(transfer|transferchecked|sol transfer)/i' => 'no-matching-transfer',
         '/unexpected .* (instruction|transfer)/i' => 'unexpected-instruction',
         '/amount .* (mismatch|does not match)/i' => 'amount-mismatch',
+        // x402-exact reject vocabulary. Ordered before the generic
+        // invalid/payload fallback so an unknown version or a network
+        // mismatch classifies precisely (mirrors reject.ts).
+        '/unsupported x402 version/i' => 'unsupported-version',
+        '/network mismatch/i' => 'wrong-network',
     ];
 
     foreach ($patterns as $pattern => $code) {
@@ -487,6 +512,233 @@ function build_fixture(ChargeRequest $request, array $signerSecretKey): string
     return base64_encode($signatures . $message);
 }
 
+// ── x402-exact envelope oracle ───────────────────────────────────────────
+//
+// Canonical CAIP-2 chain identifiers (rust types.rs / PHP Adapter).
+const X402_SOLANA_MAINNET = 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp';
+const X402_SOLANA_DEVNET  = 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1';
+const X402_SOLANA_TESTNET = 'solana:4uhcVJyU9pJkvQyS88uRDiswHXSCkY3z';
+const X402_EXACT_SCHEME   = 'exact';
+const X402_VERSION_V1     = 1;
+const X402_VERSION_V2     = 2;
+
+/**
+ * Normalize a legacy v1 network slug (or any cluster slug / CAIP-2 id) to its
+ * canonical CAIP-2 chain identifier. Mirrors the rust spine
+ * `caip2_network_for_cluster` and PHP Adapter::caip2NetworkForCluster
+ * (localnet collapses to the devnet CAIP-2 id by convention).
+ */
+function x402_caip2_for_cluster(string $cluster): string
+{
+    return match ($cluster) {
+        X402_SOLANA_MAINNET, 'solana', 'mainnet', 'mainnet-beta' => X402_SOLANA_MAINNET,
+        X402_SOLANA_TESTNET, 'testnet', 'solana-testnet'         => X402_SOLANA_TESTNET,
+        'devnet', 'localnet'                                     => X402_SOLANA_DEVNET,
+        X402_SOLANA_DEVNET, 'solana-devnet'                      => X402_SOLANA_DEVNET,
+        default                                                  => X402_SOLANA_MAINNET,
+    };
+}
+
+/**
+ * Decode a base64(JSON) x402 payment header into the conformance envelope
+ * shape oracle. Mirrors the TS reference decodeEnvelopeShape: hasAccepted is
+ * true iff a v2 `accepted` object is present, payloadHasTransaction is true
+ * iff payload.transaction is a non-empty string, top-level scheme/network are
+ * echoed only when present (v1), and accepted* echo the offer (v2).
+ *
+ * @param array<string, mixed> $envelope
+ * @return array<string, mixed>
+ */
+function x402_envelope_shape(array $envelope): array
+{
+    $accepted = $envelope['accepted'] ?? null;
+    $payload = $envelope['payload'] ?? null;
+    $transaction = is_array($payload) ? ($payload['transaction'] ?? null) : null;
+
+    $shape = [
+        'x402Version' => $envelope['x402Version'] ?? null,
+        'hasAccepted' => is_array($accepted),
+        'payloadHasTransaction' => is_string($transaction) && $transaction !== '',
+    ];
+
+    if (array_key_exists('scheme', $envelope)) {
+        $shape['scheme'] = $envelope['scheme'];
+    }
+    if (array_key_exists('network', $envelope)) {
+        $shape['network'] = $envelope['network'];
+    }
+    if (is_array($accepted)) {
+        if (array_key_exists('scheme', $accepted)) {
+            $shape['acceptedScheme'] = $accepted['scheme'];
+        }
+        if (array_key_exists('network', $accepted)) {
+            $shape['acceptedNetwork'] = $accepted['network'];
+        }
+        if (array_key_exists('asset', $accepted)) {
+            $shape['acceptedAsset'] = $accepted['asset'];
+        }
+        if (array_key_exists('payTo', $accepted)) {
+            $shape['acceptedPayTo'] = $accepted['payTo'];
+        }
+        if (array_key_exists('amount', $accepted)) {
+            $shape['acceptedAmount'] = $accepted['amount'];
+        }
+    }
+
+    return $shape;
+}
+
+/**
+ * Decode and verify an x402 payment header against a server route, mirroring
+ * the PHP x402 Adapter's envelope parse/dispatch/gate
+ * (Protocols\X402\Adapter::verifyAndSettle) and the rust spine version
+ * dispatch + network gate + v2 accepted-vs-route comparison. RPC-free: the
+ * inner signed-transaction 11-rule structural check and broadcast are out of
+ * scope for the envelope oracle (the interop matrix owns those), so a
+ * structurally valid, route-matching envelope is accepted here.
+ *
+ * Throws InvalidArgumentException with a message classify_reject maps onto the
+ * shared reject vocabulary (unsupported-version, wrong-network, invalid-payload).
+ *
+ * @param array<string, mixed> $route
+ * @return array<string, mixed> the decoded envelope shape on accept
+ */
+function verify_x402_header(string $header, array $route): array
+{
+    $decoded = base64_decode($header, true);
+    if ($decoded === false || $decoded === '') {
+        throw new InvalidArgumentException('invalid payload: undecodable x402 payment header');
+    }
+    try {
+        $envelope = json_decode($decoded, true, flags: JSON_THROW_ON_ERROR);
+    } catch (Throwable) {
+        throw new InvalidArgumentException('invalid payload: x402 payment header is not JSON');
+    }
+    if (!is_array($envelope)) {
+        throw new InvalidArgumentException('invalid payload: x402 envelope must be a JSON object');
+    }
+
+    $version = $envelope['x402Version'] ?? null;
+    $expectedNetwork = x402_caip2_for_cluster((string) ($route['network'] ?? ''));
+
+    if ($version === X402_VERSION_V1) {
+        // Legacy v1: top-level scheme + network, no `accepted`. Gate on
+        // scheme + CAIP-2-normalized network only (Adapter v1 arm).
+        $scheme = is_string($envelope['scheme'] ?? null) ? $envelope['scheme'] : '';
+        if ($scheme !== X402_EXACT_SCHEME) {
+            throw new InvalidArgumentException('invalid payload: unexpected scheme ' . $scheme);
+        }
+        $network = is_string($envelope['network'] ?? null) ? $envelope['network'] : '';
+        if (x402_caip2_for_cluster($network) !== $expectedNetwork) {
+            throw new InvalidArgumentException(
+                "Network mismatch: expected $expectedNetwork, got $network",
+            );
+        }
+    } elseif ($version === X402_VERSION_V2) {
+        // v2: `accepted` is required and structurally matched against the
+        // server route (network/amount/payTo/asset), mirroring the Adapter
+        // v2 identity-key match and the rust verify_envelope_payload.
+        $accepted = $envelope['accepted'] ?? null;
+        if (!is_array($accepted)) {
+            throw new InvalidArgumentException('invalid payload: v2 envelope missing accepted');
+        }
+        $acceptedNetwork = is_string($accepted['network'] ?? null) ? $accepted['network'] : '';
+        if ($acceptedNetwork !== $expectedNetwork) {
+            throw new InvalidArgumentException(
+                "Network mismatch: expected $expectedNetwork, got $acceptedNetwork",
+            );
+        }
+        $acceptedAmount = is_string($accepted['amount'] ?? null) ? $accepted['amount'] : '';
+        if ($acceptedAmount !== (string) ($route['amount'] ?? '')) {
+            throw new InvalidArgumentException(
+                'Amount mismatch: expected ' . ($route['amount'] ?? '') . ", got $acceptedAmount",
+            );
+        }
+        $acceptedPayTo = is_string($accepted['payTo'] ?? null) ? $accepted['payTo'] : '';
+        if ($acceptedPayTo !== (string) ($route['recipient'] ?? '')) {
+            throw new InvalidArgumentException(
+                'Recipient mismatch: credential claims a different recipient',
+            );
+        }
+        $acceptedAsset = is_string($accepted['asset'] ?? null) ? $accepted['asset'] : '';
+        if ($acceptedAsset !== (string) ($route['currency'] ?? '')) {
+            throw new InvalidArgumentException(
+                'Currency mismatch: expected ' . ($route['currency'] ?? '') . ", got $acceptedAsset",
+            );
+        }
+    } else {
+        // Genuinely-unknown versions are rejected (rust exact.rs / Adapter
+        // unsupported_x402_version arm).
+        throw new InvalidArgumentException(
+            'unsupported x402 version: ' . (is_scalar($version) ? (string) $version : 'unknown'),
+        );
+    }
+
+    $payload = $envelope['payload'] ?? null;
+    $transaction = is_array($payload) ? ($payload['transaction'] ?? null) : null;
+    if (!is_string($transaction) || $transaction === '') {
+        throw new InvalidArgumentException('invalid payload: missing transaction proof');
+    }
+
+    return x402_envelope_shape($envelope);
+}
+
+/**
+ * Drive the x402-exact intent. PHP is server-only, so build vectors are
+ * unsupported (no client envelope builder) and verify vectors run the
+ * envelope-level verify against the vector's server route.
+ *
+ * @param array<string, mixed> $vector
+ * @return array<string, mixed>
+ */
+function run_x402_vector(array $vector): array
+{
+    $id = Json::optionalString($vector['id'] ?? null, 'id');
+    $mode = Json::optionalString($vector['mode'] ?? null, 'mode');
+    $input = is_array($vector['input'] ?? null) ? Json::object($vector['input'], 'input') : [];
+
+    if ($mode === 'build-transaction') {
+        // PHP ships no client-side x402 envelope builder; build vectors are
+        // out of scope for a server-only SDK.
+        return [
+            'id' => $id,
+            'outcome' => 'unsupported-mode',
+            'error' => 'php is server-only: x402 build-transaction is not supported (no client envelope builder)',
+        ];
+    }
+
+    if ($mode !== 'verify-transaction') {
+        return [
+            'id' => $id,
+            'outcome' => 'unsupported-mode',
+            'error' => 'unsupported x402 mode: ' . $mode,
+        ];
+    }
+
+    $header = Json::optionalString($input['x402PaymentHeader'] ?? null, 'x402PaymentHeader');
+    if ($header === '') {
+        throw new InvalidArgumentException('invalid payload: x402 verify vector missing input.x402PaymentHeader');
+    }
+    foreach (['x402ServerNetwork', 'x402ServerRecipient', 'x402ServerCurrency', 'x402ServerAmount'] as $key) {
+        if (!array_key_exists($key, $input)) {
+            throw new InvalidArgumentException('invalid payload: x402 verify vector missing server route');
+        }
+    }
+    $route = [
+        'network' => Json::optionalString($input['x402ServerNetwork'] ?? null, 'x402ServerNetwork'),
+        'recipient' => Json::optionalString($input['x402ServerRecipient'] ?? null, 'x402ServerRecipient'),
+        'currency' => Json::optionalString($input['x402ServerCurrency'] ?? null, 'x402ServerCurrency'),
+        'amount' => Json::optionalString($input['x402ServerAmount'] ?? null, 'x402ServerAmount'),
+    ];
+
+    $shape = verify_x402_header($header, $route);
+    return [
+        'id' => $id,
+        'outcome' => 'accept',
+        'x402EnvelopeShape' => $shape,
+    ];
+}
+
 /**
  * @param array<string, mixed> $input
  * @return array<string, mixed>
@@ -532,7 +784,13 @@ function run_vector(array $vector): array
 {
     $id = Json::optionalString($vector['id'] ?? null, 'id');
     $mode = Json::optionalString($vector['mode'] ?? null, 'mode');
+    $intent = Json::optionalString($vector['intent'] ?? null, 'intent');
     $input = is_array($vector['input'] ?? null) ? Json::object($vector['input'], 'input') : [];
+
+    // x402-exact: the oracle is the decoded envelope shape, not a tx shape.
+    if ($intent === 'x402-exact') {
+        return run_x402_vector($vector);
+    }
 
     switch ($mode) {
         case 'canonical-bytes':
