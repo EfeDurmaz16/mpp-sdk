@@ -122,10 +122,16 @@ export type ConformanceVector = {
   expect: VectorExpect;
 };
 
+// A runner may emit any vector outcome, plus the `unsupported-mode`
+// sentinel: a runner whose SDK role does not cover a vector's mode (e.g. a
+// client-only SDK asked to verify-transaction) returns this so the driver
+// SKIPs the vector for that language rather than failing it.
+export type RunnerOutcome = VectorOutcome | "unsupported-mode";
+
 // The result a runner emits to stdout for one vector.
 export type RunnerResult = {
   id: string;
-  outcome: VectorOutcome;
+  outcome: RunnerOutcome;
   // Present on build/verify accept. The decoded semantic shape.
   transactionShape?: TransactionShape;
   // Present on canonical-bytes.

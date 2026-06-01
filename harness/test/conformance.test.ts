@@ -28,6 +28,17 @@ import type {
 const here = dirname(fileURLToPath(import.meta.url));
 const vectorsDir = join(here, "..", "vectors");
 const tsRunner = join(here, "..", "src", "conformance", "ts-runner.ts");
+const kotlinRunner = join(
+  here,
+  "..",
+  "..",
+  "kotlin",
+  "build",
+  "install",
+  "conformance-runner",
+  "bin",
+  "conformance-runner",
+);
 
 function loadVectors(): ConformanceVector[] {
   const files = readdirSync(vectorsDir).filter((name) => name.endsWith(".json"));
@@ -44,18 +55,28 @@ function loadVectors(): ConformanceVector[] {
 }
 
 // One CLI per SDK over stdin/stdout. The TS reference runner is invoked
-// via tsx; other languages will register their own command here.
+// via tsx; other languages register their own command here. The Kotlin
+// runner is the `application` plugin start script produced by
+// `gradle installDist`, so the suite invokes plain `java` per vector
+// instead of paying gradle startup on every spawn.
 const RUNNERS: Record<string, string[]> = {
   typescript: ["pnpm", "exec", "node", "--import", "tsx", tsRunner],
+  kotlin: [kotlinRunner],
 };
+
+// Per-runner working directory. Defaults to the harness root. Runners that
+// resolve their own files (the Kotlin start script resolves its lib/ relative
+// to its own location, so the harness root is fine) can override here.
+const RUNNER_CWD: Record<string, string> = {};
 
 function runVector(
   command: string[],
   vector: ConformanceVector,
+  cwd: string,
 ): Promise<RunnerResult> {
   const [bin, ...args] = command;
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { cwd: join(here, "..") });
+    const child = spawn(bin, args, { cwd });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
@@ -177,11 +198,22 @@ describe("cross-SDK conformance vectors", () => {
   });
 
   for (const [language, command] of Object.entries(RUNNERS)) {
+    const runnerCwd = RUNNER_CWD[language] ?? join(here, "..");
     describe(`${language} reference runner`, () => {
       for (const vector of vectors) {
-        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async () => {
-          const result = await runVector(command, vector);
+        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async (ctx) => {
+          const result = await runVector(command, vector, runnerCwd);
           expect(result.id).toBe(vector.id);
+
+          // A runner whose SDK role does not cover this vector's mode (e.g.
+          // a client-only SDK asked to verify-transaction) returns the
+          // `unsupported-mode` sentinel. SKIP rather than fail: the vector is
+          // simply outside this language's surface, not a divergence.
+          if (result.outcome === "unsupported-mode") {
+            ctx.skip();
+            return;
+          }
+
           expect(
             result.outcome,
             `expected ${vector.expect.outcome} but runner said ${result.outcome}: ${result.error ?? ""}`,
