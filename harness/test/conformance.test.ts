@@ -44,18 +44,36 @@ function loadVectors(): ConformanceVector[] {
 }
 
 // One CLI per SDK over stdin/stdout. The TS reference runner is invoked
-// via tsx; other languages will register their own command here.
+// via tsx; other languages register their own command here. The Swift
+// runner is the SolanaPayKit `mpp-conformance` executable, driven by
+// `swift run` so the suite needs no separate build step (SwiftPM caches
+// the build).
+const swiftRunnerDir = join(here, "..", "..", "swift");
 const RUNNERS: Record<string, string[]> = {
   typescript: ["pnpm", "exec", "node", "--import", "tsx", tsRunner],
+  swift: ["swift", "run", "-c", "release", "mpp-conformance"],
 };
+
+// Per-runner working directory. Defaults to the harness root; the Swift
+// runner must run from the swift package so `swift run mpp-conformance`
+// resolves.
+const RUNNER_CWD: Record<string, string> = {
+  swift: swiftRunnerDir,
+};
+
+// A runner emits this prefix in `error` when the SDK does not implement a
+// vector's mode (e.g. a client-only SDK asked to verify-transaction). The
+// driver SKIPs such vectors for that language rather than failing them.
+const UNSUPPORTED_MODE_PREFIX = "unsupported-mode";
 
 function runVector(
   command: string[],
   vector: ConformanceVector,
+  cwd: string,
 ): Promise<RunnerResult> {
   const [bin, ...args] = command;
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { cwd: join(here, "..") });
+    const child = spawn(bin, args, { cwd });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
@@ -177,11 +195,27 @@ describe("cross-SDK conformance vectors", () => {
   });
 
   for (const [language, command] of Object.entries(RUNNERS)) {
+    const runnerCwd = RUNNER_CWD[language] ?? join(here, "..");
     describe(`${language} reference runner`, () => {
       for (const vector of vectors) {
-        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async () => {
-          const result = await runVector(command, vector);
+        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async ({
+          skip,
+        }) => {
+          const result = await runVector(command, vector, runnerCwd);
           expect(result.id).toBe(vector.id);
+
+          // A runner that does not implement this vector's mode (e.g. a
+          // client-only SDK asked to verify-transaction) reports it via the
+          // unsupported-mode prefix. Skip rather than fail: the vector is
+          // simply out of scope for this language's role.
+          if (
+            result.outcome === "reject" &&
+            result.error?.startsWith(UNSUPPORTED_MODE_PREFIX)
+          ) {
+            skip(`${language} does not support ${vector.mode}: ${result.error}`);
+            return;
+          }
+
           expect(
             result.outcome,
             `expected ${vector.expect.outcome} but runner said ${result.outcome}: ${result.error ?? ""}`,
