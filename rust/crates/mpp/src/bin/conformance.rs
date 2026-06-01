@@ -31,7 +31,7 @@ use solana_mpp::protocol::solana::{programs, MethodDetails, Split};
 use solana_mpp::server::verify_charge_transaction_pre_broadcast;
 use solana_mpp::{base64url_encode, ChargeRequest};
 use solana_rpc_client::rpc_client::RpcClient;
-use solana_transaction::Transaction;
+use solana_transaction::{versioned::VersionedTransaction, Transaction};
 
 const DEFAULT_NETWORK: &str = "mainnet";
 const DEFAULT_SPL_DECIMALS: u8 = 6;
@@ -523,10 +523,15 @@ fn hex_nibble(c: u8) -> Result<u8, String> {
 fn shape_from_transaction(transaction_b64: &str) -> Result<TransactionShape, String> {
     let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, transaction_b64)
         .map_err(|e| format!("invalid base64 transaction: {e}"))?;
-    let tx: Transaction =
-        bincode::deserialize(&bytes).map_err(|e| format!("invalid transaction: {e}"))?;
+    // Accept both legacy and v0 wire forms, mirroring the server verifier's
+    // decode (server/charge.rs): the reference SDKs build v0 versioned
+    // transactions, so a legacy-only decode here would EOF on a pinned v0 tx.
+    let tx: VersionedTransaction = bincode::deserialize::<Transaction>(&bytes)
+        .map(VersionedTransaction::from)
+        .or_else(|_| bincode::deserialize::<VersionedTransaction>(&bytes))
+        .map_err(|e| format!("invalid transaction: {e}"))?;
 
-    let keys = &tx.message.account_keys;
+    let keys = tx.message.static_account_keys();
     if keys.is_empty() {
         return Err("transaction has no account keys".to_string());
     }
@@ -545,7 +550,7 @@ fn shape_from_transaction(transaction_b64: &str) -> Result<TransactionShape, Str
         memo: Vec::new(),
     };
 
-    for ix in &tx.message.instructions {
+    for ix in tx.message.instructions() {
         let program = match keys.get(ix.program_id_index as usize) {
             Some(k) => k.to_string(),
             None => continue,
