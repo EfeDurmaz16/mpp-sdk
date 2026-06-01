@@ -345,6 +345,35 @@ def _run_vector(vector: dict[str, Any]) -> dict[str, Any]:
     raise ValueError(f"unsupported-mode: {mode}")
 
 
+# Map the Python SDK's native reject message onto the shared RejectCode
+# vocabulary (see harness/src/conformance/reject.ts). The harness asserts
+# this category so a guard that fires for the wrong reason is flagged rather
+# than passing on outcome alone. Decimals mismatch is enforced through the
+# transfer match key, so it honestly surfaces as `no-matching-transfer`.
+_REJECT_PATTERNS: list[tuple[str, str]] = [
+    (r"compute unit price .* exceeds (cap|maximum)", "compute-price-over-cap"),
+    (r"compute unit limit .* exceeds (cap|maximum)", "compute-limit-over-cap"),
+    (r"fee payer cannot authorize", "fee-payer-not-authority"),
+    (r"fee payer .* (funding source|funds source)", "fee-payer-is-funds-source"),
+    (r"splits consume the entire amount", "splits-exceed-amount"),
+    (r"too many splits", "too-many-splits"),
+    (r"no matching (spl )?(token )?transfer", "no-matching-transfer"),
+    (r"unexpected .* (instruction|transfer)", "unexpected-instruction"),
+    (r"amount .* (mismatch|does not match)", "amount-mismatch"),
+]
+
+
+def _classify_reject(message: str) -> str | None:
+    import re
+
+    for pattern, code in _REJECT_PATTERNS:
+        if re.search(pattern, message, re.IGNORECASE):
+            return code
+    if re.search(r"invalid|malformed|decode|payload", message, re.IGNORECASE):
+        return "invalid-payload"
+    return None
+
+
 def main() -> None:
     raw = sys.stdin.read().strip()
     if not raw:
@@ -354,7 +383,11 @@ def main() -> None:
     try:
         result = _run_vector(vector)
     except Exception as exc:  # noqa: BLE001
-        result = {"id": vector.get("id", ""), "outcome": "reject", "error": str(exc)}
+        message = str(exc)
+        result = {"id": vector.get("id", ""), "outcome": "reject", "error": message}
+        code = _classify_reject(message)
+        if code is not None:
+            result["rejectCode"] = code
 
     sys.stdout.write(json.dumps(result) + "\n")
 
