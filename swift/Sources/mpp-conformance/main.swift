@@ -43,6 +43,10 @@ private let defaultSPLDecimals = 6
 private struct Vector: Decodable {
     let id: String
     let mode: String
+    // `intent` is absent on the charge/canonical vectors (they predate the
+    // field) and "x402-exact" on the x402 vectors. Default to charge so the
+    // existing build/canonical dispatch is unchanged.
+    let intent: String?
     let input: VectorInput
 }
 
@@ -54,6 +58,11 @@ private struct VectorInput: Decodable {
     // canonical-bytes payloads are decoded lazily from the raw JSON because
     // `value` is an arbitrary JSON document Codable cannot model directly.
     let encodeBase64Url: EncodeBase64URL?
+    // x402-exact build inputs (mirror schema.ts VectorInput x402 fields).
+    let x402Version: Int?
+    let x402PinnedTransaction: String?
+    // x402Offer is decoded from the raw JSON object tree (so the entry's
+    // verbatim `raw` echo is preserved), not via this typed field.
 }
 
 private struct VectorChargeRequest: Decodable {
@@ -160,16 +169,56 @@ private struct ExactBytes: Encodable {
     }
 }
 
+// Decoded x402 envelope shape (mirror schema.ts X402EnvelopeShape). The
+// cross-SDK oracle for the x402 `exact` intent is this decoded envelope, not
+// the signed transaction inside `payload.transaction` (that is the interop
+// matrix's job). Only the fields the vector pins are asserted; presence /
+// absence of scheme/network/accepted is itself part of the contract (v1
+// carries top-level scheme+network and no accepted, v2 carries accepted and
+// no top-level scheme/network).
+private struct X402EnvelopeShape: Encodable {
+    var x402Version: Int
+    var scheme: String?
+    var network: String?
+    var hasAccepted: Bool
+    var payloadHasTransaction: Bool
+    var acceptedScheme: String?
+    var acceptedNetwork: String?
+    var acceptedAsset: String?
+    var acceptedPayTo: String?
+    var acceptedAmount: String?
+
+    enum CodingKeys: String, CodingKey {
+        case x402Version, scheme, network, hasAccepted, payloadHasTransaction
+        case acceptedScheme, acceptedNetwork, acceptedAsset, acceptedPayTo, acceptedAmount
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(x402Version, forKey: .x402Version)
+        try c.encode(hasAccepted, forKey: .hasAccepted)
+        try c.encode(payloadHasTransaction, forKey: .payloadHasTransaction)
+        if let scheme { try c.encode(scheme, forKey: .scheme) }
+        if let network { try c.encode(network, forKey: .network) }
+        if let acceptedScheme { try c.encode(acceptedScheme, forKey: .acceptedScheme) }
+        if let acceptedNetwork { try c.encode(acceptedNetwork, forKey: .acceptedNetwork) }
+        if let acceptedAsset { try c.encode(acceptedAsset, forKey: .acceptedAsset) }
+        if let acceptedPayTo { try c.encode(acceptedPayTo, forKey: .acceptedPayTo) }
+        if let acceptedAmount { try c.encode(acceptedAmount, forKey: .acceptedAmount) }
+    }
+}
+
 private struct RunnerResult: Encodable {
     let id: String
     let outcome: String
     var transactionShape: TransactionShape?
     var exactBytes: ExactBytes?
+    var x402EnvelopeShape: X402EnvelopeShape?
     var error: String?
     var rejectCode: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, outcome, transactionShape, exactBytes, error, rejectCode
+        case id, outcome, transactionShape, exactBytes, x402EnvelopeShape, error, rejectCode
     }
 
     func encode(to encoder: Encoder) throws {
@@ -178,6 +227,7 @@ private struct RunnerResult: Encodable {
         try c.encode(outcome, forKey: .outcome)
         if let transactionShape { try c.encode(transactionShape, forKey: .transactionShape) }
         if let exactBytes { try c.encode(exactBytes, forKey: .exactBytes) }
+        if let x402EnvelopeShape { try c.encode(x402EnvelopeShape, forKey: .x402EnvelopeShape) }
         if let error { try c.encode(error, forKey: .error) }
         if let rejectCode { try c.encode(rejectCode, forKey: .rejectCode) }
     }
@@ -563,9 +613,140 @@ private func hexDecode(_ hex: String) throws -> [UInt8] {
     return out
 }
 
+// MARK: - x402-exact build path
+//
+// Swift is a CLIENT-only SDK, so it implements only the x402 build side: take
+// an offer + version, drive the real SolanaPayKit x402 client envelope builder
+// (`buildX402PaymentHeader` for v2 / `buildX402PaymentHeaderV1` for v1), decode
+// the resulting standard-base64 envelope, and emit the X402EnvelopeShape the
+// oracle compares against. Verify vectors are unsupported (the driver SKIPs
+// them for this language), mirroring the charge verify-transaction handling.
+//
+// The signed-transaction proof inside `payload.transaction` is out of scope for
+// the envelope oracle (the interop matrix asserts that), so the build is kept
+// deterministic and RPC-free: the offer is decoded with a pinned blockhash
+// stamped into `extra.recentBlockhash` and a fixed in-memory signer, so the SDK
+// builder never reaches for a live RPC. The decoded envelope shape is identical
+// whatever transaction bytes the signer produces.
+
+// A valid 32-byte base58 value used to stamp the offer's recentBlockhash so the
+// SDK x402 builder stays RPC-free. The byte contents are irrelevant to the
+// envelope shape (only payloadHasTransaction matters), so any valid blockhash
+// works; reuse a well-known base58 pubkey string.
+private let x402PinnedBlockhash = "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY"
+
+// Decode the x402 offer object out of the raw JSON input tree into the SDK's
+// own `X402AcceptsEntry` so its verbatim `raw` echo is preserved (the v2
+// `accepted` field echoes the offered object unchanged, mirroring the rust
+// client's `to_accepted_value`). A pinned `extra.recentBlockhash` is injected
+// when the offer omits one so the builder is RPC-free.
+private func decodeX402Offer(_ rawOffer: Any) throws -> X402AcceptsEntry {
+    var offerObject = (rawOffer as? [String: Any]) ?? [:]
+    var extra = (offerObject["extra"] as? [String: Any]) ?? [:]
+    if extra["recentBlockhash"] == nil {
+        extra["recentBlockhash"] = x402PinnedBlockhash
+    }
+    offerObject["extra"] = extra
+    let data = try JSONSerialization.data(withJSONObject: offerObject)
+    do {
+        return try JSONDecoder().decode(X402AcceptsEntry.self, from: data)
+    } catch {
+        throw RunnerError.message("failed to decode x402 offer: \(error)")
+    }
+}
+
+// Decode a standard-base64 x402 envelope into the conformance shape oracle.
+// Mirrors decodeEnvelopeShape in harness/src/conformance/x402.ts.
+private func decodeX402EnvelopeShape(_ header: String) throws -> X402EnvelopeShape {
+    guard let data = Data(base64Encoded: header) else {
+        throw RunnerError.message("x402 envelope is not valid base64")
+    }
+    guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        throw RunnerError.message("x402 envelope is not a JSON object")
+    }
+    let accepted = object["accepted"] as? [String: Any]
+    let payload = object["payload"] as? [String: Any]
+    let txn = payload?["transaction"] as? String
+
+    var shape = X402EnvelopeShape(
+        x402Version: object["x402Version"] as? Int ?? -1,
+        hasAccepted: accepted != nil,
+        payloadHasTransaction: (txn?.isEmpty == false)
+    )
+    shape.scheme = object["scheme"] as? String
+    shape.network = object["network"] as? String
+    if let accepted {
+        shape.acceptedScheme = accepted["scheme"] as? String
+        shape.acceptedNetwork = accepted["network"] as? String
+        shape.acceptedAsset = accepted["asset"] as? String
+        shape.acceptedPayTo = accepted["payTo"] as? String
+        shape.acceptedAmount = accepted["amount"] as? String
+    }
+    return shape
+}
+
+private func buildX402Envelope(_ vector: Vector, rawOffer: Any?) async throws -> X402EnvelopeShape {
+    guard let rawOffer else {
+        throw RunnerError.message("invalid payload: x402 build vector missing input.x402Offer")
+    }
+    let offer = try decodeX402Offer(rawOffer)
+    let version = vector.input.x402Version ?? X402VersionV2
+
+    // Fixed in-memory signer (deterministic 32-byte seed). The signer identity
+    // does not affect the envelope shape; it only signs the out-of-scope proof.
+    let signer = try MemorySigner(secretKey: Data(repeating: 0x11, count: 32))
+    // Unreachable RPC: the offer carries a pinned blockhash, so the SDK builder
+    // never performs a network call.
+    let rpc = RpcClient(endpoint: URL(string: "http://127.0.0.1:0")!)
+
+    let header: String
+    if version == X402VersionV1 {
+        header = try await buildX402PaymentHeaderV1(signer: signer, rpc: rpc, offer: offer)
+    } else {
+        header = try await buildX402PaymentHeader(signer: signer, rpc: rpc, offer: offer)
+    }
+    return try decodeX402EnvelopeShape(header)
+}
+
 // MARK: - Dispatch
 
-private func runVector(_ vector: Vector, rawValue: Any?) async -> RunnerResult {
+private func runVector(_ vector: Vector, rawValue: Any?, rawOffer: Any?) async -> RunnerResult {
+    // x402-exact intent: client-only. build-transaction is supported (emit the
+    // decoded envelope shape); verify-transaction is unsupported (the driver
+    // SKIPs it for this language, same convention as the charge verify path).
+    if vector.intent == "x402-exact" {
+        do {
+            switch vector.mode {
+            case "build-transaction":
+                let shape = try await buildX402Envelope(vector, rawOffer: rawOffer)
+                return RunnerResult(id: vector.id, outcome: "accept", x402EnvelopeShape: shape)
+            case "verify-transaction":
+                return RunnerResult(
+                    id: vector.id,
+                    outcome: "reject",
+                    error: "unsupported-mode: swift is a client-only SDK and does not implement x402 verify-transaction"
+                )
+            default:
+                return RunnerResult(
+                    id: vector.id,
+                    outcome: "reject",
+                    error: "unsupported mode \(vector.mode) for x402-exact"
+                )
+            }
+        } catch {
+            let message = String(describing: error)
+            return RunnerResult(
+                id: vector.id,
+                outcome: "reject",
+                error: message,
+                rejectCode: classifyReject(message)
+            )
+        }
+    }
+    return await runChargeVector(vector, rawValue: rawValue)
+}
+
+private func runChargeVector(_ vector: Vector, rawValue: Any?) async -> RunnerResult {
     do {
         switch vector.mode {
         case "canonical-bytes":
@@ -613,23 +794,27 @@ func main() async {
 
     let vector: Vector
     let rawValue: Any?
+    let rawOffer: Any?
     do {
         vector = try JSONDecoder().decode(Vector.self, from: raw)
-        // `value` is an arbitrary JSON document; pull it from the parsed
-        // object tree rather than Codable so canonical-bytes vectors can
-        // canonicalize any shape.
+        // `value` and `x402Offer` are arbitrary JSON documents; pull them from
+        // the parsed object tree rather than Codable so canonical-bytes vectors
+        // can canonicalize any shape and the x402 offer preserves its verbatim
+        // form for the `accepted` echo.
         if let top = try JSONSerialization.jsonObject(with: raw) as? [String: Any],
            let input = top["input"] as? [String: Any] {
             rawValue = input["value"]
+            rawOffer = input["x402Offer"]
         } else {
             rawValue = nil
+            rawOffer = nil
         }
     } catch {
         FileHandle.standardError.write(Data("failed to parse vector: \(error)".utf8))
         exit(1)
     }
 
-    let result = await runVector(vector, rawValue: rawValue)
+    let result = await runVector(vector, rawValue: rawValue, rawOffer: rawOffer)
     do {
         let encoder = JSONEncoder()
         let data = try encoder.encode(result)
