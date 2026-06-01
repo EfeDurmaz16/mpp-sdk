@@ -128,16 +128,17 @@ server verify (`verifyChargeTransaction`), and the JCS reference encoder.
 
 ## Per-SDK runner follow-up
 
-Only the TypeScript reference runner ships in this change. Each other SDK
-gets its own conformance runner CLI honoring the same stdin/stdout
-contract, registered in the `RUNNERS` table in
-`harness/test/conformance.test.ts`. Tracked follow-up, one per SDK:
+The TypeScript reference runner and the Lua server-only runner ship in
+this layer. Each remaining SDK gets its own conformance runner CLI
+honoring the same stdin/stdout contract, registered in the `RUNNERS`
+table in `harness/test/conformance.test.ts`. Tracked follow-up, one per
+SDK:
 
 - Rust (`solana-mpp` / `solana-x402` conformance bin)
 - Go (`go/...` conformance command)
 - PHP (`php/...`)
 - Ruby (`ruby/...`)
-- Lua (`lua/...`)
+- Lua (`lua/cmd/conformance/main.lua`) — landed; server-only role
 - Python (`python/...`)
 - Swift (`swift/...`)
 - Kotlin (`kotlin/...`)
@@ -145,3 +146,21 @@ contract, registered in the `RUNNERS` table in
 Once a runner lands, the driver asserts it against every vector with no
 vector changes: add the command to `RUNNERS` and the matrix expands
 automatically.
+
+### Role-restricted runners and `unsupported-mode`
+
+Not every SDK plays every role. A server-only SDK (e.g. Lua) ships the
+pre-broadcast verifier and the canonical encoders but no client-side
+transaction builder, so it cannot run `build-transaction` vectors, nor
+`verify-transaction` vectors that expect the runner to BUILD the
+transaction first. For those a runner emits
+
+```json
+{ "id": "...", "outcome": "unsupported-mode", "error": "..." }
+```
+
+and the driver SKIPs (does not fail) that vector for that runner. This is
+distinct from `reject`, which is a genuine, asserted policy decision. The
+Lua runner therefore conforms to the 3 `canonical-bytes` vectors plus any
+`verify-transaction` vector that ships a concrete `input.transaction`,
+and skips the build-dependent rest.

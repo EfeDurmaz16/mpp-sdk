@@ -44,18 +44,30 @@ function loadVectors(): ConformanceVector[] {
 }
 
 // One CLI per SDK over stdin/stdout. The TS reference runner is invoked
-// via tsx; other languages will register their own command here.
+// via tsx; other languages register their own command here. The Lua runner
+// is the server-only pay_kit conformance entrypoint, driven by luajit so
+// the suite needs no separate build step.
+const luaRunnerDir = join(here, "..", "..", "lua");
 const RUNNERS: Record<string, string[]> = {
   typescript: ["pnpm", "exec", "node", "--import", "tsx", tsRunner],
+  lua: ["luajit", "cmd/conformance/main.lua"],
+};
+
+// Per-runner working directory. Defaults to the harness root; the Lua
+// runner must run from the lua/ tree so its `./?.lua` package path
+// resolves the pay_kit modules.
+const RUNNER_CWD: Record<string, string> = {
+  lua: luaRunnerDir,
 };
 
 function runVector(
   command: string[],
   vector: ConformanceVector,
+  cwd: string,
 ): Promise<RunnerResult> {
   const [bin, ...args] = command;
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { cwd: join(here, "..") });
+    const child = spawn(bin, args, { cwd });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
@@ -177,11 +189,22 @@ describe("cross-SDK conformance vectors", () => {
   });
 
   for (const [language, command] of Object.entries(RUNNERS)) {
+    const runnerCwd = RUNNER_CWD[language] ?? join(here, "..");
     describe(`${language} reference runner`, () => {
       for (const vector of vectors) {
-        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async () => {
-          const result = await runVector(command, vector);
+        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async (ctx) => {
+          const result = await runVector(command, vector, runnerCwd);
           expect(result.id).toBe(vector.id);
+
+          // A runner that has no equivalent for this vector's mode (e.g. a
+          // server-only SDK asked to build a transaction) reports
+          // "unsupported-mode". That is not a conformance failure: SKIP the
+          // vector for this runner rather than asserting against it.
+          if (result.outcome === "unsupported-mode") {
+            ctx.skip();
+            return;
+          }
+
           expect(
             result.outcome,
             `expected ${vector.expect.outcome} but runner said ${result.outcome}: ${result.error ?? ""}`,
