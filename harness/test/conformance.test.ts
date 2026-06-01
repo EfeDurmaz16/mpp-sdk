@@ -44,18 +44,31 @@ function loadVectors(): ConformanceVector[] {
 }
 
 // One CLI per SDK over stdin/stdout. The TS reference runner is invoked
-// via tsx; other languages will register their own command here.
+// via tsx; other languages register their own command here. The PHP runner
+// is a server-only SDK: it drives the real PayKit verifier + canonical-JSON
+// encoder for the modes it supports and emits "unsupported-mode" for the
+// rest (build-transaction, verify-transaction that needs a build first),
+// which this driver SKIPs rather than fails.
+const phpRunnerDir = join(here, "..", "..", "php");
 const RUNNERS: Record<string, string[]> = {
   typescript: ["pnpm", "exec", "node", "--import", "tsx", tsRunner],
+  php: ["php", "conformance/runner.php"],
+};
+
+// Per-runner working directory. Defaults to the harness root; the PHP runner
+// must run from the php package so its vendor autoloader resolves.
+const RUNNER_CWD: Record<string, string> = {
+  php: phpRunnerDir,
 };
 
 function runVector(
   command: string[],
   vector: ConformanceVector,
+  cwd: string,
 ): Promise<RunnerResult> {
   const [bin, ...args] = command;
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { cwd: join(here, "..") });
+    const child = spawn(bin, args, { cwd });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk.toString()));
@@ -177,11 +190,22 @@ describe("cross-SDK conformance vectors", () => {
   });
 
   for (const [language, command] of Object.entries(RUNNERS)) {
+    const runnerCwd = RUNNER_CWD[language] ?? join(here, "..");
     describe(`${language} reference runner`, () => {
       for (const vector of vectors) {
-        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async () => {
-          const result = await runVector(command, vector);
+        it(`${vector.id} (${vector.mode}) -> ${vector.expect.outcome}`, async ({
+          skip,
+        }) => {
+          const result = await runVector(command, vector, runnerCwd);
           expect(result.id).toBe(vector.id);
+          // A runner that does not support a vector's mode (e.g. a
+          // server-only SDK asked to build a transaction) reports
+          // "unsupported-mode"; skip rather than fail so the matrix only
+          // asserts the modes each SDK actually exercises.
+          if ((result.outcome as string) === "unsupported-mode") {
+            skip(`${language} does not support ${vector.mode}: ${result.error ?? ""}`);
+            return;
+          }
           expect(
             result.outcome,
             `expected ${vector.expect.outcome} but runner said ${result.outcome}: ${result.error ?? ""}`,
