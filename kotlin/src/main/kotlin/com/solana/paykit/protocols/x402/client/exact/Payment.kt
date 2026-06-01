@@ -54,11 +54,31 @@ private val json = Json {
 }
 
 /**
- * x402 protocol version stamped in the envelope. INVARIANT: 2 — the spine
- * (rust ``X402_VERSION_V2``, go ``x402Version = 2``, python) emits v2
- * envelopes. Do NOT revert to 1 (legacy ``X-PAYMENT`` shape).
+ * x402 protocol versions carried in the ``x402Version`` envelope field. The
+ * spine (``rust/crates/x402/src/constants.rs``) defines these as integers:
+ * version 2 is the default current wire (``PAYMENT-SIGNATURE`` /
+ * ``PAYMENT-REQUIRED``); version 1 is the legacy wire (``X-PAYMENT`` /
+ * ``X-PAYMENT-REQUIRED``) accepted for backward compatibility.
  */
-private const val X402_VERSION = 2
+private const val X402_VERSION_V2 = 2
+private const val X402_VERSION_V1 = 1
+
+/** Default envelope version: the spine emits v2 envelopes. */
+private const val X402_VERSION = X402_VERSION_V2
+
+/**
+ * Legacy network identifier used by x402 v1 envelopes (rust
+ * ``SOLANA_NETWORK`` in ``constants.rs``). The v1 wire collapses the CAIP-2
+ * network space into just this string and ``solana-devnet`` (see
+ * [v1NetworkForRequirement]).
+ */
+private const val SOLANA_NETWORK = "solana"
+
+/** Legacy v1 network string for devnet (rust ``"solana-devnet"``). */
+private const val SOLANA_DEVNET_LEGACY = "solana-devnet"
+
+/** The exact scheme name stamped on a v1 envelope (rust ``EXACT_SCHEME``). */
+private const val EXACT_SCHEME = "exact"
 
 /**
  * ComputeBudget SetComputeUnitLimit. INVARIANT: 20_000 (matches rust spine +
@@ -134,12 +154,47 @@ fun parseX402Challenge(
         val offer = selectFromHeader(headerValue, selection)
         if (offer != null) return offer
     }
+    // Legacy v1 challenge: the ``X-PAYMENT-REQUIRED`` header carries a RAW
+    // (not base64) JSON object that is a single flat PaymentRequirements, NOT
+    // an ``{"accepts":[...]}`` envelope. Mirrors the rust spine fallback
+    // (payment.rs:236-243): try after the v2 ``PAYMENT-REQUIRED`` path and
+    // before the body path. A single requirement is returned directly with no
+    // selection step.
+    val legacyHeader = lookupHeader(headers, "x-payment-required")
+    if (legacyHeader != null) {
+        val offer = parseFlatRequirement(legacyHeader)
+        if (offer != null) return offer
+    }
     if (body != null) {
         val offer = selectFromBody(body, selection)
         if (offer != null) return offer
     }
     return null
 }
+
+/**
+ * Parses a raw-JSON flat [X402AcceptsEntry] from the legacy v1
+ * ``X-PAYMENT-REQUIRED`` header. The value is parsed directly (no base64
+ * decode, no ``accepts[]`` wrapper) and the verbatim wire object is retained
+ * as [X402AcceptsEntry.raw]. Returns ``null`` when the value is not a Solana
+ * ``exact`` requirement or fails to parse.
+ */
+private fun parseFlatRequirement(headerValue: String): X402AcceptsEntry? =
+    try {
+        val element = json.parseToJsonElement(headerValue)
+        // The v1 flat shape carries a legacy network string ("solana" /
+        // "solana-devnet"), not a CAIP-2 id. Normalize it to CAIP-2 so the
+        // Solana allow-set check and the downstream payment builder treat it
+        // identically to a v2 offer (rust normalize_network_identifier,
+        // types.rs:387-395). The wire object is otherwise retained verbatim in
+        // `raw` for the echoed envelope.
+        val rawEntry = json.decodeFromJsonElement(X402AcceptsEntry.serializer(), element)
+        val entry = rawEntry
+            .copy(network = normalizeNetworkIdentifier(rawEntry.network), raw = element)
+        if (isSolanaExact(entry)) entry else null
+    } catch (_: Exception) {
+        null
+    }
 
 private fun lookupHeader(headers: Map<String, String>, name: String): String? {
     val target = name.lowercase()
@@ -176,6 +231,32 @@ private fun selectFromJsonText(text: String, selection: ChallengeSelection): X40
     } catch (_: Exception) {
         null
     }
+
+/**
+ * Normalizes a v1 flat-shape network identifier to its canonical CAIP-2 form.
+ *
+ * Mirrors the rust spine ``normalize_network_identifier`` (types.rs:387-395),
+ * which the ``PaymentRequirements`` deserializer applies to the ``network``
+ * field. This is DELIBERATELY distinct from [Network.toCaip2]
+ * (``caip2_network_for_cluster``): an unrecognized value passes through
+ * UNCHANGED here rather than collapsing to mainnet, so a non-Solana v1 flat
+ * requirement (e.g. ``ethereum:1``) stays non-Solana and is rejected by the
+ * downstream [isSolanaExact] check.
+ */
+private fun normalizeNetworkIdentifier(network: String?): String? {
+    // Absent network defaults to "solana" then normalizes to mainnet, matching
+    // the rust deserializer default (types.rs:319: default SOLANA_NETWORK).
+    if (network == null) return Network.SOLANA_MAINNET
+    val trimmed = network.trim()
+    return when (trimmed.lowercase()) {
+        "solana", "mainnet", "mainnet-beta" -> Network.SOLANA_MAINNET
+        SOLANA_DEVNET_LEGACY, "devnet", "localnet" -> Network.SOLANA_DEVNET
+        "solana-testnet", "testnet" -> Network.SOLANA_TESTNET
+        // "solana:"-prefixed CAIP-2 ids and any other value pass through
+        // unchanged (rust: starts-with "solana:" -> passthrough; else -> as-is).
+        else -> trimmed
+    }
+}
 
 private fun isSolanaExact(offer: X402AcceptsEntry): Boolean {
     val protocol = offer.protocol
@@ -392,6 +473,62 @@ fun buildPaymentHeader(
     val envelopeJson = buildJsonObject {
         put("x402Version", JsonPrimitive(envelope.x402Version))
         put("accepted", acceptedJson)
+        put("payload", json.encodeToJsonElement(X402PayloadField.serializer(), envelope.payload))
+    }
+    val payload = json.encodeToString(JsonObject.serializer(), envelopeJson)
+    return Base64.getEncoder().encodeToString(payload.encodeToByteArray())
+}
+
+/**
+ * Maps an offer to its legacy v1 network string. Mirrors the rust spine
+ * ``v1_network_for_requirements`` (payment.rs:383-394): selects on the
+ * offer's cluster label first, falling back to its network; devnet maps to
+ * ``"solana-devnet"`` and everything else (mainnet, testnet, localnet, any
+ * unrecognized value) collapses to ``"solana"``.
+ *
+ * The Kotlin offer carries a CAIP-2 ``network`` (the parser normalizes the
+ * wire field). Derive the cluster label from it via [Network.label]; devnet's
+ * label is ``"devnet"`` which selects the devnet legacy string, while testnet
+ * and mainnet both fall into the ``"solana"`` bucket, matching the rust
+ * collapse. A raw ``"solana-devnet"`` / ``"devnet"`` network string (an offer
+ * built in code without normalization) is also recognized as devnet.
+ */
+private fun v1NetworkForRequirement(requirement: X402AcceptsEntry): String {
+    val selector = requirement.network
+    return when (selector) {
+        "devnet", SOLANA_DEVNET_LEGACY, Network.SOLANA_DEVNET -> SOLANA_DEVNET_LEGACY
+        else -> if (selector != null && Network.label(selector) == "devnet") {
+            SOLANA_DEVNET_LEGACY
+        } else {
+            SOLANA_NETWORK
+        }
+    }
+}
+
+/**
+ * Builds the standard-base64 legacy v1 ``X-Payment`` header value.
+ *
+ * Wraps [buildPayment] and re-wraps the proof in the v1 envelope shape:
+ * ``x402Version = 1``, a top-level ``scheme = "exact"`` and legacy ``network``
+ * string, NO ``accepted`` and NO ``resource`` object, plus the flattened
+ * proof. The proof itself is byte-for-byte identical to the v2 producer; only
+ * the envelope differs. Mirrors the rust spine ``build_payment_header_v1``
+ * (payment.rs:144-160). The encoded value is written to the ``X-Payment``
+ * header.
+ */
+fun buildPaymentHeaderV1(
+    signer: SolanaSigner,
+    requirement: X402AcceptsEntry,
+    rpcBlockhashProvider: () -> ByteArray,
+    nonceProvider: () -> String = ::defaultMemoNonce,
+): String {
+    val envelope = buildPayment(signer, requirement, rpcBlockhashProvider, nonceProvider)
+    // v1 envelope: top-level scheme + legacy network, no accepted, no
+    // resource, with the proof flattened alongside the version field.
+    val envelopeJson = buildJsonObject {
+        put("x402Version", JsonPrimitive(X402_VERSION_V1))
+        put("scheme", JsonPrimitive(EXACT_SCHEME))
+        put("network", JsonPrimitive(v1NetworkForRequirement(requirement)))
         put("payload", json.encodeToJsonElement(X402PayloadField.serializer(), envelope.payload))
     }
     val payload = json.encodeToString(JsonObject.serializer(), envelopeJson)
