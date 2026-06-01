@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 
 	solana "github.com/gagliardetto/solana-go"
@@ -139,6 +140,54 @@ type RunnerResult struct {
 	TransactionShape *TransactionShape `json:"transactionShape,omitempty"`
 	ExactBytes       *ExactBytes       `json:"exactBytes,omitempty"`
 	Error            string            `json:"error,omitempty"`
+	RejectCode       string            `json:"rejectCode,omitempty"`
+}
+
+// rejectPattern pairs a compiled regex with the normalized RejectCode it
+// classifies a Go SDK reject message into.
+type rejectPattern struct {
+	re   *regexp.Regexp
+	code string
+}
+
+// rejectPatterns mirrors harness/src/conformance/reject.ts: it maps the Go
+// pay_kit SDK's native reject error strings onto the shared cross-SDK
+// RejectCode vocabulary. The Go messages are tuned here against the real
+// strings the SDK emits (e.g. "no matching token transfer for ..."), so the
+// alternation includes "token". As in the reference, a transferChecked
+// decimals mismatch is enforced through the transfer match key and so
+// honestly surfaces as the generic no-matching-transfer category, not a
+// decimals-specific code.
+var rejectPatterns = []rejectPattern{
+	{regexp.MustCompile(`(?i)compute unit price .* exceeds (maximum|cap)`), "compute-price-over-cap"},
+	{regexp.MustCompile(`(?i)compute unit limit .* exceeds (maximum|cap)`), "compute-limit-over-cap"},
+	{regexp.MustCompile(`(?i)fee payer cannot authorize`), "fee-payer-not-authority"},
+	{regexp.MustCompile(`(?i)fee payer .* (funding source|funds source)`), "fee-payer-is-funds-source"},
+	{regexp.MustCompile(`(?i)splits consume the entire amount`), "splits-exceed-amount"},
+	{regexp.MustCompile(`(?i)too many splits`), "too-many-splits"},
+	{regexp.MustCompile(`(?i)no matching (spl )?(token )?(transfer|transferchecked|sol transfer)`), "no-matching-transfer"},
+	{regexp.MustCompile(`(?i)unexpected .* (instruction|transfer)`), "unexpected-instruction"},
+	{regexp.MustCompile(`(?i)amount .* (mismatch|does not match)`), "amount-mismatch"},
+}
+
+var invalidPayloadPattern = regexp.MustCompile(`(?i)invalid|malformed|decode|payload`)
+
+// classifyReject normalizes a Go SDK reject message onto the shared
+// RejectCode vocabulary. It returns "" when no pattern matches so the harness
+// can surface an unclassified rejection instead of silently passing it.
+func classifyReject(message string) string {
+	if message == "" {
+		return ""
+	}
+	for _, p := range rejectPatterns {
+		if p.re.MatchString(message) {
+			return p.code
+		}
+	}
+	if invalidPayloadPattern.MatchString(message) {
+		return "invalid-payload"
+	}
+	return ""
 }
 
 // localSigner adapts a 64-byte ed25519 secret key to solanatx.Signer, the
@@ -233,7 +282,8 @@ func runVector(vector Vector) RunnerResult {
 }
 
 func rejected(id string, err error) RunnerResult {
-	return RunnerResult{ID: id, Outcome: "reject", Error: err.Error()}
+	msg := err.Error()
+	return RunnerResult{ID: id, Outcome: "reject", Error: msg, RejectCode: classifyReject(msg)}
 }
 
 // flattenRequest applies the same precedence rules as the TS reference
