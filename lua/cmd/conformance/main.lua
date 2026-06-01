@@ -18,6 +18,11 @@
 -- equivalent. For those the runner emits a clear "unsupported-mode"
 -- reject so the driver SKIPs (not fails) the vector for Lua.
 --
+-- It also handles the x402 `exact` intent (v1 + v2): build vectors emit
+-- unsupported-mode (server-only SDK, no client builder), and verify
+-- vectors drive the real pay_kit.protocols.x402 credential decoder to
+-- emit accept/reject (+ rejectCode) plus the decoded X402EnvelopeShape.
+--
 -- The run is deterministic and RPC-free: the verifier decodes the wire
 -- bytes locally and never contacts a validator. A vector that would
 -- require a live RPC call is, by construction, a build vector this runner
@@ -438,7 +443,199 @@ local function run_build_transaction(vector)
   }
 end
 
+-- ── x402 `exact` intent (v1 + v2) ──
+--
+-- The x402 charge is HTTP-shaped, not transaction-shaped: a CLIENT build
+-- produces a base64(JSON) payment header and a SERVER verify consumes one.
+-- The cross-SDK oracle is therefore the DECODED ENVELOPE shape, not the
+-- signed Solana transaction inside `payload.transaction` (that is the
+-- interop matrix's job). This mirrors the TS reference
+-- (harness/src/conformance/x402.ts) and the Rust spine line-for-line.
+--
+-- The Lua SDK is SERVER-only, so:
+--   * build-transaction (x402) -> unsupported-mode (driver SKIPs).
+--   * verify-transaction (x402) -> run the server-side credential decode
+--     (version dispatch + per-version network gate) + the v2 accepted-vs-
+--     route field comparison, emit accept/reject (+ rejectCode), and
+--     surface the decoded X402EnvelopeShape on accept.
+--
+-- The version dispatch, network gate, and CAIP-2 normalization below
+-- mirror pay_kit.protocols.x402 (init.lua decode_payment_signature /
+-- caip2_network_for_cluster) line-for-line, which in turn mirrors the
+-- Rust spine (parse_payment_signature + verify_envelope_payload). They
+-- are inlined here rather than required so the runner stays self-contained
+-- under a bare luajit invocation (the x402 adapter module pulls in
+-- cjson/rpc/cosocket dependencies the conformance harness does not load),
+-- exactly as the charge path uses pay_kit.util.json over cjson.
+
+local CAIP2_MAINNET = 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp'
+local CAIP2_DEVNET  = 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1'
+local EXACT_SCHEME  = 'exact'
+local LEGACY_NETWORK_SOLANA = 'solana'
+local LEGACY_NETWORK_DEVNET = 'solana-devnet'
+
+-- Normalize any network identifier (CAIP-2 or legacy slug) to its CAIP-2
+-- form. Mirrors rust caip2_network_for_cluster (types.rs) and the SDK's
+-- pay_kit.protocols.x402 caip2_network_for_cluster.
+local function caip2_network_for_cluster(network)
+  if type(network) ~= 'string' then return '' end
+  if network == LEGACY_NETWORK_SOLANA or network == 'mainnet'
+    or network == 'mainnet-beta' or network == CAIP2_MAINNET then
+    return CAIP2_MAINNET
+  end
+  if network == LEGACY_NETWORK_DEVNET or network == 'devnet'
+    or network == 'localnet' or network == CAIP2_DEVNET then
+    return CAIP2_DEVNET
+  end
+  return network
+end
+
+-- Decode the base64(JSON) payment header into the conformance envelope
+-- shape oracle. Mirrors decodeEnvelopeShape in the TS reference: presence
+-- of top-level scheme/network and accepted is part of the contract (v1
+-- carries scheme+network and no accepted; v2 carries accepted and no
+-- top-level scheme/network). Only keys actually present on the wire are
+-- set, so the JSON encoder omits the rest and the driver reads them as
+-- absent.
+local function decode_envelope_shape(header)
+  local decoded = base64_std.decode(header)
+  if not decoded then
+    error('invalid payload: payment-signature base64 decode failed')
+  end
+  local env = json.decode(decoded)
+  if type(env) ~= 'table' then
+    error('invalid payload: payment-signature not a JSON object')
+  end
+
+  local accepted = env.accepted
+  local has_accepted = type(accepted) == 'table'
+  local payload = env.payload
+  local has_tx = type(payload) == 'table'
+    and type(payload.transaction) == 'string'
+    and payload.transaction ~= ''
+
+  local shape = {
+    x402Version = env.x402Version,
+    hasAccepted = has_accepted,
+    payloadHasTransaction = has_tx,
+  }
+  if type(env.scheme) == 'string' then
+    shape.scheme = env.scheme
+  end
+  if type(env.network) == 'string' then
+    shape.network = env.network
+  end
+  if has_accepted then
+    if type(accepted.scheme) == 'string' then shape.acceptedScheme = accepted.scheme end
+    if type(accepted.network) == 'string' then shape.acceptedNetwork = accepted.network end
+    if type(accepted.asset) == 'string' then shape.acceptedAsset = accepted.asset end
+    if type(accepted.payTo) == 'string' then shape.acceptedPayTo = accepted.payTo end
+    if accepted.amount ~= nil then shape.acceptedAmount = tostring(accepted.amount) end
+  end
+  return shape
+end
+
+-- verify-transaction (x402): decode the credential, run the version
+-- dispatch + per-version network gate (mirroring the SDK's
+-- decode_payment_signature / the rust parse_payment_signature), then for
+-- v2 also run the accepted-vs-route field comparison (amount / payTo /
+-- asset) the rust verify_envelope_payload + TS reference verifyPaymentHeader
+-- apply. RPC-free: the signed-transaction settlement is out of scope for
+-- the envelope oracle, so a structurally valid, route-matching envelope is
+-- accepted. Raises on reject so the shared classifier maps the message
+-- onto a RejectCode.
+local function run_x402_verify(vector)
+  local input = vector.input or {}
+  local header = input.x402PaymentHeader
+  if type(header) ~= 'string' or header == '' then
+    error('invalid payload: x402 verify vector missing input.x402PaymentHeader')
+  end
+  if input.x402ServerNetwork == nil
+    or input.x402ServerRecipient == nil
+    or input.x402ServerCurrency == nil
+    or input.x402ServerAmount == nil then
+    error('invalid payload: x402 verify vector missing server route')
+  end
+
+  local expected_caip2 = caip2_network_for_cluster(input.x402ServerNetwork)
+
+  local decoded = base64_std.decode(header)
+  if not decoded then
+    error('invalid payload: payment-signature base64 decode failed')
+  end
+  local env = json.decode(decoded)
+  if type(env) ~= 'table' then
+    error('invalid payload: payment-signature not a JSON object')
+  end
+
+  local version = env.x402Version
+  if version == 1 then
+    -- v1 commits only to scheme + network at parse time; no accepted object.
+    local scheme = env.scheme or ''
+    if scheme ~= EXACT_SCHEME then
+      error('invalid payload: unsupported payment scheme ' .. tostring(scheme))
+    end
+    if caip2_network_for_cluster(env.network or '') ~= expected_caip2 then
+      error('wrong network: credential network does not match server')
+    end
+  elseif version == 2 then
+    local accepted = env.accepted
+    if type(accepted) ~= 'table' then
+      error('invalid payload: v2 envelope missing accepted')
+    end
+    if caip2_network_for_cluster(accepted.network or '') ~= expected_caip2 then
+      error('wrong network: credential network does not match server')
+    end
+    -- accepted-vs-route field comparison (rust verify_envelope_payload).
+    if tostring(accepted.amount or '') ~= tostring(input.x402ServerAmount) then
+      error('Amount mismatch: expected ' .. tostring(input.x402ServerAmount)
+        .. ', got ' .. tostring(accepted.amount))
+    end
+    if tostring(accepted.payTo or '') ~= tostring(input.x402ServerRecipient) then
+      error('Recipient mismatch: credential claims a different recipient')
+    end
+    if tostring(accepted.asset or '') ~= tostring(input.x402ServerCurrency) then
+      error('Currency mismatch: expected ' .. tostring(input.x402ServerCurrency)
+        .. ', got ' .. tostring(accepted.asset))
+    end
+  else
+    error('invalid payload: unsupported x402Version ' .. tostring(version))
+  end
+
+  -- Payload must carry a transaction proof (envelope oracle only checks
+  -- presence; the signed-transaction settlement is the interop matrix's job).
+  local payload = env.payload
+  if type(payload) ~= 'table'
+    or type(payload.transaction) ~= 'string'
+    or payload.transaction == '' then
+    error('invalid payload: missing transaction proof')
+  end
+
+  return {
+    id = vector.id,
+    outcome = 'accept',
+    x402EnvelopeShape = decode_envelope_shape(header),
+  }
+end
+
+-- x402-exact dispatch. build vectors have no server-only equivalent
+-- (the Lua SDK ships no client builder), so they emit unsupported-mode
+-- and the driver SKIPs them. verify vectors exercise the real verifier.
+local function run_x402_vector(vector)
+  if vector.mode == 'build-transaction' then
+    return {
+      id = vector.id,
+      outcome = UNSUPPORTED_MODE,
+      error = 'lua SDK is server-only: no client-side x402 builder',
+    }
+  end
+  return run_x402_verify(vector)
+end
+
 local function run_vector(vector)
+  if vector.intent == 'x402-exact' then
+    return run_x402_vector(vector)
+  end
   if vector.mode == 'canonical-bytes' then
     return run_canonical_bytes(vector)
   elseif vector.mode == 'build-transaction' then
@@ -475,6 +672,20 @@ local function classify_reject(message)
     return nil
   end
   local m = message:lower()
+
+  -- x402-exact: an envelope carrying an x402Version the server does not
+  -- understand (the SDK raises "invalid proof: unsupported x402Version").
+  -- Checked before the generic `invalid` fallback so the unknown-version
+  -- reject lands on its own category, not invalid-payload.
+  if has(m, 'unsupported x402version') or has(m, 'unsupported x402 version') then
+    return 'unsupported-version'
+  end
+  -- x402-exact: the credential's network does not match the server route
+  -- (the SDK raises "wrong network: ...", and the TS reference raises
+  -- "Network mismatch: ...").
+  if has(m, 'wrong network') or has(m, 'network mismatch') then
+    return 'wrong-network'
+  end
 
   if has(m, 'compute unit price') and has(m, 'exceed')
     and (has(m, 'cap') or has(m, 'maximum')) then
