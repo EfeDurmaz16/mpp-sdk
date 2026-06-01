@@ -163,9 +163,34 @@ def _build_envelope(adapter, gate, op_kp, *, amount_override=None, memo_override
     return base64.b64encode(json.dumps(envelope).encode()).decode()
 
 
+def _build_v1_envelope(adapter, gate, op_kp, *, scheme="exact", network="solana-devnet"):
+    """Build a legacy v1 X-PAYMENT envelope sharing the v2 proof transaction.
+
+    The proof is byte-for-byte identical to the v2 path; only the envelope
+    differs: top-level ``scheme`` + ``network``, ``x402Version == 1``, no
+    ``accepted``/``resource``.
+    """
+    v2 = json.loads(base64.b64decode(_build_envelope(adapter, gate, op_kp)))
+    envelope = {
+        "scheme": scheme,
+        "network": network,
+        "x402Version": 1,
+        "payload": v2["payload"],
+    }
+    return base64.b64encode(json.dumps(envelope).encode()).decode()
+
+
 class _Req:
     def __init__(self, header, path="/report"):
         self.headers = {"payment-signature": header}
+        self.path = path
+
+
+class _ReqXPayment:
+    """Request carrying the legacy v1 credential on the ``X-PAYMENT`` header."""
+
+    def __init__(self, header, path="/report"):
+        self.headers = {"X-PAYMENT": header}
         self.path = path
 
 
@@ -365,6 +390,61 @@ async def test_non_json_signature_payload(monkeypatch):
 async def test_wrong_version_rejected(monkeypatch):
     adapter, gate, _op = _adapter(monkeypatch=monkeypatch)
     header = base64.b64encode(json.dumps({"x402Version": 99}).encode()).decode()
+    with pytest.raises(InvalidProofError) as exc:
+        await adapter.verify_and_settle(gate, _Req(header))
+    assert exc.value.code == "unsupported_x402_version"
+
+
+# -- legacy v1 wire (X-PAYMENT) ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_v1_credential_on_x_payment_header_settles(monkeypatch):
+    # localnet's CAIP-2 is the devnet id; the legacy "solana-devnet" network
+    # string normalizes back to it, so the v1 envelope settles.
+    adapter, gate, op_kp = _adapter(signature="SIG-v1", monkeypatch=monkeypatch)
+    header = _build_v1_envelope(adapter, gate, op_kp)
+    payment = await adapter.verify_and_settle(gate, _ReqXPayment(header))
+    assert payment.protocol is Protocol.X402
+    assert payment.transaction == "SIG-v1"
+
+
+@pytest.mark.asyncio
+async def test_v1_credential_also_accepted_on_payment_signature_header(monkeypatch):
+    # The legacy v1 envelope is accepted regardless of which header carries it.
+    adapter, gate, op_kp = _adapter(signature="SIG-v1b", monkeypatch=monkeypatch)
+    header = _build_v1_envelope(adapter, gate, op_kp)
+    payment = await adapter.verify_and_settle(gate, _Req(header))
+    assert payment.transaction == "SIG-v1b"
+
+
+@pytest.mark.asyncio
+async def test_v1_wrong_scheme_rejected(monkeypatch):
+    adapter, gate, op_kp = _adapter(monkeypatch=monkeypatch)
+    header = _build_v1_envelope(adapter, gate, op_kp, scheme="upto")
+    with pytest.raises(InvalidProofError) as exc:
+        await adapter.verify_and_settle(gate, _ReqXPayment(header))
+    assert exc.value.code == "invalid_exact_svm_payload_type"
+
+
+@pytest.mark.asyncio
+async def test_v1_network_mismatch_rejected(monkeypatch):
+    # Server is on the devnet CAIP-2 (localnet); a "solana" (mainnet) v1
+    # network string normalizes to mainnet and is rejected.
+    adapter, gate, op_kp = _adapter(monkeypatch=monkeypatch)
+    header = _build_v1_envelope(adapter, gate, op_kp, network="solana")
+    with pytest.raises(InvalidProofError) as exc:
+        await adapter.verify_and_settle(gate, _ReqXPayment(header))
+    assert exc.value.code == "charge_request_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_genuinely_unknown_version_still_rejected(monkeypatch):
+    # v1 support must not loosen the unknown-version reject.
+    adapter, gate, op_kp = _adapter(monkeypatch=monkeypatch)
+    v2 = json.loads(base64.b64decode(_build_envelope(adapter, gate, op_kp)))
+    v2["x402Version"] = 3
+    header = base64.b64encode(json.dumps(v2).encode()).decode()
     with pytest.raises(InvalidProofError) as exc:
         await adapter.verify_and_settle(gate, _Req(header))
     assert exc.value.code == "unsupported_x402_version"

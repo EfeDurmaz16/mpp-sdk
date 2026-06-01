@@ -43,6 +43,7 @@ local MEMO_PROGRAM              = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'
 -- was wrong and would have rejected wallet-injected Lighthouse guards.
 local LIGHTHOUSE_PROGRAM        = 'L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95'
 local TOKEN_PROGRAM             = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+local ASSOCIATED_TOKEN_PROGRAM  = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'
 local TOKEN_2022_PROGRAM        = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'
 -- Mirrors the Rust spine constant
 -- (rust/crates/x402/src/protocol/schemes/exact/verify.rs:17). The prior

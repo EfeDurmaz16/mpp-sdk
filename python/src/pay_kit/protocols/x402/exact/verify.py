@@ -19,6 +19,15 @@ from pay_kit.errors import InvalidProofError
 __all__ = [
     "ExactVerifier",
     "X402_VERSION",
+    "X402_VERSION_FIELD",
+    "X402_VERSION_V1",
+    "X402_VERSION_V2",
+    "X402_V1_PAYMENT_HEADER",
+    "X402_V1_PAYMENT_REQUIRED_HEADER",
+    "X402_V1_PAYMENT_RESPONSE_HEADER",
+    "X402_V2_PAYMENT_HEADER",
+    "X402_V2_PAYMENT_REQUIRED_HEADER",
+    "X402_V2_PAYMENT_RESPONSE_HEADER",
     "COMPUTE_BUDGET_PROGRAM",
     "MEMO_PROGRAM",
     "LIGHTHOUSE_PROGRAM",
@@ -26,8 +35,24 @@ __all__ = [
     "MAX_COMPUTE_UNIT_PRICE",
 ]
 
-#: x402 protocol version emitted in challenges and required on credentials.
-X402_VERSION = 2
+#: Canonical JSON field carrying the integer protocol version in every envelope.
+#: Matches the rust spine constant ``X402_VERSION_FIELD`` (constants.rs:7).
+X402_VERSION_FIELD = "x402Version"
+#: Legacy x402 protocol version (constants.rs:10). Integer on the wire.
+X402_VERSION_V1 = 1
+#: Canonical x402 protocol version (constants.rs:13). Integer on the wire.
+X402_VERSION_V2 = 2
+#: x402 protocol version emitted in challenges and the default produced; v2.
+X402_VERSION = X402_VERSION_V2
+
+#: Legacy v1 HTTP header names (exact casing, constants.rs:16-22).
+X402_V1_PAYMENT_HEADER = "X-PAYMENT"
+X402_V1_PAYMENT_REQUIRED_HEADER = "X-PAYMENT-REQUIRED"
+X402_V1_PAYMENT_RESPONSE_HEADER = "X-PAYMENT-RESPONSE"
+#: v2 HTTP header names (constants.rs:25-31). The unqualified default everywhere.
+X402_V2_PAYMENT_HEADER = "PAYMENT-SIGNATURE"
+X402_V2_PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED"
+X402_V2_PAYMENT_RESPONSE_HEADER = "PAYMENT-RESPONSE"
 
 #: ComputeBudget program id (instruction[0]/[1] guard).
 COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111"
