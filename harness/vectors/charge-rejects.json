@@ -3,8 +3,9 @@
     "id": "charge-compute-price-over-cap-reject",
     "intent": "charge",
     "mode": "verify-transaction",
-    "description": "Divergence class: compute-unit-price cap. A transaction whose compute unit price exceeds 5_000_000 micro-lamports must be rejected by the verifier.",
+    "description": "Divergence class: compute-unit-price cap. A transaction whose compute unit price exceeds 5_000_000 micro-lamports must be rejected by the verifier. The pinned transaction is the byte-identical build-then-verify wire so server-only SDKs (which cannot build) verify it directly.",
     "input": {
+      "transaction": "Ac224MpTUS6GtQ3adEcnNs6WkgoUd3kCzb2WN3RRaayy0EsdiNp4PujsPrDx51UiUYN/hM/JNiP4Ggc2ycbe4AKAAQADBupKbGPinFIKvvVQexMuxfmVR3auvr57kkIe6mkURtIsa4T+VAWZkKbqIwjcZYhVrZWKZR4UVyYj9/rTk9uwE+wJwa1WOvT05wo9H+keYP/wmkenNjT3crGO32T+uRfu6DtELLORIVfxOpM9ATQoLQMrX/7NAaLb8bd5BgjfAC6nAwZGb+UhFzL/7K26csOb57yM5bvF9xJrLEObOkAAAAAG3fbh12Whk9nL4UbO63msHLSF7V9bN5E6jPWFfv8AqQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwQACQNBS0wAAAAAAAQABQJADQMABQQBAwIACgzoAwAAAAAAAAYA",
       "signerSecretKey": [7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,234,74,108,99,226,156,82,10,190,245,80,123,19,46,197,249,149,71,118,174,190,190,123,146,66,30,234,105,20,70,210,44],
       "request": {
         "amount": "1000",
@@ -29,8 +30,9 @@
     "id": "charge-feepayer-as-authority-reject",
     "intent": "charge",
     "mode": "verify-transaction",
-    "description": "Divergence class: fee-payer-as-authority. When the fee payer signs as the transfer authority, the verifier must reject so a server fee payer cannot also be drained as the funding source.",
+    "description": "Divergence class: fee-payer-as-authority. When the fee payer signs as the transfer authority, the verifier must reject so a server fee payer cannot also be drained as the funding source. The pinned transaction is the byte-identical build-then-verify wire so server-only SDKs (which cannot build) verify it directly.",
     "input": {
+      "transaction": "ATc9q87uHkYA6k/yH8bvcOD7z/gN21vL/8M2Rlfzb1f8KGMyMXv5TVSAG50yl4YrFn9lqdWt7bG5dqvfWwY0RwiAAQADBupKbGPinFIKvvVQexMuxfmVR3auvr57kkIe6mkURtIsa4T+VAWZkKbqIwjcZYhVrZWKZR4UVyYj9/rTk9uwE+wJwa1WOvT05wo9H+keYP/wmkenNjT3crGO32T+uRfu6DtELLORIVfxOpM9ATQoLQMrX/7NAaLb8bd5BgjfAC6nAwZGb+UhFzL/7K26csOb57yM5bvF9xJrLEObOkAAAAAG3fbh12Whk9nL4UbO63msHLSF7V9bN5E6jPWFfv8AqQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwQACQMBAAAAAAAAAAQABQJADQMABQQBAwIACgzoAwAAAAAAAAYA",
       "signerSecretKey": [7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,234,74,108,99,226,156,82,10,190,245,80,123,19,46,197,249,149,71,118,174,190,190,123,146,66,30,234,105,20,70,210,44],
       "request": {
         "amount": "1000",

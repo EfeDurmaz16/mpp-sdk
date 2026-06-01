@@ -277,8 +277,8 @@ function classify_reject(string $message): ?string
     }
 
     $patterns = [
-        '/compute unit price .* exceeds (maximum|cap)/i' => 'compute-price-over-cap',
-        '/compute unit limit .* exceeds (maximum|cap)/i' => 'compute-limit-over-cap',
+        '/compute unit price .*exceeds (maximum|cap)/i' => 'compute-price-over-cap',
+        '/compute unit limit .*exceeds (maximum|cap)/i' => 'compute-limit-over-cap',
         '/fee payer cannot authorize/i' => 'fee-payer-not-authority',
         '/fee payer .* (funding source|funds source)/i' => 'fee-payer-is-funds-source',
         '/splits consume the entire amount/i' => 'splits-exceed-amount',
