@@ -322,11 +322,14 @@ module X402
         #
         # Mirrors MPP `server/charge.rs:535-556` and the spine ordering
         # at `rust/crates/x402/src/bin/interop_server.rs:316-324`.
-        def settle_exact_payment(config, payment_header, resource: nil)
-          decoded = Types.decode_payment_signature(payment_header)
-          requirements = exact_requirements(config, resource: resource)
-          raise "unsupported x402Version: #{decoded["x402Version"]}" unless decoded["x402Version"] == Constants::X402_VERSION_V2
-
+        # v2 credential->route-option resolution. The credential carries
+        # an `accepted` object self-describing the route option it paid
+        # for; the server compares that structurally against the offered
+        # requirements (deepEqual on the identity tuple) and never trusts
+        # it as a source of truth. Mirrors the spine v2 arms at
+        # `rust/crates/x402/src/server/exact.rs:328-341` (parse) and
+        # `:412-437` (find_matching_requirement).
+        def resolve_requirement_v2(decoded, requirements, resource:)
           accepted = decoded["accepted"]
           if resource.is_a?(String) && !resource.empty? && accepted.is_a?(Hash)
             accepted_memo = accepted.dig("extra", "memo")
@@ -342,6 +345,55 @@ module X402
             # Mirrors Go reference (go/cmd/interop-server/main.go:856).
             raise "No matching payment requirements: accepted payment requirement does not match server challenge"
           end
+
+          requirement
+        end
+
+        # v1 (legacy) credential->route-option resolution. A v1 envelope
+        # commits only to top-level `scheme` + `network`, never a
+        # per-option `accepted`. The parse arm validates `scheme=="exact"`
+        # and that the credential's legacy network string normalizes
+        # (via caip2_network_for_cluster) to the server's configured
+        # CAIP-2 network. Because every offered option is on the same
+        # network/scheme, "the credential accepts any of these" -> pick
+        # the first offered requirement. The route's expected requirements
+        # always come from the server offer, never from the credential.
+        # Mirrors the spine v1 arms at
+        # `rust/crates/x402/src/server/exact.rs:316-327` (parse) and
+        # `:438-446` (find_matching_requirement).
+        def resolve_requirement_v1(config, decoded, requirements)
+          scheme = decoded["scheme"].to_s
+          unless scheme == Constants::EXACT_SCHEME
+            raise "invalid_exact_svm_payload_type"
+          end
+
+          expected_network = ::PayCore::Solana::Caip2.network_for_cluster(config.network)
+          credential_network = ::PayCore::Solana::Caip2.network_for_cluster(decoded["network"].to_s)
+          unless credential_network == expected_network
+            raise "network mismatch: credential #{credential_network} does not match server #{expected_network}"
+          end
+
+          requirement = requirements.first
+          unless requirement
+            raise "No matching payment requirements: no offered payment option available"
+          end
+
+          requirement
+        end
+
+        def settle_exact_payment(config, payment_header, resource: nil)
+          decoded = Types.decode_payment_signature(payment_header)
+          requirements = exact_requirements(config, resource: resource)
+          version = decoded["x402Version"]
+          requirement =
+            case version
+            when Constants::X402_VERSION_V2
+              resolve_requirement_v2(decoded, requirements, resource: resource)
+            when Constants::X402_VERSION_V1
+              resolve_requirement_v1(config, decoded, requirements)
+            else
+              raise "Unsupported x402 version: #{version}"
+            end
 
           payload = decoded["payload"]
           unless payload.is_a?(Hash) && payload["transaction"].is_a?(String)
@@ -514,7 +566,17 @@ module X402
               {error: "payment_required"}
             ]
           when config.resource_path
+            # Read the v2 credential from PAYMENT-SIGNATURE; fall back to
+            # the legacy v1 X-PAYMENT header (case-insensitive). Whichever
+            # is present is decoded and version-dispatched in
+            # settle_exact_payment. The server still emits only v2
+            # challenges (PAYMENT-REQUIRED); v1 inbound is accepted for
+            # backward compatibility. Mirrors the spine read-both-headers
+            # requirement at `rust/crates/x402/src/server/exact.rs`.
             payment_signature = header_value(headers, Constants::PAYMENT_SIGNATURE_HEADER)
+            if payment_signature.nil? || payment_signature.empty?
+              payment_signature = header_value(headers, Constants::X402_V1_PAYMENT_HEADER)
+            end
             return payment_required_response(config, resource: path) if payment_signature.nil? || payment_signature.empty?
 
             begin
