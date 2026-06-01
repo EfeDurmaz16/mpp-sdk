@@ -253,6 +253,54 @@ function shape_from_transaction(string $transactionBase64): array
     return $shape;
 }
 
+/**
+ * Normalize a PHP SDK reject message onto the shared cross-SDK RejectCode
+ * vocabulary. Mirrors harness/src/conformance/reject.ts and the Go runner's
+ * classifyReject: the patterns are tuned against the real strings the PHP
+ * verifier emits.
+ *
+ * PHP is a server-only SDK, so in practice the only reject vector it actually
+ * processes is the transferChecked decimals mismatch, which surfaces as
+ * "No matching SPL transferChecked of ..." and so honestly classifies as the
+ * generic no-matching-transfer category (the decimals field is enforced
+ * through the transfer match key, exactly as in the reference). The remaining
+ * patterns are kept in lockstep with the shared vocabulary so any future
+ * server-verifiable reject reason classifies without further tuning.
+ *
+ * Returns null when no pattern matches so the harness can surface an
+ * unclassified rejection instead of silently passing it.
+ */
+function classify_reject(string $message): ?string
+{
+    if ($message === '') {
+        return null;
+    }
+
+    $patterns = [
+        '/compute unit price .* exceeds (maximum|cap)/i' => 'compute-price-over-cap',
+        '/compute unit limit .* exceeds (maximum|cap)/i' => 'compute-limit-over-cap',
+        '/fee payer cannot authorize/i' => 'fee-payer-not-authority',
+        '/fee payer .* (funding source|funds source)/i' => 'fee-payer-is-funds-source',
+        '/splits consume the entire amount/i' => 'splits-exceed-amount',
+        '/too many splits/i' => 'too-many-splits',
+        '/no matching (spl )?(token )?(transfer|transferchecked|sol transfer)/i' => 'no-matching-transfer',
+        '/unexpected .* (instruction|transfer)/i' => 'unexpected-instruction',
+        '/amount .* (mismatch|does not match)/i' => 'amount-mismatch',
+    ];
+
+    foreach ($patterns as $pattern => $code) {
+        if (preg_match($pattern, $message) === 1) {
+            return $code;
+        }
+    }
+
+    if (preg_match('/invalid|malformed|decode|payload/i', $message) === 1) {
+        return 'invalid-payload';
+    }
+
+    return null;
+}
+
 function read_u32_le(string $bytes): int
 {
     $unpacked = unpack('Vvalue', $bytes);
@@ -378,11 +426,17 @@ try {
     try {
         emit(run_vector($vector));
     } catch (Throwable $error) {
-        emit([
+        $message = $error->getMessage();
+        $result = [
             'id' => $id,
             'outcome' => 'reject',
-            'error' => $error->getMessage(),
-        ]);
+            'error' => $message,
+        ];
+        $rejectCode = classify_reject($message);
+        if ($rejectCode !== null) {
+            $result['rejectCode'] = $rejectCode;
+        }
+        emit($result);
     }
 } catch (Throwable $fatal) {
     fwrite(STDERR, 'php conformance runner fatal: ' . $fatal->getMessage() . "\n");
