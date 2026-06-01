@@ -21,6 +21,7 @@
     },
     "expect": {
       "outcome": "reject",
+      "rejectCode": "compute-price-over-cap",
       "rejectReason": "compute unit price exceeds the 5_000_000 micro-lamport cap"
     }
   },
@@ -47,6 +48,7 @@
     },
     "expect": {
       "outcome": "reject",
+      "rejectCode": "fee-payer-not-authority",
       "rejectReason": "fee payer cannot authorize the SPL payment transfer (fee-payer == authority == source)"
     }
   },
@@ -71,7 +73,8 @@
     },
     "expect": {
       "outcome": "reject",
-      "rejectReason": "transferChecked decimals (9) does not match challenge decimals (6)"
+      "rejectCode": "no-matching-transfer",
+      "rejectReason": "decimals=9 transfer fails the decimals=6 match key, surfacing as a no-matching-transfer reject; isolating the decimals field itself is the job of a positive-control vector pair, not this reason check"
     }
   },
   {
@@ -98,6 +101,7 @@
     },
     "expect": {
       "outcome": "reject",
+      "rejectCode": "splits-exceed-amount",
       "rejectReason": "splits consume the entire amount; primary recipient must receive a positive amount"
     }
   }

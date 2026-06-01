@@ -188,6 +188,18 @@ describe("cross-SDK conformance vectors", () => {
           ).toBe(vector.expect.outcome);
 
           if (vector.expect.outcome === "reject") {
+            // Pin WHY the SDK rejected, not just that it did. A vector that
+            // declares a rejectCode forces the runner to have mapped its
+            // native error onto the shared category, so a guard that fires
+            // for the wrong reason (e.g. a decimals mismatch caught only by a
+            // generic no-matching-transfer fallback) fails here instead of
+            // passing on outcome alone.
+            if (vector.expect.rejectCode !== undefined) {
+              expect(
+                result.rejectCode,
+                `expected reject category ${vector.expect.rejectCode} but runner emitted ${result.rejectCode ?? "(none)"}: ${result.error ?? ""}`,
+              ).toBe(vector.expect.rejectCode);
+            }
             return;
           }
 

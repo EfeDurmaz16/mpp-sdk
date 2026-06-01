@@ -94,7 +94,28 @@ export type VectorExpect = {
   // Optional human-readable reason for reject vectors; not asserted, just
   // documents the divergence class.
   rejectReason?: string;
+  // Normalized reject category asserted across every SDK. Pins WHY the SDK
+  // rejected, not just that it did, so a guard that fires for the wrong
+  // reason (e.g. a decimals-mismatch caught only by a generic
+  // no-matching-transfer fallback) is flagged. Runners map their native
+  // error taxonomy onto this shared vocabulary.
+  rejectCode?: RejectCode;
 };
+
+// Shared reject vocabulary. Each runner maps its native error onto one of
+// these so the harness can assert the SAME category across all SDKs.
+export type RejectCode =
+  | "compute-price-over-cap"
+  | "compute-limit-over-cap"
+  | "fee-payer-not-authority"
+  | "fee-payer-is-funds-source"
+  | "decimals-mismatch"
+  | "splits-exceed-amount"
+  | "too-many-splits"
+  | "unexpected-instruction"
+  | "no-matching-transfer"
+  | "amount-mismatch"
+  | "invalid-payload";
 
 export type VectorInput = {
   // build-transaction / verify-transaction
@@ -136,4 +157,7 @@ export type RunnerResult = {
   };
   // Present on reject: the runner's reject message (for diagnostics).
   error?: string;
+  // Present on reject: the normalized category the runner mapped its native
+  // error onto. Asserted against VectorExpect.rejectCode when both are set.
+  rejectCode?: RejectCode;
 };

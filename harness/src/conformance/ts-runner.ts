@@ -20,6 +20,7 @@ import {
 } from "@solana/mpp/server";
 import { decodeTransactionShape } from "./decode";
 import { base64UrlFromUtf8, canonicalizeJson } from "./jcs";
+import { classifyReject } from "./reject";
 import type {
   ConformanceVector,
   RunnerResult,
@@ -189,10 +190,12 @@ async function main(): Promise<void> {
   try {
     result = await runVector(vector);
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     result = {
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
       id: vector.id,
       outcome: "reject",
+      rejectCode: classifyReject(message),
     };
   }
   process.stdout.write(JSON.stringify(result) + "\n");
