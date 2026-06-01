@@ -4,6 +4,7 @@ parameters:
         - src
         - tests
         - examples/simple-server
+        - conformance
         - ../harness/php-server
     excludePaths:
         # Laravel adapter requires illuminate/* which is not in dev
