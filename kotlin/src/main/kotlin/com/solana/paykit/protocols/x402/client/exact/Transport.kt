@@ -123,7 +123,23 @@ class X402HttpClient(
     }
 
     companion object {
+        /** v2 client payment header (rust ``X402_V2_PAYMENT_HEADER``). */
         const val PAYMENT_SIGNATURE_HEADER = "Payment-Signature"
+
+        /**
+         * Legacy v1 client payment header (rust ``X402_V1_PAYMENT_HEADER`` =
+         * ``"X-PAYMENT"``). The v1 producer ([buildPaymentHeaderV1]) writes its
+         * envelope here; the default flow stays on [PAYMENT_SIGNATURE_HEADER].
+         */
+        const val X402_V1_PAYMENT_HEADER = "X-Payment"
+
+        /**
+         * Legacy v1 payment-required header (rust
+         * ``X402_V1_PAYMENT_REQUIRED_HEADER`` = ``"X-PAYMENT-REQUIRED"``). The
+         * client reads a raw-JSON flat requirement from this header as a
+         * fallback after the v2 ``Payment-Required`` path.
+         */
+        const val X402_V1_PAYMENT_REQUIRED_HEADER = "X-Payment-Required"
     }
 }
 
