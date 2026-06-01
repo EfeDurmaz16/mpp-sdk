@@ -12,4 +12,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "solana-pay-kit-kotlin"
+rootProject.name = "mpp-kotlin-x402-interop-client"
+includeBuild("../../kotlin")

@@ -88,6 +88,10 @@ describe("x402 exact intent — cross-language matrix", () => {
   const allowedPair = (clientId: string, serverId: string): boolean => {
     if (clientId === "ts-x402" && serverId === "ts-x402") return true;
     if (clientId === "rust-x402" && serverId === "rust-x402") return true;
+    // kotlin-x402 client against rust-x402 and python (real settlement).
+    // ts-x402 server excluded: pre-existing getTransaction flake.
+    if (clientId === "kotlin-x402" && serverId === "rust-x402") return true;
+    if (clientId === "kotlin-x402" && serverId === "python") return true;
     return false;
   };
 
