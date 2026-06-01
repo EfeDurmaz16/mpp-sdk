@@ -61,13 +61,6 @@ const (
 	// level (Rust EXACT_SCHEME, server/exact.rs:318).
 	exactScheme = "exact"
 
-	// Legacy v1 network strings. The Rust v1_network_for_requirements
-	// (payment.rs:383-394) collapses the full CAIP-2 space into just
-	// these two: devnet -> "solana-devnet", everything else (mainnet,
-	// testnet, localnet, unknown) -> "solana".
-	networkLegacyDevnet = "solana-devnet"
-	networkLegacy       = "solana"
-
 	x402VersionV1 = 1
 	x402VersionV2 = 2
 	x402Version   = x402VersionV2
@@ -340,18 +333,18 @@ func BuildPaymentHeaderV1(
 
 // v1NetworkForEntry maps an offer's network to the legacy v1 network
 // string, mirroring Rust v1_network_for_requirements (payment.rs:383-394):
-// devnet (in any of its forms, including the devnet CAIP-2 id) maps to
-// "solana-devnet"; everything else maps to "solana". The Rust selector
-// prefers cluster over network; the Go AcceptsEntry has already
-// normalized the offer network to CAIP-2, so devnet is identified by the
-// devnet CAIP-2 id or any devnet alias.
+// it prefers the offer's original cluster slug over its network slug,
+// then collapses the full CAIP-2 space into two buckets. Only
+// {"devnet","solana-devnet",devnet-CAIP-2} map to "solana-devnet";
+// everything else (mainnet, testnet, localnet, unknown) maps to "solana".
+//
+// The selector reads the ORIGINAL slugs the offer was parsed from, not
+// the normalized entry.Network: normalization collapses "localnet" into
+// the devnet CAIP-2 id, so reading entry.Network would misroute a
+// localnet offer to "solana-devnet" while the Rust spine maps localnet
+// to "solana".
 func v1NetworkForEntry(entry *x402.AcceptsEntry) string {
-	switch entry.Network {
-	case "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", "devnet", "solana-devnet":
-		return networkLegacyDevnet
-	default:
-		return networkLegacy
-	}
+	return entry.LegacyNetworkString()
 }
 
 func buildTransaction(

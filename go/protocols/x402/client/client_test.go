@@ -245,6 +245,75 @@ func TestBuildPaymentHeaderV1DevnetNetwork(t *testing.T) {
 	}
 }
 
+// parsedOffer round-trips an offer JSON object through AcceptsEntry's
+// UnmarshalJSON so the original cluster/network slugs survive (the struct
+// helper `entry` cannot, since it sets the normalized Network directly).
+func parsedOffer(t *testing.T, fields string) x402.AcceptsEntry {
+	t.Helper()
+	payTo := testutil.NewPrivateKey().PublicKey().String()
+	mint := testutil.NewPrivateKey().PublicKey().String()
+	raw := fmt.Sprintf(
+		`{"protocol":"x402","scheme":"exact",%s,"asset":%q,"amount":"100000","payTo":%q,"maxTimeoutSeconds":300,"extra":{"decimals":6,"recentBlockhash":%q}}`,
+		fields, mint, payTo, blockhash(),
+	)
+	var e x402.AcceptsEntry
+	if err := json.Unmarshal([]byte(raw), &e); err != nil {
+		t.Fatalf("parse offer: %v", err)
+	}
+	return e
+}
+
+func v1Network(t *testing.T, e x402.AcceptsEntry) string {
+	t.Helper()
+	header, err := BuildPaymentHeaderV1(context.Background(), testutil.NewPrivateKey(), testutil.NewFakeRPC(), &e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := base64.StdEncoding.DecodeString(header)
+	var cred x402.Credential
+	if err := json.Unmarshal(raw, &cred); err != nil {
+		t.Fatal(err)
+	}
+	return cred.Network
+}
+
+// TestBuildPaymentHeaderV1NetworkMapping proves the legacy v1 network
+// string follows the Rust v1_network_for_requirements two-bucket mapping
+// off the OFFER's original slug (cluster preferred over network): only
+// devnet in any of its forms maps to "solana-devnet"; localnet, mainnet,
+// testnet, and unknown all map to "solana". This is the localnet-vs-devnet
+// parity case the Go normalization (localnet -> devnet CAIP-2) would
+// otherwise break.
+func TestBuildPaymentHeaderV1NetworkMapping(t *testing.T) {
+	cases := []struct {
+		name   string
+		fields string
+		want   string
+	}{
+		{"localnet slug", `"network":"localnet"`, "solana"},
+		{"devnet slug", `"network":"devnet"`, "solana-devnet"},
+		{"solana-devnet slug", `"network":"solana-devnet"`, "solana-devnet"},
+		{"devnet CAIP-2", `"network":"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"`, "solana-devnet"},
+		{"mainnet slug", `"network":"mainnet"`, "solana"},
+		{"mainnet CAIP-2", `"network":"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"`, "solana"},
+		{"testnet slug", `"network":"testnet"`, "solana"},
+		// Cluster wins over network (Rust selector precedence): a
+		// cluster=devnet offer maps to devnet even when network=solana.
+		{"cluster over network", `"cluster":"devnet","network":"solana"`, "solana-devnet"},
+		// And a cluster=localnet offer maps to "solana" even when the
+		// network slug is devnet.
+		{"cluster localnet over network devnet", `"cluster":"localnet","network":"devnet"`, "solana"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := parsedOffer(t, tc.fields)
+			if got := v1Network(t, e); got != tc.want {
+				t.Errorf("v1 network for %s: got %q want %q", tc.fields, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestBuildPaymentHeaderV1NilEntry proves the nil guard fires.
 func TestBuildPaymentHeaderV1NilEntry(t *testing.T) {
 	if _, err := BuildPaymentHeaderV1(context.Background(), testutil.NewPrivateKey(), testutil.NewFakeRPC(), nil); err == nil {

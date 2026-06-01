@@ -141,6 +141,16 @@ type AcceptsEntry struct {
 	// field without dropping unknown keys. Empty for server-constructed
 	// entries (which marshal from the typed fields).
 	raw json.RawMessage
+
+	// rawCluster and rawNetwork retain the offer's ORIGINAL cluster and
+	// network slugs (pre-normalization) so the legacy v1 network mapping
+	// can reproduce the Rust v1_network_for_requirements selector exactly:
+	// it prefers cluster over network and distinguishes "localnet" (-> the
+	// "solana" bucket) from "devnet" (-> the "solana-devnet" bucket). The
+	// normalized Network field collapses both into the devnet CAIP-2 id, so
+	// it cannot drive that mapping. Empty for server-constructed entries.
+	rawCluster string
+	rawNetwork string
 }
 
 // Extra carries x402's optional metadata. RecentBlockhash is the
@@ -172,6 +182,7 @@ type rawAcceptsEntry struct {
 	Protocol          string    `json:"protocol"`
 	Scheme            string    `json:"scheme"`
 	Network           string    `json:"network"`
+	Cluster           string    `json:"cluster"`
 	Asset             string    `json:"asset"`
 	Currency          string    `json:"currency"`
 	Amount            string    `json:"amount"`
@@ -219,6 +230,10 @@ func (e *AcceptsEntry) UnmarshalJSON(data []byte) error {
 	e.Protocol = r.Protocol
 	e.Scheme = r.Scheme
 	e.Network = normalizeNetwork(r.Network)
+	// Retain the original slugs (pre-normalization) for the legacy v1
+	// network selector, which must distinguish localnet from devnet.
+	e.rawCluster = r.Cluster
+	e.rawNetwork = r.Network
 
 	// asset := asset || currency (top-level currency, then offered asset).
 	e.Asset = firstNonEmpty(r.Asset, r.Currency)
@@ -318,6 +333,33 @@ func (e AcceptsEntry) MarshalJSON() ([]byte, error) {
 // nil for a server-constructed entry. The client echoes this in the
 // credential's `accepted` field so unknown keys survive the round-trip.
 func (e AcceptsEntry) RawAccepted() json.RawMessage { return e.raw }
+
+// LegacyNetworkString reports the legacy x402 v1 network string for this
+// offer, mirroring the Rust v1_network_for_requirements selector
+// (client/exact/payment.rs:383-394): pick the original cluster slug if
+// present, else the original network slug, then collapse the full CAIP-2
+// space into two buckets. Only {"devnet","solana-devnet",devnet-CAIP-2}
+// map to "solana-devnet"; everything else (mainnet, testnet, LOCALNET,
+// unknown) maps to "solana".
+//
+// The selector reads the ORIGINAL slugs, not the normalized Network
+// field, because normalization collapses "localnet" into the devnet
+// CAIP-2 id and would otherwise misroute a localnet offer to
+// "solana-devnet". For a server-constructed entry (no parsed source
+// slugs) it falls back to the normalized Network, where localnet is
+// already indistinguishable from devnet.
+func (e AcceptsEntry) LegacyNetworkString() string {
+	selector := firstNonEmpty(e.rawCluster, e.rawNetwork)
+	if selector == "" {
+		selector = e.Network
+	}
+	switch selector {
+	case "devnet", "solana-devnet", solanaDevnetCAIP2:
+		return "solana-devnet"
+	default:
+		return "solana"
+	}
+}
 
 // firstNonEmpty returns the first non-empty string argument.
 func firstNonEmpty(values ...string) string {
