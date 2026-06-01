@@ -324,6 +324,46 @@ def shape_from_transaction(transaction_base64)
   shape
 end
 
+# classify_reject maps the Ruby SDK's native reject message onto the shared
+# RejectCode vocabulary the interop harness asserts per reject vector. It
+# mirrors the TypeScript reference classifier (harness/src/conformance/reject.ts)
+# so every SDK runner normalizes to the same categories. Returns nil when no
+# pattern matches, so the harness surfaces an unclassified rejection rather than
+# silently passing it.
+#
+# Note on decimals: the verifier enforces transferChecked decimals through the
+# transfer match key, so a decimals mismatch surfaces as a generic
+# "no matching transfer" rather than a decimals-specific error.
+REJECT_PATTERNS = [
+  [/compute unit price .* exceeds (maximum|cap)/i, "compute-price-over-cap"],
+  [/compute unit limit .* exceeds (maximum|cap)/i, "compute-limit-over-cap"],
+  [/fee payer cannot authorize/i, "fee-payer-not-authority"],
+  [/fee payer .* (funding source|funds source)/i, "fee-payer-is-funds-source"],
+  [/splits consume the entire amount/i, "splits-exceed-amount"],
+  [/too many splits/i, "too-many-splits"],
+  [/no matching (spl )?(transfer|transferchecked|sol transfer)/i, "no-matching-transfer"],
+  [/unexpected .* (instruction|transfer)/i, "unexpected-instruction"],
+  [/amount .* (mismatch|does not match)/i, "amount-mismatch"]
+].freeze
+
+def classify_reject(message)
+  return nil if message.to_s.empty?
+
+  REJECT_PATTERNS.each { |pattern, code| return code if pattern.match?(message) }
+  return "invalid-payload" if /invalid|malformed|decode|payload/i.match?(message)
+
+  nil
+end
+
+# reject_result builds a reject RunnerResult, attaching the normalized
+# rejectCode classified from the native message when one is recognized.
+def reject_result(id, message)
+  result = {"id" => id, "outcome" => "reject", "error" => message}
+  code = classify_reject(message)
+  result["rejectCode"] = code if code
+  result
+end
+
 def run_canonical_bytes(vector)
   input = vector["input"] || {}
   exact = {}
@@ -365,7 +405,7 @@ def run_verify_transaction(vector)
   verifier = Mpp::Protocol::Solana::Verifier.new
   result = verifier.verify_transaction_payload(tx, charge_request(flat))
   unless result.ok?
-    return {"id" => vector["id"], "outcome" => "reject", "error" => result.reason}
+    return reject_result(vector["id"], result.reason)
   end
 
   {"id" => vector["id"], "outcome" => "accept", "transactionShape" => shape_from_transaction(tx)}
@@ -382,7 +422,7 @@ def run_vector(vector)
     {"id" => vector["id"], "outcome" => "unsupported-mode",
      "error" => "ruby SDK is server-only: build-transaction has no client builder"}
   else
-    {"id" => vector["id"], "outcome" => "reject", "error" => "unsupported mode #{vector["mode"]}"}
+    reject_result(vector["id"], "unsupported mode #{vector["mode"]}")
   end
 end
 
@@ -394,7 +434,7 @@ result =
   begin
     run_vector(vector)
   rescue => error
-    {"id" => vector["id"], "outcome" => "reject", "error" => error.message}
+    reject_result(vector["id"], error.message)
   end
 
 $stdout.puts(JSON.generate(result))
