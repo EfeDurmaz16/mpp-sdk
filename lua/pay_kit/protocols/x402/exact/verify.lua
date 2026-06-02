@@ -20,7 +20,7 @@ Rules:
  10. Memo binding (exactly one if extra.memo set)
  11. Token program strict bind to extra.tokenProgram
 
-Reuses lua/mpp/methods/solana/ for transaction parsing, ATA derive,
+Reuses pay_kit.solana (PayCore) for transaction parsing, ATA derive,
 and base58. Ed25519 client-signature verification routes through
 pay_kit.util.ed25519 so the openssl / luasodium backend choice
 is consistent with the rest of the SDK.
