@@ -54,7 +54,7 @@ func TestRequireFuncInvalidGateReturns402(t *testing.T) {
 }
 
 func TestIsPaidForUnnamedGateMatchesAnyPayment(t *testing.T) {
-	pmt := &paykit.Payment{Scheme: paykit.MPP, Gate: "x"}
+	pmt := &paykit.Payment{Protocol: paykit.MPP, Gate: "x"}
 	ctx := withPayment(context.Background(), pmt)
 	if !paykit.IsPaidFor(ctx, paykit.Gate{}) {
 		t.Error("expected match for unnamed gate")
@@ -62,7 +62,7 @@ func TestIsPaidForUnnamedGateMatchesAnyPayment(t *testing.T) {
 }
 
 func TestIsPaidForNamedGateMatch(t *testing.T) {
-	pmt := &paykit.Payment{Scheme: paykit.MPP, Gate: "report"}
+	pmt := &paykit.Payment{Protocol: paykit.MPP, Gate: "report"}
 	ctx := withPayment(context.Background(), pmt)
 	if !paykit.IsPaidFor(ctx, paykit.Gate{Name: "report"}) {
 		t.Error("expected match")

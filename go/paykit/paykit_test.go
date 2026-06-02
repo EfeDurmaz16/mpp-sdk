@@ -168,7 +168,7 @@ func TestGateValidateSumWithinExceedsAmount(t *testing.T) {
 func TestGateValidateX402WithFees(t *testing.T) {
 	g := paykit.Gate{
 		Amount: paykit.MustParseUSD("10.00"),
-		Accept: []paykit.Scheme{paykit.X402},
+		Accept: []paykit.Protocol{paykit.X402},
 		FeeOnTop: paykit.Fees{
 			"F": paykit.MustParseUSD("0.10"),
 		},

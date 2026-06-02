@@ -370,7 +370,7 @@ func TestVerifyAndSettleHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected settle to succeed, got %v", err)
 	}
-	if pmt.Scheme != paykit.X402 || pmt.Transaction != sampleSig {
+	if pmt.Protocol != paykit.X402 || pmt.Transaction != sampleSig {
 		t.Errorf("payment: %+v", pmt)
 	}
 	if pmt.SettlementHeaders[settlementHeader] != sampleSig {

@@ -100,7 +100,7 @@ func New(cfg paykit.Config) (paykit.Adapter, error) {
 	return a, nil
 }
 
-func (a *Adapter) Scheme() paykit.Scheme { return paykit.X402 }
+func (a *Adapter) Protocol() paykit.Protocol { return paykit.X402 }
 
 // AcceptsEntry is the typed JSON shape x402-exact emits into the 402
 // body's `accepts[]` array.
@@ -337,7 +337,7 @@ func normalizeNetwork(network string) string {
 }
 
 // AcceptsProtocol satisfies [paykit.AcceptsEntry].
-func (e AcceptsEntry) AcceptsProtocol() paykit.Scheme { return paykit.X402 }
+func (e AcceptsEntry) AcceptsProtocol() paykit.Protocol { return paykit.X402 }
 
 // Credential is the typed x402 credential the client posts in the
 // payment-signature header (base64 of this JSON).
@@ -541,7 +541,7 @@ func (a *Adapter) VerifyAndSettle(req *paykit.AdapterRequest) (*paykit.Payment, 
 		settlementHeader:      signature.String(),
 	}
 	return &paykit.Payment{
-		Scheme:            paykit.X402,
+		Protocol:          paykit.X402,
 		Gate:              req.Gate.Name,
 		Transaction:       signature.String(),
 		SettlementHeaders: headers,
