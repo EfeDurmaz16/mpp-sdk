@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/solana-foundation/pay-kit/go/paycore/signer"
 	"github.com/solana-foundation/pay-kit/go/paykit"
 	x402adapter "github.com/solana-foundation/pay-kit/go/protocols/x402"
-	"github.com/solana-foundation/pay-kit/go/paycore/signer"
 )
 
 func cfg() paykit.Config {

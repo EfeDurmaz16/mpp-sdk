@@ -72,7 +72,7 @@ go-fmt:
 go-lint:
     cd go && just lint
 
-# Run Go coverage with the 70% gate (delegates to go/Justfile)
+# Run Go coverage with the 90% gate (delegates to go/Justfile)
 go-test-cover:
     cd go && just test-cover
 

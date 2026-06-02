@@ -11,9 +11,9 @@ import (
 	solana "github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/solana-foundation/pay-kit/go/paycore"
+	"github.com/solana-foundation/pay-kit/go/paycore/signer"
 	"github.com/solana-foundation/pay-kit/go/paycore/solanatx"
 	"github.com/solana-foundation/pay-kit/go/paykit"
-	"github.com/solana-foundation/pay-kit/go/paycore/signer"
 )
 
 func errorsAs(err error, target any) bool { return errors.As(err, target) }

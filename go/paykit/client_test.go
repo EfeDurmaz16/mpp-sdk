@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	_ "github.com/solana-foundation/pay-kit/go/paycore/signer"
 	"github.com/solana-foundation/pay-kit/go/paykit"
 	_ "github.com/solana-foundation/pay-kit/go/protocols/mpp"
 	_ "github.com/solana-foundation/pay-kit/go/protocols/x402"
-	_ "github.com/solana-foundation/pay-kit/go/paycore/signer"
 )
 
 func TestClientCloseIsNoop(t *testing.T) {

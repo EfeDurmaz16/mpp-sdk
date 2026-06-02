@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/solana-foundation/pay-kit/go/paycore/signer"
 	"github.com/solana-foundation/pay-kit/go/paykit"
 	_ "github.com/solana-foundation/pay-kit/go/protocols/mpp"
 	_ "github.com/solana-foundation/pay-kit/go/protocols/x402"
-	"github.com/solana-foundation/pay-kit/go/paycore/signer"
 )
 
 func disabled() *bool { f := false; return &f }
