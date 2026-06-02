@@ -4,4 +4,4 @@
 
 require_relative "app"
 
-run SinatraExample
+run SIMPLE_SERVER_APP
