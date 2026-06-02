@@ -37,6 +37,7 @@ from pay_kit.protocols.x402.client.exact import (
     X402Client,
     build_payment,
     build_payment_header,
+    build_payment_header_v1,
     parse_x402_challenge,
 )
 from pay_kit.protocols.x402.exact.types import X402AcceptsEntry
@@ -302,6 +303,71 @@ async def test_build_payment_spl_round_trips_through_verifier():
     assert result["amount"] == 1000
     assert result["mint"] == USDC_DEVNET
     assert result["destination"] == derive_ata(offer["payTo"], USDC_DEVNET, TP_USDC)
+
+
+# -- legacy v1 challenge parse + producer ------------------------------------
+
+
+def test_parse_v1_flat_payment_required_header():
+    # The legacy X-PAYMENT-REQUIRED header carries a raw-JSON flat
+    # PaymentRequirements (legacy field names, legacy network string).
+    flat = {
+        "scheme": "exact",
+        "network": "solana-devnet",
+        "asset": USDC_DEVNET,
+        "maxAmountRequired": "1000",
+        "payTo": str(Keypair().pubkey()),
+        "extra": {"feePayer": str(Keypair().pubkey()), "decimals": 6, "tokenProgram": TP_USDC, "memo": "/m"},
+    }
+    picked = parse_x402_challenge(
+        {"X-PAYMENT-REQUIRED": json.dumps(flat)}, None, ChallengeSelection(network="devnet")
+    )
+    assert picked is not None
+    # The legacy network string is normalized to the CAIP-2 devnet id.
+    assert cast("dict[str, Any]", picked)["network"] == DEVNET
+    assert cast("dict[str, Any]", picked)["asset"] == USDC_DEVNET
+
+
+def test_v2_header_preferred_over_v1_flat_header():
+    # Both headers present: the v2 base64 accepts[] envelope wins.
+    v2_offer = _offer(amount="100")
+    flat = {"scheme": "exact", "network": "solana", "asset": USDC_DEVNET, "maxAmountRequired": "999",
+            "payTo": str(Keypair().pubkey()), "extra": {"tokenProgram": TP_USDC}}
+    picked = parse_x402_challenge(
+        {"payment-required": _challenge_header(v2_offer), "x-payment-required": json.dumps(flat)},
+        None,
+        ChallengeSelection(network="devnet"),
+    )
+    assert picked is not None
+    assert picked["amount"] == "100"
+
+
+@pytest.mark.asyncio
+async def test_build_payment_header_v1_emits_legacy_envelope():
+    signer = Signer.generate()
+    offer = _offer()  # network=DEVNET
+    header = await build_payment_header_v1(signer, None, _entry(offer), memo_nonce=lambda: "mn")
+    envelope = json.loads(base64.b64decode(header))
+    # v1 wire shape: x402Version=1, top-level scheme/network, NO accepted/resource.
+    assert envelope["x402Version"] == 1
+    assert envelope["scheme"] == "exact"
+    assert envelope["network"] == "solana-devnet"
+    assert "accepted" not in envelope
+    assert "resource" not in envelope
+    # The proof is identical to v2 and round-trips through the verifier.
+    tx_b64 = envelope["payload"]["transaction"]
+    result = ExactVerifier.verify(tx_b64, offer, [offer["extra"]["feePayer"]])
+    assert result["mint"] == USDC_DEVNET
+
+
+@pytest.mark.asyncio
+async def test_build_payment_header_v1_mainnet_network_string():
+    signer = Signer.generate()
+    offer = _offer(network=MAINNET)
+    header = await build_payment_header_v1(signer, None, _entry(offer), recent_blockhash_provider=_fixed_blockhash)
+    envelope = json.loads(base64.b64decode(header))
+    # Everything that is not devnet collapses to the legacy "solana" string.
+    assert envelope["network"] == "solana"
 
 
 @pytest.mark.asyncio

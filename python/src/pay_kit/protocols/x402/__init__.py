@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
 from pay_kit._paycore.currency import parse_units
 from pay_kit._paycore.mints import resolve, token_program_for
+from pay_kit._paycore.network import SOLANA_DEVNET_CAIP2, SOLANA_MAINNET_CAIP2
 from pay_kit._paycore.network_check import check_network_blockhash
 from pay_kit._paycore.protocol import Protocol
 from pay_kit._paycore.rpc import SolanaRpc
@@ -35,7 +36,15 @@ from pay_kit.protocols.x402.exact.types import (
     X402PayloadField,
     X402ResponseEnvelope,
 )
-from pay_kit.protocols.x402.exact.verify import X402_VERSION, ExactVerifier
+from pay_kit.protocols.x402.exact.verify import (
+    X402_V1_PAYMENT_HEADER,
+    X402_V2_PAYMENT_HEADER,
+    X402_VERSION,
+    X402_VERSION_FIELD,
+    X402_VERSION_V1,
+    X402_VERSION_V2,
+    ExactVerifier,
+)
 
 if TYPE_CHECKING:
     from pay_kit.config import Config
@@ -158,51 +167,64 @@ class X402Adapter:
         # The envelope is attacker-controlled; it is validated field-by-field
         # below, then narrowed to the typed wire shape for the rest of the flow.
         envelope_map = cast("dict[str, object]", envelope)
-        if envelope_map.get("x402Version") != X402_VERSION:
+        version = envelope_map.get(X402_VERSION_FIELD)
+        # Branch on the version first: a genuinely-unknown version is rejected
+        # before any further envelope validation (mirrors rust exact.rs:315-346,
+        # which matches on ``x402Version`` and falls through to the unsupported
+        # arm). v1 and v2 share the same envelope/payload validation below.
+        if version not in (X402_VERSION_V1, X402_VERSION_V2):
             raise InvalidProofError("unsupported_x402_version", code="unsupported_x402_version")
-        accepted_raw = envelope_map.get("accepted")
+
         payload_raw = envelope_map.get("payload")
-        if not isinstance(accepted_raw, dict) or not isinstance(payload_raw, dict):
+        if not isinstance(payload_raw, dict):
             raise InvalidProofError(
                 "invalid_exact_svm_payload_envelope",
                 code="invalid_exact_svm_payload_envelope",
             )
-        accepted = cast("dict[str, object]", accepted_raw)
         payload = cast("X402PayloadField", payload_raw)
 
-        # Tier-2 identity-key match: the credential's accepted requirement must
-        # match the server's freshly built offer for this route. x402 has no
-        # HMAC-bound challenge id, so the offer is the source of truth and the
-        # credential's `accepted` is never trusted for the route's parameters
-        # (mirrors rust verify_pinned_fields + the targeted deepEqual gate).
+        # The route's expected requirement always comes from the server offer,
+        # never from the credential. x402 has no HMAC-bound challenge id, so the
+        # credential's self-described identity is only ever compared against,
+        # never trusted (mirrors rust ``verify_pinned_fields`` + the targeted
+        # deepEqual gate).
         offer = self.accepts_entry(gate, request)
         offer_map = cast("dict[str, object]", offer)
-        for key in ("scheme", "network", "asset", "payTo"):
-            if accepted.get(key) != offer_map.get(key):
+
+        if version == X402_VERSION_V2:
+            # v2: the credential carries an ``accepted`` requirement that must
+            # match the server's freshly built offer for this route.
+            accepted_raw = envelope_map.get("accepted")
+            if not isinstance(accepted_raw, dict):
                 raise InvalidProofError(
-                    "pay_kit: charge_request_mismatch: accepted payment requirement does not match server challenge",
+                    "invalid_exact_svm_payload_envelope",
+                    code="invalid_exact_svm_payload_envelope",
+                )
+            accepted = cast("dict[str, object]", accepted_raw)
+            self._verify_accepted_matches_offer(accepted, offer_map)
+        else:
+            # v1 (legacy): the envelope commits only to top-level ``scheme`` +
+            # ``network`` and carries NO ``accepted`` object (mirrors rust
+            # exact.rs:316-327). Validate scheme=="exact" and that the legacy
+            # network string normalizes to the server's CAIP-2 network; the
+            # credential-binding deepEqual block is skipped entirely and the
+            # server offer is the sole source of truth.
+            scheme = envelope_map.get("scheme")
+            if scheme != "exact":
+                raise InvalidProofError(
+                    "invalid_exact_svm_payload_type",
+                    code="invalid_exact_svm_payload_type",
+                )
+            network_raw = envelope_map.get("network")
+            network = network_raw if isinstance(network_raw, str) else ""
+            expected_network = self._caip2()
+            if _caip2_network_for_cluster(network) != expected_network:
+                raise InvalidProofError(
+                    f"pay_kit: x402 network mismatch: credential {network!r} != server {expected_network!r}",
                     code="charge_request_mismatch",
                 )
-        # Reject if EITHER the exact `amount` or the `maxAmountRequired`
-        # ceiling drifts from the server offer. The previous AND only tripped
-        # when both diverged, so one-sided drift (e.g. amount tampered while
-        # maxAmountRequired left intact) silently passed.
-        if accepted.get("amount") != offer_map.get("amount") or accepted.get(
-            "maxAmountRequired"
-        ) != offer_map.get("maxAmountRequired"):
-            raise InvalidProofError(
-                "pay_kit: charge_request_mismatch (amount)",
-                code="charge_request_mismatch",
-            )
-        offer_extra = cast("dict[str, object]", offer_map.get("extra") or {})
-        accepted_extra_raw = accepted.get("extra")
-        accepted_extra = cast("dict[str, object]", accepted_extra_raw if isinstance(accepted_extra_raw, dict) else {})
-        for key in ("feePayer", "tokenProgram", "memo"):
-            if key in offer_extra and accepted_extra.get(key) != offer_extra[key]:
-                raise InvalidProofError(
-                    f"pay_kit: charge_request_mismatch (extra.{key})",
-                    code="charge_request_mismatch",
-                )
+            # v1 has no per-credential ``accepted``; the route offer is truth.
+            accepted = offer_map
 
         tx_base64 = payload.get("transaction")
         if not isinstance(tx_base64, str) or tx_base64 == "":
@@ -288,6 +310,36 @@ class X402Adapter:
             raw=header,
         )
 
+    @staticmethod
+    def _verify_accepted_matches_offer(accepted: dict[str, object], offer_map: dict[str, object]) -> None:
+        """Reject when the v2 credential's ``accepted`` drifts from the offer."""
+        for key in ("scheme", "network", "asset", "payTo"):
+            if accepted.get(key) != offer_map.get(key):
+                raise InvalidProofError(
+                    "pay_kit: charge_request_mismatch: accepted payment requirement does not match server challenge",
+                    code="charge_request_mismatch",
+                )
+        # Reject if EITHER the exact `amount` or the `maxAmountRequired`
+        # ceiling drifts from the server offer. An AND would only trip when both
+        # diverged, so one-sided drift (e.g. amount tampered while
+        # maxAmountRequired left intact) would silently pass.
+        if accepted.get("amount") != offer_map.get("amount") or accepted.get(
+            "maxAmountRequired"
+        ) != offer_map.get("maxAmountRequired"):
+            raise InvalidProofError(
+                "pay_kit: charge_request_mismatch (amount)",
+                code="charge_request_mismatch",
+            )
+        offer_extra = cast("dict[str, object]", offer_map.get("extra") or {})
+        accepted_extra_raw = accepted.get("extra")
+        accepted_extra = cast("dict[str, object]", accepted_extra_raw if isinstance(accepted_extra_raw, dict) else {})
+        for key in ("feePayer", "tokenProgram", "memo"):
+            if key in offer_extra and accepted_extra.get(key) != offer_extra[key]:
+                raise InvalidProofError(
+                    f"pay_kit: charge_request_mismatch (extra.{key})",
+                    code="charge_request_mismatch",
+                )
+
     def _fetch_recent_blockhash(self) -> str | None:
         if self._recent_blockhash_provider is not None:
             try:
@@ -299,6 +351,24 @@ class X402Adapter:
 
     def _caip2(self) -> str:
         return self._config.network.caip2()
+
+
+def _caip2_network_for_cluster(cluster: str) -> str:
+    """Normalize a cluster slug or CAIP-2 id to a Solana CAIP-2 network.
+
+    Mirrors rust ``caip2_network_for_cluster`` (types.rs:31-39) for the subset
+    the python SDK supports (mainnet + devnet/localnet; testnet is absent from
+    the python network table). The legacy v1 network strings ``"solana"`` and
+    ``"solana-devnet"`` normalize back to the correct CAIP-2 id so the v1
+    network-mismatch check compares like for like.
+    """
+    if cluster in (SOLANA_MAINNET_CAIP2, "solana", "mainnet", "mainnet-beta"):
+        return SOLANA_MAINNET_CAIP2
+    if cluster in (SOLANA_DEVNET_CAIP2, "solana-devnet", "devnet", "localnet"):
+        return SOLANA_DEVNET_CAIP2
+    # Any other ``solana:...`` id passes through; everything else defaults to
+    # mainnet (mirrors the rust catch-all arm).
+    return cluster if cluster.startswith("solana:") else SOLANA_MAINNET_CAIP2
 
 
 def _co_sign(transaction_b64: str, signer: Any) -> bytes:
@@ -415,20 +485,56 @@ def _request_path(request: Any) -> str:
     return "/"
 
 
+#: Credential header names the server reads, in priority order: the v2
+#: ``PAYMENT-SIGNATURE`` header is preferred; the legacy v1 ``X-PAYMENT`` header
+#: is accepted for backward compatibility (mirrors rust reading both,
+#: constants.rs:16/25). Each entry is the set of casings tried against a
+#: case-sensitive ``.get`` (framework header maps are case-insensitive; a plain
+#: dict is not, so common casings are tried explicitly).
+_CREDENTIAL_HEADER_CASINGS = (
+    ("payment-signature", "Payment-Signature", X402_V2_PAYMENT_HEADER),
+    ("x-payment", "X-Payment", X402_V1_PAYMENT_HEADER),
+)
+#: Lowercased credential header names for the plain-dict case-insensitive scan.
+_CREDENTIAL_HEADER_NAMES = (X402_V2_PAYMENT_HEADER.lower(), X402_V1_PAYMENT_HEADER.lower())
+
+
 def _payment_signature_header(request: Any) -> str:
-    """Read the ``Payment-Signature`` header across framework request shapes."""
+    """Read the v2 ``PAYMENT-SIGNATURE`` or legacy v1 ``X-PAYMENT`` credential.
+
+    Header matching is case-insensitive; the v2 header wins when both are
+    present. Mirrors the rust server reading both header names (the v2 default
+    plus the legacy v1 header) so an ``x402Version == 1`` envelope sent on
+    ``X-PAYMENT`` is accepted for backward compatibility.
+    """
     headers = getattr(request, "headers", None)
     if headers is not None:
         getter = getattr(headers, "get", None)
         if callable(getter):
-            for name in ("payment-signature", "Payment-Signature", "PAYMENT-SIGNATURE"):
-                value: object = getter(name)
-                if value:
-                    return str(value)
+            for casings in _CREDENTIAL_HEADER_CASINGS:
+                for name in casings:
+                    value: object = getter(name)
+                    if value:
+                        return str(value)
+            # Plain-dict header maps are case-sensitive: scan once, lowercased.
+            items = getattr(headers, "items", None)
+            if callable(items):
+                pairs = cast("Iterable[tuple[object, object]]", items())
+                lowered: dict[str, object] = {
+                    key.lower(): hv for key, hv in pairs if isinstance(key, str) and hv
+                }
+                for name in _CREDENTIAL_HEADER_NAMES:
+                    if name in lowered:
+                        return str(lowered[name])
     if isinstance(request, dict):
         raw_headers = cast("dict[str, object]", request).get("headers")
         if isinstance(raw_headers, dict):
-            for key, header_value in cast("dict[object, object]", raw_headers).items():
-                if isinstance(key, str) and key.lower() == "payment-signature" and header_value:
-                    return str(header_value)
+            lowered_dict: dict[str, object] = {
+                key.lower(): header_value
+                for key, header_value in cast("dict[object, object]", raw_headers).items()
+                if isinstance(key, str) and header_value
+            }
+            for name in _CREDENTIAL_HEADER_NAMES:
+                if name in lowered_dict:
+                    return str(lowered_dict[name])
     return ""
