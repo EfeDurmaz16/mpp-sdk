@@ -152,6 +152,10 @@ final class RequirePaymentTest extends TestCase
         $this->assertTrue(\PayKit\Middleware\isPaid($request));
         $this->assertTrue(\PayKit\Middleware\isPaidFor($request, 'report'));
         $this->assertFalse(\PayKit\Middleware\isPaidFor($request, 'other'));
+
+        // isPaidFor also accepts a Gate object: any settled payment satisfies it.
+        $gate = new Gate(Price::usd('0.01'), 'PAY_TO_RECIPIENT_BASE58_PUBKEY_111111111111');
+        $this->assertTrue(\PayKit\Middleware\isPaidFor($request, $gate));
     }
 
     public function testRequirePaymentNamespaceFunctionRaisesWithoutPayment(): void
