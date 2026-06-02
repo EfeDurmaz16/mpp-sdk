@@ -33,7 +33,7 @@ use Psr\Http\Server\RequestHandlerInterface;
  * On success the middleware attaches the verified {@see \PayKit\Payment}
  * to the request as "paykit.payment" and calls the next handler;
  * settlement headers are merged into the upstream 2xx response. On
- * failure it short-circuits with a 402 carrying the active scheme
+ * failure it short-circuits with a 402 carrying the active protocol
  * adapter's challenge headers and an `error: "payment_required"`
  * JSON body.
  */
@@ -114,11 +114,11 @@ final class RequirePayment implements MiddlewareInterface
         $accept = $gate->accept ?? $this->client->config->accept;
         $auth = $request->getHeaderLine('Authorization');
         $sig  = $request->getHeaderLine('Payment-Signature');
-        foreach ($accept as $scheme) {
-            if ($scheme === Protocol::X402 && $sig !== '' && $this->x402 !== null) {
+        foreach ($accept as $protocol) {
+            if ($protocol === Protocol::X402 && $sig !== '' && $this->x402 !== null) {
                 return $this->x402;
             }
-            if ($scheme === Protocol::Mpp && $auth !== '' && stripos($auth, 'payment ') === 0) {
+            if ($protocol === Protocol::Mpp && $auth !== '' && stripos($auth, 'payment ') === 0) {
                 return $this->mpp;
             }
         }
