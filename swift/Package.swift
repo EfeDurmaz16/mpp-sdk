@@ -9,16 +9,42 @@ let package = Package(
         .macOS(.v13),
     ],
     products: [
+        // Umbrella product: the one public surface. Re-exports PayCore,
+        // Mpp, and X402 so callers keep a single `import SolanaPayKit`.
         .library(
             name: "SolanaPayKit",
             targets: ["SolanaPayKit"]
         ),
     ],
     targets: [
-        .target(name: "SolanaPayKit"),
+        // PayCore: protocol-agnostic Solana + crypto primitives.
+        .target(name: "PayCore"),
+        // Mpp protocol: depends only on PayCore.
+        .target(
+            name: "Mpp",
+            dependencies: ["PayCore"]
+        ),
+        // X402 protocol: depends only on PayCore (never on Mpp).
+        .target(
+            name: "X402",
+            dependencies: ["PayCore"]
+        ),
+        // Umbrella gate: depends on both protocols + PayCore, re-exports.
+        .target(
+            name: "SolanaPayKit",
+            dependencies: ["PayCore", "Mpp", "X402"]
+        ),
         .testTarget(
-            name: "SolanaPayKitTests",
-            dependencies: ["SolanaPayKit"]
+            name: "PayCoreTests",
+            dependencies: ["PayCore"]
+        ),
+        .testTarget(
+            name: "MppTests",
+            dependencies: ["PayCore", "Mpp"]
+        ),
+        .testTarget(
+            name: "X402Tests",
+            dependencies: ["PayCore", "X402"]
         ),
     ]
 )
