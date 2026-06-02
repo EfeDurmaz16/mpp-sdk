@@ -940,6 +940,176 @@ class X402ServerExactTest < Minitest::Test
     assert_equal true, body.fetch(:paid)
   end
 
+  # ============================================================
+  # x402 legacy wire version 1 (spine parity)
+  # ============================================================
+
+  # (a) The v1 producer emits the legacy X-PAYMENT envelope shape:
+  # top-level scheme="exact" + legacy network string, x402Version=1,
+  # NO accepted, NO resource, and a proof byte-for-byte identical to v2.
+  # Mirrors spine build_payment_header_v1
+  # (rust/crates/x402/src/client/exact/payment.rs:144-160).
+  def test_v1_producer_emits_legacy_payment_envelope
+    state = build_state
+    requirement = PayKit::Protocols::X402::Server::Exact.exact_requirement(state, resource: "/protected")
+
+    legacy_header = X402ExactClientFixture.build_exact_payment_signature_legacy(
+      requirement: requirement,
+      client_secret_key: JSON.generate(secret(1)),
+      recent_blockhash: BLOCKHASH
+    )
+    envelope = JSON.parse(Base64.decode64(legacy_header))
+
+    assert_equal 1, envelope.fetch("x402Version")
+    assert_equal "exact", envelope.fetch("scheme")
+    # NETWORK is devnet CAIP-2, so the legacy string is "solana-devnet".
+    assert_equal "solana-devnet", envelope.fetch("network")
+    refute envelope.key?("accepted"), "v1 envelope must not carry accepted"
+    refute envelope.key?("resource"), "v1 envelope must not carry resource"
+    assert envelope.fetch("payload").fetch("transaction").is_a?(String)
+
+    # Proof parity: the v1 transaction equals the v2 transaction byte
+    # for byte (only the envelope differs). The v2 producer is fed the
+    # same requirement so the proofs are deterministic.
+    v2_header = X402ExactClientFixture.build_exact_payment_signature(
+      requirement: requirement,
+      client_secret_key: JSON.generate(secret(1)),
+      recent_blockhash: BLOCKHASH
+    )
+    v2_transaction = JSON.parse(Base64.decode64(v2_header)).fetch("payload").fetch("transaction")
+    assert_equal v2_transaction, envelope.fetch("payload").fetch("transaction")
+  end
+
+  # (b) The legacy network string mapping collapses the full CAIP-2 space
+  # into "solana-devnet" (devnet only) and "solana" (everything else).
+  # Mirrors spine v1_network_for_requirements
+  # (rust/crates/x402/src/client/exact/payment.rs:383-394).
+  def test_legacy_network_string_mapping
+    map = ->(req) { X402ExactClientFixture.legacy_network_for_requirement(req) }
+
+    assert_equal "solana-devnet", map.call("network" => "devnet")
+    assert_equal "solana-devnet", map.call("network" => "solana-devnet")
+    assert_equal "solana-devnet", map.call("network" => ::PayCore::Solana::Caip2::DEVNET)
+    # cluster is preferred over network as the selector.
+    assert_equal "solana-devnet", map.call("cluster" => "devnet", "network" => "mainnet")
+    # Mainnet, testnet, localnet, unknown all collapse to "solana".
+    assert_equal "solana", map.call("network" => ::PayCore::Solana::Caip2::MAINNET)
+    assert_equal "solana", map.call("network" => "mainnet")
+    assert_equal "solana", map.call("network" => "testnet")
+    assert_equal "solana", map.call("network" => "localnet")
+    assert_equal "solana", map.call("network" => "something-else")
+  end
+
+  # (c) The server accepts a well-formed v1 payment-signature: it
+  # validates scheme + CAIP-2-normalized network, picks the first
+  # offered requirement (no accepted to match), and settles.
+  def test_server_accepts_v1_payment_signature
+    state = build_state(sender: ->(_state, _transaction) { "v1-settlement" })
+    legacy_header = X402ExactClientFixture.build_exact_payment_signature_legacy(
+      requirement: PayKit::Protocols::X402::Server::Exact.exact_requirement(state),
+      client_secret_key: JSON.generate(secret(1)),
+      recent_blockhash: BLOCKHASH
+    )
+
+    assert_equal "v1-settlement",
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, legacy_header)
+  end
+
+  # The protected route reads the legacy X-PAYMENT header (not just
+  # PAYMENT-SIGNATURE) and settles a v1 credential end to end.
+  def test_protected_route_reads_legacy_x_payment_header
+    state = build_state(sender: ->(_state, _transaction) { "v1-route-settlement" })
+    legacy_header = X402ExactClientFixture.build_exact_payment_signature_legacy(
+      requirement: PayKit::Protocols::X402::Server::Exact.exact_requirement(state, resource: "/protected"),
+      client_secret_key: JSON.generate(secret(1)),
+      recent_blockhash: BLOCKHASH
+    )
+
+    status, headers, body = PayKit::Protocols::X402::Server::Exact.response_for(
+      "/protected",
+      {"X-PAYMENT" => legacy_header},
+      state
+    )
+
+    assert_equal 200, status
+    assert_equal "v1-route-settlement", headers.fetch("x-fixture-settlement")
+    assert_equal true, body.fetch(:paid)
+  end
+
+  # The server rejects a v1 credential whose scheme is not "exact".
+  def test_server_rejects_v1_with_wrong_scheme
+    state = build_state
+    legacy_header = X402ExactClientFixture.build_exact_payment_signature_legacy(
+      requirement: PayKit::Protocols::X402::Server::Exact.exact_requirement(state),
+      client_secret_key: JSON.generate(secret(1)),
+      recent_blockhash: BLOCKHASH
+    )
+    envelope = JSON.parse(Base64.decode64(legacy_header))
+    envelope["scheme"] = "not-exact"
+    tampered = Base64.strict_encode64(JSON.generate(envelope))
+
+    error = assert_raises(RuntimeError) do
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, tampered)
+    end
+    assert_equal "invalid_exact_svm_payload_type", error.message
+  end
+
+  # The server rejects a v1 credential whose legacy network normalizes to
+  # a different CAIP-2 network than the server's configured network.
+  def test_server_rejects_v1_with_network_mismatch
+    state = build_state # devnet
+    legacy_header = X402ExactClientFixture.build_exact_payment_signature_legacy(
+      requirement: PayKit::Protocols::X402::Server::Exact.exact_requirement(state),
+      client_secret_key: JSON.generate(secret(1)),
+      recent_blockhash: BLOCKHASH
+    )
+    envelope = JSON.parse(Base64.decode64(legacy_header))
+    envelope["network"] = "solana" # normalizes to mainnet, server is devnet
+    tampered = Base64.strict_encode64(JSON.generate(envelope))
+
+    error = assert_raises(RuntimeError) do
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, tampered)
+    end
+    assert_match(/network mismatch/, error.message)
+  end
+
+  # (d) Genuinely-unknown versions are still rejected. v1 and v2 are
+  # accepted; anything else surfaces the canonical unsupported-version
+  # error. Mirrors spine other-arm
+  # (rust/crates/x402/src/server/exact.rs:342-346).
+  def test_server_rejects_unknown_x402_version
+    state = build_state
+    envelope = {
+      "x402Version" => 99,
+      "scheme" => "exact",
+      "network" => "solana-devnet",
+      "payload" => {"transaction" => Base64.strict_encode64("ignored")}
+    }
+    payment_header = Base64.strict_encode64(JSON.generate(envelope))
+
+    error = assert_raises(RuntimeError) do
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
+    end
+    assert_equal "Unsupported x402 version: 99", error.message
+  end
+
+  # The CAIP-2 cluster normalizer round-trips legacy v1 network strings
+  # back to the correct CAIP-2 network for the server's mismatch check.
+  # Mirrors spine caip2_network_for_cluster
+  # (rust/crates/x402/src/protocol/schemes/exact/types.rs:31-38).
+  def test_caip2_network_for_cluster_normalization
+    caip2 = ::PayCore::Solana::Caip2
+    assert_equal caip2::MAINNET, caip2.network_for_cluster("solana")
+    assert_equal caip2::MAINNET, caip2.network_for_cluster("mainnet")
+    assert_equal caip2::MAINNET, caip2.network_for_cluster("mainnet-beta")
+    assert_equal caip2::DEVNET, caip2.network_for_cluster("solana-devnet")
+    assert_equal caip2::DEVNET, caip2.network_for_cluster("devnet")
+    assert_equal caip2::DEVNET, caip2.network_for_cluster("localnet")
+    assert_equal caip2::TESTNET, caip2.network_for_cluster("testnet")
+    # Unknown values fall through to mainnet (spine catch-all arm).
+    assert_equal caip2::MAINNET, caip2.network_for_cluster("unknown")
+  end
+
   private
 
   def build_state_with_overrides(resource_path:, settlement_header:, sender:)

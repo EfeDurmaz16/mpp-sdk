@@ -28,7 +28,7 @@ module PayKit
 
       def detect?(request)
         header_value(request, ::PayKit::Protocols::X402::Constants::PAYMENT_SIGNATURE_HEADER) ||
-          header_value(request, "X-PAYMENT") # v1 legacy
+          header_value(request, ::PayKit::Protocols::X402::Constants::X402_V1_PAYMENT_HEADER) # v1 legacy
       end
 
       def accepts_entry(gate, request)
