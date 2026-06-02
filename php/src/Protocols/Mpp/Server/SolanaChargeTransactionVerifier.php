@@ -9,7 +9,7 @@ use Throwable;
 use PayKit\Protocols\Mpp\Core\Challenge;
 use PayKit\PayCore\Solana\Mints;
 use PayKit\Protocols\Mpp\Core\Credential;
-use PayKit\Protocols\Mpp\Core\Json;
+use PayKit\PayCore\Wire\Json;
 use PayKit\Protocols\Mpp\Intent\ChargeRequest;
 use SolanaPhpSdk\Keypair\PublicKey;
 use SolanaPhpSdk\Programs\AssociatedTokenProgram;

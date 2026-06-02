@@ -8,11 +8,11 @@ use Closure;
 use DateTimeImmutable;
 use InvalidArgumentException;
 use Throwable;
-use PayKit\Protocols\Mpp\Core\Base64Url;
+use PayKit\PayCore\Wire\Base64Url;
 use PayKit\Protocols\Mpp\Core\Challenge;
 use PayKit\Protocols\Mpp\Core\Credential;
 use PayKit\Protocols\Mpp\Core\Headers;
-use PayKit\Protocols\Mpp\Core\Json;
+use PayKit\PayCore\Wire\Json;
 use PayKit\Protocols\Mpp\Core\Receipt;
 use PayKit\Protocols\Mpp\Intent\ChargeRequest;
 

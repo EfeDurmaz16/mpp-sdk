@@ -9,7 +9,7 @@ use PayKit\Operator;
 use PayKit\PayCore\Network;
 use PayKit\Protocols\X402\Adapter;
 use PayKit\Signer;
-use PayKit\Tests\Protocols\Mpp\Server\FakeRpcGateway;
+use PayKit\Tests\PayCore\Rpc\FakeRpcGateway;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 use RuntimeException;

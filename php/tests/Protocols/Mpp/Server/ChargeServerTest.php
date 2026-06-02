@@ -10,7 +10,7 @@ use RuntimeException;
 use PayKit\Protocols\Mpp\Core\Challenge;
 use PayKit\Protocols\Mpp\Core\Credential;
 use PayKit\Protocols\Mpp\Core\Headers;
-use PayKit\Protocols\Mpp\Core\Json;
+use PayKit\PayCore\Wire\Json;
 use PayKit\Protocols\Mpp\Intent\ChargeRequest;
 use PayKit\Protocols\Mpp\Server\ChargeServer;
 use PayKit\Protocols\Mpp\Server\PaymentVerifier;

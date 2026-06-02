@@ -160,7 +160,7 @@ final class AdapterTest extends TestCase
         $challenge = \PayKit\Protocols\Mpp\Core\Headers::parseWwwAuthenticate($headers['www-authenticate']);
 
         $this->assertNotSame('', $challenge->expires, 'challenge must carry an expires when expiresIn > 0');
-        $parsed = \PayKit\Protocols\Mpp\Core\Rfc3339Parser::parse($challenge->expires);
+        $parsed = \PayKit\PayCore\Rfc3339Parser::parse($challenge->expires);
         $this->assertNotNull($parsed, 'expires must be valid RFC 3339');
         // ~120s in the future (allow generous slack for slow CI).
         $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));

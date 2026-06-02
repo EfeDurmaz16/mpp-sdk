@@ -9,8 +9,8 @@ use PayKit\Exception\InvalidProofException;
 use PayKit\Gate;
 use PayKit\Payment;
 use PayKit\Protocol;
-use PayKit\Protocols\Mpp\Server\RpcGateway;
-use PayKit\Protocols\Mpp\Server\SolanaRpcGateway;
+use PayKit\PayCore\Rpc\RpcGateway;
+use PayKit\PayCore\Rpc\SolanaRpcGateway;
 use PayKit\Protocols\X402\Exact\Verifier;
 use PayKit\Store\MemoryStore;
 use PayKit\Store\Store;
@@ -321,10 +321,9 @@ final class Adapter
     }
 
     /**
-     * Poll `getSignatureStatuses` until the broadcast transaction is
-     * confirmed or finalized. Throws on on-chain failure (`err`) or when
-     * the confirmation budget is exhausted. Mirrors
-     * {@see \PayKit\Protocols\Mpp\Server\SolanaChargeHandler::awaitConfirmation()}.
+     * Poll `getSignatureStatuses` through the PayCore {@see RpcGateway}
+     * until the broadcast transaction is confirmed or finalized. Throws on
+     * on-chain failure (`err`) or when the confirmation budget is exhausted.
      */
     private function awaitConfirmation(string $signature): void
     {
