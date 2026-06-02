@@ -4,7 +4,7 @@ require_relative "test_helper"
 
 class ChargeRequestTest < Minitest::Test
   def test_serializes_camel_case_wire_fields
-    request = Mpp::Protocol::Intents::ChargeRequest.new(
+    request = PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.new(
       amount: "1000",
       currency: "USDC",
       recipient: "recipient",
@@ -27,7 +27,7 @@ class ChargeRequestTest < Minitest::Test
   end
 
   def test_from_hash_with_optional_fields_absent
-    request = Mpp::Protocol::Intents::ChargeRequest.from_h({"amount" => "1", "currency" => "SOL"})
+    request = PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.from_h({"amount" => "1", "currency" => "SOL"})
 
     assert_equal "1", request.amount
     assert_equal "SOL", request.currency
@@ -36,18 +36,18 @@ class ChargeRequestTest < Minitest::Test
   end
 
   def test_parse_units_boundaries
-    assert_equal "1500000", Mpp::Protocol::Intents::ChargeRequest.parse_units("1.5", 6)
-    assert_equal "1", Mpp::Protocol::Intents::ChargeRequest.parse_units("0.000001", 6)
-    assert_equal "0", Mpp::Protocol::Intents::ChargeRequest.parse_units("0", 6)
-    assert_raises(ArgumentError) { Mpp::Protocol::Intents::ChargeRequest.parse_units("0.0000001", 6) }
-    assert_raises(ArgumentError) { Mpp::Protocol::Intents::ChargeRequest.parse_units("abc", 6) }
+    assert_equal "1500000", PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.parse_units("1.5", 6)
+    assert_equal "1", PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.parse_units("0.000001", 6)
+    assert_equal "0", PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.parse_units("0", 6)
+    assert_raises(ArgumentError) { PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.parse_units("0.0000001", 6) }
+    assert_raises(ArgumentError) { PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.parse_units("abc", 6) }
   end
 
   def test_rejects_zero_and_invalid_method_details
-    assert_raises(ArgumentError) { Mpp::Protocol::Intents::ChargeRequest.new(amount: "0", currency: "SOL") }
-    assert_raises(ArgumentError) { Mpp::Protocol::Intents::ChargeRequest.new(amount: "1", currency: "") }
-    assert_raises(ArgumentError) { Mpp::Protocol::Intents::ChargeRequest.new(amount: "1", currency: "SOL", method_details: "bad") }
-    assert_raises(ArgumentError) { Mpp::Protocol::Intents::ChargeRequest.from_h("bad") }
+    assert_raises(ArgumentError) { PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.new(amount: "0", currency: "SOL") }
+    assert_raises(ArgumentError) { PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.new(amount: "1", currency: "") }
+    assert_raises(ArgumentError) { PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.new(amount: "1", currency: "SOL", method_details: "bad") }
+    assert_raises(ArgumentError) { PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.from_h("bad") }
   end
 
   # Rust spine parity (rust/crates/mpp/src/protocol/intents/charge.rs:53-58):
@@ -56,10 +56,10 @@ class ChargeRequestTest < Minitest::Test
   # through to the on-chain transfer matcher as a "No matching transfer".
   # u64::MAX itself must parse.
   def test_amount_i_rejects_values_above_u64_max
-    max = Mpp::Protocol::Intents::ChargeRequest.new(amount: ((2**64) - 1).to_s, currency: "USDC")
+    max = PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.new(amount: ((2**64) - 1).to_s, currency: "USDC")
     assert_equal (2**64) - 1, max.amount_i
 
-    overflow = Mpp::Protocol::Intents::ChargeRequest.new(amount: (2**64).to_s, currency: "USDC")
+    overflow = PayKit::Protocols::Mpp::Protocol::Intents::ChargeRequest.new(amount: (2**64).to_s, currency: "USDC")
     error = assert_raises(ArgumentError) { overflow.amount_i }
     assert_match(/invalid amount/, error.message)
   end

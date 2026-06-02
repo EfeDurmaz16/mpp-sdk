@@ -75,31 +75,31 @@ class ErrorCodesTest < Minitest::Test
   end
 
   def test_mpp_error_carries_code
-    error = Mpp::Error.new("boom", code: CODE_SIGNATURE_CONSUMED)
+    error = PayKit::Protocols::Mpp::Error.new("boom", code: CODE_SIGNATURE_CONSUMED)
     assert_equal "boom", error.message
     assert_equal CODE_SIGNATURE_CONSUMED, error.code
   end
 
   def test_mpp_error_defaults_code_to_nil
-    error = Mpp::Error.new("boom")
+    error = PayKit::Protocols::Mpp::Error.new("boom")
     assert_nil error.code
   end
 
   def test_verification_error_inherits_code
-    error = Mpp::VerificationError.new("nope", code: CODE_WRONG_NETWORK)
+    error = PayKit::Protocols::Mpp::VerificationError.new("nope", code: CODE_WRONG_NETWORK)
     assert_equal CODE_WRONG_NETWORK, error.code
-    assert_kind_of Mpp::Error, error
+    assert_kind_of PayKit::Protocols::Mpp::Error, error
   end
 
   def test_verification_result_failure_carries_code
-    result = Mpp::Protocol::Solana::VerificationResult.failure("Amount mismatch", code: CODE_CHARGE_REQUEST_MISMATCH)
+    result = PayKit::Protocols::Mpp::Protocol::Solana::VerificationResult.failure("Amount mismatch", code: CODE_CHARGE_REQUEST_MISMATCH)
     refute result.ok?
     assert_equal "Amount mismatch", result.reason
     assert_equal CODE_CHARGE_REQUEST_MISMATCH, result.code
   end
 
   def test_verification_result_failure_code_defaults_to_nil
-    result = Mpp::Protocol::Solana::VerificationResult.failure("oops")
+    result = PayKit::Protocols::Mpp::Protocol::Solana::VerificationResult.failure("oops")
     assert_nil result.code
   end
 end

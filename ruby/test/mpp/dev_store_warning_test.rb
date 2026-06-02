@@ -2,14 +2,14 @@
 
 require_relative "../test_helper"
 
-# Regression for: Mpp.create must loudly warn when no replay_store is
+# Regression for: PayKit::Protocols::Mpp.create must loudly warn when no replay_store is
 # supplied (the default volatile MemoryStore is dev-only and unsafe in
 # production).
 class DevStoreWarningTest < Minitest::Test
   include RubyMppTestHelpers
 
   def method_fixture
-    Mpp::Protocol::Solana.charge(
+    PayKit::Protocols::Mpp::Protocol::Solana.charge(
       recipient: pubkey(2),
       currency: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
       network: "localnet",
@@ -17,16 +17,16 @@ class DevStoreWarningTest < Minitest::Test
     )
   end
 
-  # When no replay_store is passed, Mpp.create must:
+  # When no replay_store is passed, PayKit::Protocols::Mpp.create must:
   #   (a) emit a warning to stderr that includes "MemoryStore" and "no replay_store"
-  #   (b) still return a working Mpp::Server::Charge instance
+  #   (b) still return a working PayKit::Protocols::Mpp::Server::Charge instance
   def test_no_store_argument_emits_dev_warning
     warned = nil
 
     # Capture the Kernel.warn output without actually printing it.
-    Mpp.stub(:warn, ->(msg) { warned = msg }) do
-      server = Mpp.create(method: method_fixture, secret_key: "test-secret")
-      assert_kind_of Mpp::Server::Charge, server
+    PayKit::Protocols::Mpp.stub(:warn, ->(msg) { warned = msg }) do
+      server = PayKit::Protocols::Mpp.create(method: method_fixture, secret_key: "test-secret")
+      assert_kind_of PayKit::Protocols::Mpp::Server::Charge, server
     end
 
     refute_nil warned, "expected a warning to be emitted"
@@ -37,19 +37,19 @@ class DevStoreWarningTest < Minitest::Test
 
   # When an explicit replay_store is passed (even a MemoryStore), no
   # warning must be emitted. This ensures the warning is opt-in — callers
-  # that knowingly use MemoryStore in tests can pass Mpp::MemoryStore.new
+  # that knowingly use MemoryStore in tests can pass PayKit::Protocols::Mpp::MemoryStore.new
   # explicitly and stay warning-free.
   def test_explicit_store_argument_suppresses_warning
     warned = []
-    explicit_store = Mpp::MemoryStore.new
+    explicit_store = PayKit::Protocols::Mpp::MemoryStore.new
 
-    Mpp.stub(:warn, ->(msg) { warned << msg }) do
-      server = Mpp.create(
+    PayKit::Protocols::Mpp.stub(:warn, ->(msg) { warned << msg }) do
+      server = PayKit::Protocols::Mpp.create(
         method: method_fixture,
         secret_key: "test-secret",
         replay_store: explicit_store
       )
-      assert_kind_of Mpp::Server::Charge, server
+      assert_kind_of PayKit::Protocols::Mpp::Server::Charge, server
     end
 
     assert_empty warned, "expected no warning when an explicit store is provided"
@@ -59,15 +59,15 @@ class DevStoreWarningTest < Minitest::Test
   def test_explicit_file_store_suppresses_warning
     warned = []
     Dir.mktmpdir do |dir|
-      file_store = Mpp::FileStore.new(File.join(dir, "replay.json"))
+      file_store = PayKit::Protocols::Mpp::FileStore.new(File.join(dir, "replay.json"))
 
-      Mpp.stub(:warn, ->(msg) { warned << msg }) do
-        server = Mpp.create(
+      PayKit::Protocols::Mpp.stub(:warn, ->(msg) { warned << msg }) do
+        server = PayKit::Protocols::Mpp.create(
           method: method_fixture,
           secret_key: "test-secret",
           replay_store: file_store
         )
-        assert_kind_of Mpp::Server::Charge, server
+        assert_kind_of PayKit::Protocols::Mpp::Server::Charge, server
       end
     end
 

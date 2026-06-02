@@ -3,7 +3,8 @@
 require "base64"
 require "json"
 require_relative "test_helper"
-require "x402"
+require "pay_kit"
+require_relative "support/x402_exact_client_fixture"
 
 class X402ServerExactTest < Minitest::Test
   NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"
@@ -14,27 +15,27 @@ class X402ServerExactTest < Minitest::Test
   BLOCKHASH = "11111111111111111111111111111111"
 
   def test_normalizes_price_to_six_decimals
-    assert_equal "1000", X402::Server::Exact.normalize_amount("$0.001")
-    assert_equal "1000", X402::Server::Exact.normalize_amount("0.001 USDC")
-    assert_equal "1250000", X402::Server::Exact.normalize_amount("1.25")
+    assert_equal "1000", PayKit::Protocols::X402::Server::Exact.normalize_amount("$0.001")
+    assert_equal "1000", PayKit::Protocols::X402::Server::Exact.normalize_amount("0.001 USDC")
+    assert_equal "1250000", PayKit::Protocols::X402::Server::Exact.normalize_amount("1.25")
   end
 
   def test_exact_challenge_uses_runtime_state
     state = build_state(price: "$0.125")
-    requirement = X402::Server::Exact.exact_requirement(state)
+    requirement = PayKit::Protocols::X402::Server::Exact.exact_requirement(state)
 
     assert_equal "exact", requirement.fetch("scheme")
     assert_equal NETWORK, requirement.fetch("network")
     assert_equal ASSET, requirement.fetch("asset")
     assert_equal "125000", requirement.fetch("amount")
     assert_equal PAY_TO, requirement.fetch("payTo")
-    assert_equal X402::Protocol::Schemes::Exact.base58_encode(state.fee_payer.raw_public_key),
+    assert_equal PayKit::Protocols::X402::Protocol::Schemes::Exact.base58_encode(state.fee_payer.raw_public_key),
       requirement.fetch("extra").fetch("feePayer")
   end
 
   def test_exact_challenge_includes_extra_offered_mints
     state = build_state(extra_offered_mints: " #{PYUSD_DEVNET_MINT}, #{EXTRA_ASSET} ")
-    accepts = X402::Server::Exact.exact_challenge(state).fetch("accepts")
+    accepts = PayKit::Protocols::X402::Server::Exact.exact_challenge(state).fetch("accepts")
     base, pyusd, extra = accepts
 
     assert_equal [ASSET, PYUSD_DEVNET_MINT, EXTRA_ASSET], accepts.map { |requirement| requirement.fetch("asset") }
@@ -47,8 +48,8 @@ class X402ServerExactTest < Minitest::Test
       assert_equal base.fetch("extra").fetch("decimals"), requirement.fetch("extra").fetch("decimals")
     end
 
-    assert_equal X402::Protocol::Schemes::Exact::TOKEN_2022_PROGRAM, pyusd.fetch("extra").fetch("tokenProgram")
-    assert_equal X402::Server::Exact::DEFAULT_TOKEN_PROGRAM, extra.fetch("extra").fetch("tokenProgram")
+    assert_equal PayKit::Protocols::X402::Protocol::Schemes::Exact::TOKEN_2022_PROGRAM, pyusd.fetch("extra").fetch("tokenProgram")
+    assert_equal PayKit::Protocols::X402::Server::Exact::DEFAULT_TOKEN_PROGRAM, extra.fetch("extra").fetch("tokenProgram")
   end
 
   def test_exact_requirement_includes_server_recent_blockhash
@@ -57,7 +58,7 @@ class X402ServerExactTest < Minitest::Test
     # server's chain (the Surfpool / surfnet case where the wire CAIP-2
     # is devnet but the actual ledger is a private fork).
     state = build_state(recent_blockhash_provider: -> { "ServerProvidedBlockhash11111111111111111" })
-    requirement = X402::Server::Exact.exact_requirement(state)
+    requirement = PayKit::Protocols::X402::Server::Exact.exact_requirement(state)
 
     assert_equal "ServerProvidedBlockhash11111111111111111",
       requirement.fetch("extra").fetch("recentBlockhash")
@@ -69,21 +70,21 @@ class X402ServerExactTest < Minitest::Test
     # falls back to its own `getLatestBlockhash`, which is the
     # historical behaviour.
     state = build_state(recent_blockhash_provider: -> {})
-    requirement = X402::Server::Exact.exact_requirement(state)
+    requirement = PayKit::Protocols::X402::Server::Exact.exact_requirement(state)
 
     refute requirement.fetch("extra").key?("recentBlockhash")
   end
 
   def test_payment_requirement_matches_binds_settlement_fields
     state = build_state
-    requirement = X402::Server::Exact.exact_requirement(state)
+    requirement = PayKit::Protocols::X402::Server::Exact.exact_requirement(state)
 
-    assert X402::Server::Exact.payment_requirement_matches?(requirement, requirement)
+    assert PayKit::Protocols::X402::Server::Exact.payment_requirement_matches?(requirement, requirement)
 
     mutated = Marshal.load(Marshal.dump(requirement))
     mutated.fetch("extra")["feePayer"] = "11111111111111111111111111111114"
 
-    refute X402::Server::Exact.payment_requirement_matches?(mutated, requirement)
+    refute PayKit::Protocols::X402::Server::Exact.payment_requirement_matches?(mutated, requirement)
   end
 
   def test_settlement_signs_fee_payer_before_sending
@@ -94,7 +95,7 @@ class X402ServerExactTest < Minitest::Test
     })
     payment_header = build_payment_header(state)
 
-    settlement = X402::Server::Exact.settle_exact_payment(state, payment_header)
+    settlement = PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     signed_transaction = sent.fetch(0)
 
     assert_equal "ruby-settlement-signature", settlement
@@ -109,7 +110,7 @@ class X402ServerExactTest < Minitest::Test
     payment_header = Base64.strict_encode64(JSON.generate(envelope))
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "No matching payment requirements: accepted payment requirement does not match server challenge", error.message
@@ -134,7 +135,7 @@ class X402ServerExactTest < Minitest::Test
     # for this test's signature-less fixture, so we just assert
     # matching did not block.
     begin
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     rescue RuntimeError => err
       refute_equal "No matching payment requirements: accepted payment requirement does not match server challenge", err.message
     end
@@ -150,7 +151,7 @@ class X402ServerExactTest < Minitest::Test
     payment_header = Base64.strict_encode64(JSON.generate(envelope))
 
     begin
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     rescue RuntimeError => err
       refute_equal "No matching payment requirements: accepted payment requirement does not match server challenge", err.message
     end
@@ -160,7 +161,7 @@ class X402ServerExactTest < Minitest::Test
     state = build_state
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, "not base64")
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, "not base64")
     end
 
     assert_equal "invalid payment signature encoding", error.message
@@ -171,7 +172,7 @@ class X402ServerExactTest < Minitest::Test
     payment_header = Base64.strict_encode64("not-json")
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "invalid payment signature JSON", error.message
@@ -182,7 +183,7 @@ class X402ServerExactTest < Minitest::Test
     payment_header = Base64.strict_encode64(JSON.generate(["not", "object"]))
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "payment signature must be a JSON object", error.message
@@ -192,13 +193,13 @@ class X402ServerExactTest < Minitest::Test
     state = build_state
     envelope = {
       "x402Version" => 2,
-      "accepted" => X402::Server::Exact.exact_requirement(state),
+      "accepted" => PayKit::Protocols::X402::Server::Exact.exact_requirement(state),
       "payload" => "not-object"
     }
     payment_header = Base64.strict_encode64(JSON.generate(envelope))
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "payment payload is missing transaction", error.message
@@ -208,13 +209,13 @@ class X402ServerExactTest < Minitest::Test
     state = build_state
     envelope = {
       "x402Version" => 2,
-      "accepted" => X402::Server::Exact.exact_requirement(state),
+      "accepted" => PayKit::Protocols::X402::Server::Exact.exact_requirement(state),
       "payload" => {}
     }
     payment_header = Base64.strict_encode64(JSON.generate(envelope))
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "payment payload is missing transaction", error.message
@@ -227,7 +228,7 @@ class X402ServerExactTest < Minitest::Test
     payment_header = Base64.strict_encode64(JSON.generate(envelope))
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "payment payload transaction is not valid base64", error.message
@@ -244,7 +245,7 @@ class X402ServerExactTest < Minitest::Test
     end
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "invalid_exact_svm_payload_amount_mismatch", error.message
@@ -260,7 +261,7 @@ class X402ServerExactTest < Minitest::Test
   # `extra.tokenProgram` as required and raised on its absence.
   def test_verifier_accepts_transfer_without_extra_token_program
     state = build_state
-    requirement = X402::Server::Exact.exact_requirement(state)
+    requirement = PayKit::Protocols::X402::Server::Exact.exact_requirement(state)
     transaction = Base64.decode64(
       JSON.parse(Base64.decode64(build_payment_header(state)))
         .fetch("payload").fetch("transaction")
@@ -269,14 +270,14 @@ class X402ServerExactTest < Minitest::Test
     requirement_without_token_program = Marshal.load(Marshal.dump(requirement))
     requirement_without_token_program.fetch("extra").delete("tokenProgram")
 
-    transfer = X402::Protocol::Schemes::Exact::Verifier.verify(
+    transfer = PayKit::Protocols::X402::Protocol::Schemes::Exact::Verifier.verify(
       transaction,
       requirement_without_token_program,
       managed_signers: [state.fee_payer.raw_public_key]
     )
 
     assert_equal(
-      X402::Protocol::Schemes::Exact.base58_decode(::PayCore::Solana::Mints::TOKEN_PROGRAM),
+      PayKit::Protocols::X402::Protocol::Schemes::Exact.base58_decode(::PayCore::Solana::Mints::TOKEN_PROGRAM),
       transfer.fetch(:token_program)
     )
   end
@@ -292,7 +293,7 @@ class X402ServerExactTest < Minitest::Test
     end
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "invalid_exact_svm_payload_transaction_fee_payer_transferring_funds", error.message
@@ -310,7 +311,7 @@ class X402ServerExactTest < Minitest::Test
     end
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "invalid_exact_svm_payload_transaction_fee_payer_transferring_funds", error.message
@@ -328,7 +329,7 @@ class X402ServerExactTest < Minitest::Test
     end
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "invalid_exact_svm_payload_transaction_fee_payer_in_instruction_accounts", error.message
@@ -353,7 +354,7 @@ class X402ServerExactTest < Minitest::Test
     end
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "invalid_exact_svm_payload_transaction_fee_payer_in_instruction_accounts", error.message
@@ -375,7 +376,7 @@ class X402ServerExactTest < Minitest::Test
     end
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "invalid_exact_svm_payload_transaction_fee_payer_in_instruction_accounts", error.message
@@ -397,7 +398,7 @@ class X402ServerExactTest < Minitest::Test
     end
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "invalid_exact_svm_payload_transaction_fee_payer_in_instruction_accounts", error.message
@@ -411,7 +412,7 @@ class X402ServerExactTest < Minitest::Test
     state = build_state(sender: ->(_state, _transaction) { "unit-settlement" })
 
     assert_equal "unit-settlement",
-      X402::Server::Exact.settle_exact_payment(state, build_payment_header(state))
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, build_payment_header(state))
   end
 
   # Wallets inject a variable number of trailing Lighthouse guard
@@ -422,10 +423,10 @@ class X402ServerExactTest < Minitest::Test
   def test_settlement_accepts_single_trailing_lighthouse_guard
     state = build_state(sender: ->(_state, _transaction) { "unit-settlement" })
     payment_header = mutate_payment_transaction(build_payment_header(state), resign: true) do |transaction|
-      append_optional_instruction(transaction, X402::Protocol::Schemes::Exact::LIGHTHOUSE_PROGRAM)
+      append_optional_instruction(transaction, PayKit::Protocols::X402::Protocol::Schemes::Exact::LIGHTHOUSE_PROGRAM)
     end
 
-    assert_equal "unit-settlement", X402::Server::Exact.settle_exact_payment(state, payment_header)
+    assert_equal "unit-settlement", PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
   end
 
   # Two trailing Lighthouse guards (Solflare's shape) must also be
@@ -435,11 +436,11 @@ class X402ServerExactTest < Minitest::Test
   def test_settlement_accepts_two_trailing_lighthouse_guards
     state = build_state(sender: ->(_state, _transaction) { "unit-settlement" })
     payment_header = mutate_payment_transaction(build_payment_header(state), resign: true) do |transaction|
-      append_optional_instruction(transaction, X402::Protocol::Schemes::Exact::LIGHTHOUSE_PROGRAM)
-      append_optional_instruction(transaction, X402::Protocol::Schemes::Exact::LIGHTHOUSE_PROGRAM)
+      append_optional_instruction(transaction, PayKit::Protocols::X402::Protocol::Schemes::Exact::LIGHTHOUSE_PROGRAM)
+      append_optional_instruction(transaction, PayKit::Protocols::X402::Protocol::Schemes::Exact::LIGHTHOUSE_PROGRAM)
     end
 
-    assert_equal "unit-settlement", X402::Server::Exact.settle_exact_payment(state, payment_header)
+    assert_equal "unit-settlement", PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
   end
 
   # An Associated-Token-Program ATA-create instruction MUST NOT be an
@@ -458,7 +459,7 @@ class X402ServerExactTest < Minitest::Test
     end
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "invalid_exact_svm_payload_unknown_fifth_instruction", error.message
@@ -474,9 +475,9 @@ class X402ServerExactTest < Minitest::Test
     state = build_state(sender: ->(_state, _transaction) { "shared-signature" })
     payment_header = build_payment_header(state)
 
-    assert_equal "shared-signature", X402::Server::Exact.settle_exact_payment(state, payment_header)
+    assert_equal "shared-signature", PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "signature_consumed", error.message
@@ -484,7 +485,7 @@ class X402ServerExactTest < Minitest::Test
 
   def test_settlement_orders_broadcast_then_confirm_then_put_if_absent
     order = []
-    cache = X402::Server::Exact::SettlementCache.new
+    cache = PayKit::Protocols::X402::Server::Exact::SettlementCache.new
     tracking_cache = Class.new do
       def initialize(inner, order)
         @inner = inner
@@ -513,7 +514,7 @@ class X402ServerExactTest < Minitest::Test
     )
 
     assert_equal "sig-ordering",
-      X402::Server::Exact.settle_exact_payment(state, build_payment_header(state))
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, build_payment_header(state))
 
     assert_equal [
       [:broadcast],
@@ -523,7 +524,7 @@ class X402ServerExactTest < Minitest::Test
   end
 
   def test_settlement_does_not_record_signature_when_broadcast_fails_before_confirm
-    cache = X402::Server::Exact::SettlementCache.new
+    cache = PayKit::Protocols::X402::Server::Exact::SettlementCache.new
     state = build_state(
       sender: ->(_state, _transaction) { raise "sendTransaction RPC error: blockhash not found" },
       signature_confirmer: ->(_state, _signature) { raise "confirm must not run when broadcast failed" },
@@ -532,7 +533,7 @@ class X402ServerExactTest < Minitest::Test
     payment_header = build_payment_header(state)
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
     assert_match(/blockhash not found/, error.message)
 
@@ -547,12 +548,12 @@ class X402ServerExactTest < Minitest::Test
       signature_confirmer: ->(_state, signature) { signature },
       settlement_cache: cache
     )
-    assert_equal "retry-sig", X402::Server::Exact.settle_exact_payment(state, payment_header)
+    assert_equal "retry-sig", PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     assert retried
   end
 
   def test_settlement_does_not_record_signature_when_confirmation_fails
-    cache = X402::Server::Exact::SettlementCache.new
+    cache = PayKit::Protocols::X402::Server::Exact::SettlementCache.new
     state = build_state(
       sender: ->(_state, _transaction) { "unconfirmed-sig" },
       signature_confirmer: ->(_state, _signature) { raise "timed out awaiting confirmation for unconfirmed-sig" },
@@ -560,7 +561,7 @@ class X402ServerExactTest < Minitest::Test
     )
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, build_payment_header(state))
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, build_payment_header(state))
     end
     assert_match(/timed out awaiting confirmation/, error.message)
 
@@ -573,7 +574,7 @@ class X402ServerExactTest < Minitest::Test
 
   def test_settlement_consumed_key_namespace_is_scheme_scoped
     assert_equal "x402-svm-exact:consumed:abc123",
-      X402::Server::Exact.signature_consumed_key("abc123")
+      PayKit::Protocols::X402::Server::Exact.signature_consumed_key("abc123")
   end
 
   def test_settlement_rejects_missing_source_token_account_before_sending
@@ -591,7 +592,7 @@ class X402ServerExactTest < Minitest::Test
     )
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, build_payment_header(state))
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, build_payment_header(state))
     end
 
     assert_equal "source token account does not exist", error.message
@@ -614,7 +615,7 @@ class X402ServerExactTest < Minitest::Test
     )
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, build_payment_header(state))
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, build_payment_header(state))
     end
 
     assert_equal "destination token account does not exist", error.message
@@ -644,7 +645,7 @@ class X402ServerExactTest < Minitest::Test
     end
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header)
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header)
     end
 
     assert_equal "invalid_exact_svm_payload_signature", error.message
@@ -662,7 +663,7 @@ class X402ServerExactTest < Minitest::Test
     state = build_state(sender: ->(_state, _transaction) { "unit-settlement" })
 
     assert_equal "unit-settlement",
-      X402::Server::Exact.settle_exact_payment(state, build_payment_header(state))
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, build_payment_header(state))
   end
 
   def test_server_rejects_payment_for_different_resource
@@ -670,7 +671,7 @@ class X402ServerExactTest < Minitest::Test
     payment_header = build_payment_header(state, resource: "/resource/a")
 
     error = assert_raises(RuntimeError) do
-      X402::Server::Exact.settle_exact_payment(state, payment_header, resource: "/resource/b")
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header, resource: "/resource/b")
     end
 
     assert_equal "invalid_exact_svm_payload_resource_mismatch", error.message
@@ -681,11 +682,11 @@ class X402ServerExactTest < Minitest::Test
     payment_header = build_payment_header(state, resource: "/resource/a")
 
     assert_equal "unit-settlement",
-      X402::Server::Exact.settle_exact_payment(state, payment_header, resource: "/resource/a")
+      PayKit::Protocols::X402::Server::Exact.settle_exact_payment(state, payment_header, resource: "/resource/a")
   end
 
   def test_settlement_cache_evicts_entries_after_ttl
-    cache = X402::Server::Exact::SettlementCache.new(ttl_seconds: 120)
+    cache = PayKit::Protocols::X402::Server::Exact::SettlementCache.new(ttl_seconds: 120)
     now = Time.at(1_000)
 
     refute cache.duplicate?("tx-a", now: now)
@@ -694,7 +695,7 @@ class X402ServerExactTest < Minitest::Test
   end
 
   def test_payment_errors_are_normalized
-    body = X402::Server::Exact.payment_error_body(RuntimeError.new("sendTransaction RPC error: failed"))
+    body = PayKit::Protocols::X402::Server::Exact.payment_error_body(RuntimeError.new("sendTransaction RPC error: failed"))
 
     assert_equal(
       {
@@ -708,7 +709,7 @@ class X402ServerExactTest < Minitest::Test
 
   def test_protected_route_normalizes_invalid_payment_error_body
     state = build_state
-    status, headers, body = X402::Server::Exact.response_for(
+    status, headers, body = PayKit::Protocols::X402::Server::Exact.response_for(
       "/protected",
       {"PAYMENT-SIGNATURE" => "not base64"},
       state
@@ -744,7 +745,7 @@ class X402ServerExactTest < Minitest::Test
     singleton.define_method(:start, start)
     begin
       error = assert_raises(RuntimeError) do
-        X402::Server::Exact.send_transaction(state, "signed-transaction")
+        PayKit::Protocols::X402::Server::Exact.send_transaction(state, "signed-transaction")
       end
 
       assert_equal "sendTransaction RPC error: Transaction simulation failed", error.message
@@ -757,7 +758,7 @@ class X402ServerExactTest < Minitest::Test
     state = build_state
 
     with_net_http_response(JSON.generate("result" => "rpc-signature")) do
-      assert_equal "rpc-signature", X402::Server::Exact.send_transaction(state, "signed-transaction")
+      assert_equal "rpc-signature", PayKit::Protocols::X402::Server::Exact.send_transaction(state, "signed-transaction")
     end
   end
 
@@ -766,7 +767,7 @@ class X402ServerExactTest < Minitest::Test
 
     with_net_http_response(JSON.generate("result" => "")) do
       error = assert_raises(RuntimeError) do
-        X402::Server::Exact.send_transaction(state, "signed-transaction")
+        PayKit::Protocols::X402::Server::Exact.send_transaction(state, "signed-transaction")
       end
 
       assert_equal "sendTransaction returned empty signature", error.message
@@ -777,7 +778,7 @@ class X402ServerExactTest < Minitest::Test
     state = build_state
 
     with_net_http_response(JSON.generate("result" => {"value" => {"owner" => "token"}})) do
-      assert X402::Server::Exact.account_exists?(state, PAY_TO)
+      assert PayKit::Protocols::X402::Server::Exact.account_exists?(state, PAY_TO)
     end
   end
 
@@ -785,7 +786,7 @@ class X402ServerExactTest < Minitest::Test
     state = build_state
 
     with_net_http_response(JSON.generate("result" => {"value" => nil})) do
-      refute X402::Server::Exact.account_exists?(state, PAY_TO)
+      refute PayKit::Protocols::X402::Server::Exact.account_exists?(state, PAY_TO)
     end
   end
 
@@ -794,7 +795,7 @@ class X402ServerExactTest < Minitest::Test
 
     with_net_http_response(JSON.generate("error" => "plain rpc failure")) do
       error = assert_raises(RuntimeError) do
-        X402::Server::Exact.account_exists?(state, PAY_TO)
+        PayKit::Protocols::X402::Server::Exact.account_exists?(state, PAY_TO)
       end
 
       assert_equal "getAccountInfo RPC error: plain rpc failure", error.message
@@ -806,7 +807,7 @@ class X402ServerExactTest < Minitest::Test
 
     with_net_http_response("service unavailable", code: "503", success: false) do
       error = assert_raises(RuntimeError) do
-        X402::Server::Exact.account_exists?(state, PAY_TO)
+        PayKit::Protocols::X402::Server::Exact.account_exists?(state, PAY_TO)
       end
 
       assert_equal "getAccountInfo HTTP 503", error.message
@@ -816,19 +817,19 @@ class X402ServerExactTest < Minitest::Test
   def test_static_routes_return_expected_responses
     state = build_state
 
-    status, = X402::Server::Exact.response_for("/health", {}, state)
+    status, = PayKit::Protocols::X402::Server::Exact.response_for("/health", {}, state)
     assert_equal 200, status
 
-    status, _headers, body = X402::Server::Exact.response_for("/capabilities", {}, state)
+    status, _headers, body = PayKit::Protocols::X402::Server::Exact.response_for("/capabilities", {}, state)
     assert_equal 200, status
     assert_equal "ruby", body.fetch(:implementation)
 
-    status, headers, body = X402::Server::Exact.response_for("/exact", {}, state)
+    status, headers, body = PayKit::Protocols::X402::Server::Exact.response_for("/exact", {}, state)
     assert_equal 402, status
     assert headers.key?("PAYMENT-REQUIRED")
     assert_equal({error: "payment_required"}, body)
 
-    status, headers, body = X402::Server::Exact.response_for("/missing", {}, state)
+    status, headers, body = PayKit::Protocols::X402::Server::Exact.response_for("/missing", {}, state)
     assert_equal 404, status
     assert_empty headers
     assert_equal({error: "not_found"}, body)
@@ -836,7 +837,7 @@ class X402ServerExactTest < Minitest::Test
 
   def test_protected_route_returns_settlement_success
     state = build_state(sender: ->(_state, _transaction) { "settlement-signature" })
-    status, headers, body = X402::Server::Exact.response_for(
+    status, headers, body = PayKit::Protocols::X402::Server::Exact.response_for(
       "/protected",
       {"payment-signature" => build_payment_header(state, resource: "/protected")},
       state
@@ -867,7 +868,7 @@ class X402ServerExactTest < Minitest::Test
     # the interop cross-server scenarios harness searches for.
     server_a = build_state
     other_pay_to = "11111111111111111111111111111113"
-    server_b = X402::Server::Exact::Config.new(
+    server_b = PayKit::Protocols::X402::Server::Exact::Config.new(
       rpc_url: "http://127.0.0.1:8899",
       network: NETWORK,
       mint: ASSET,
@@ -879,7 +880,7 @@ class X402ServerExactTest < Minitest::Test
     )
     payment_header = build_payment_header(server_a, resource: "/protected")
 
-    status, _headers, body = X402::Server::Exact.response_for(
+    status, _headers, body = PayKit::Protocols::X402::Server::Exact.response_for(
       "/protected",
       {"PAYMENT-SIGNATURE" => payment_header},
       server_b
@@ -897,7 +898,7 @@ class X402ServerExactTest < Minitest::Test
 
   def test_protected_route_returns_payment_required_without_signature
     state = build_state
-    status, headers, body = X402::Server::Exact.response_for("/protected", {}, state)
+    status, headers, body = PayKit::Protocols::X402::Server::Exact.response_for("/protected", {}, state)
 
     assert_equal 402, status
     assert_equal({error: "payment_required"}, body)
@@ -916,19 +917,19 @@ class X402ServerExactTest < Minitest::Test
     )
 
     # Default route no longer routes here.
-    status, _headers, body = X402::Server::Exact.response_for("/protected", {}, state)
+    status, _headers, body = PayKit::Protocols::X402::Server::Exact.response_for("/protected", {}, state)
     assert_equal 404, status
     assert_equal({error: "not_found"}, body)
 
     # Challenge advertises the overridden resource URI.
-    status, headers, _body = X402::Server::Exact.response_for("/protected/expensive", {}, state)
+    status, headers, _body = PayKit::Protocols::X402::Server::Exact.response_for("/protected/expensive", {}, state)
     assert_equal 402, status
     challenge = JSON.parse(Base64.decode64(headers.fetch("PAYMENT-REQUIRED")))
     assert_equal "/protected/expensive", challenge.fetch("resource").fetch("uri")
 
     # Settlement emits the overridden header name and not the default.
     payment_header = build_payment_header(state, resource: "/protected/expensive")
-    status, headers, body = X402::Server::Exact.response_for(
+    status, headers, body = PayKit::Protocols::X402::Server::Exact.response_for(
       "/protected/expensive",
       {"PAYMENT-SIGNATURE" => payment_header},
       state
@@ -942,7 +943,7 @@ class X402ServerExactTest < Minitest::Test
   private
 
   def build_state_with_overrides(resource_path:, settlement_header:, sender:)
-    X402::Server::Exact::Config.new(
+    PayKit::Protocols::X402::Server::Exact::Config.new(
       rpc_url: "http://127.0.0.1:8899",
       network: NETWORK,
       mint: ASSET,
@@ -982,12 +983,12 @@ class X402ServerExactTest < Minitest::Test
     unless extra_offered_mints.nil?
       kwargs[:extra_offered_mints] = extra_offered_mints.split(",").map(&:strip).reject(&:empty?)
     end
-    X402::Server::Exact::Config.new(**kwargs)
+    PayKit::Protocols::X402::Server::Exact::Config.new(**kwargs)
   end
 
   def build_payment_header(state, resource: nil)
-    X402::Protocol::Schemes::Exact.build_exact_payment_signature(
-      requirement: X402::Server::Exact.exact_requirement(state, resource: resource),
+    X402ExactClientFixture.build_exact_payment_signature(
+      requirement: PayKit::Protocols::X402::Server::Exact.exact_requirement(state, resource: resource),
       client_secret_key: JSON.generate(secret(1)),
       recent_blockhash: BLOCKHASH,
       resource: {"type" => "http", "uri" => resource || "/protected"}
@@ -1024,10 +1025,10 @@ class X402ServerExactTest < Minitest::Test
 
   def resign_client_signature(transaction)
     bytes = transaction.b
-    signature_count, signatures_offset = X402::Protocol::Schemes::Exact.read_short_vec(bytes, 0)
+    signature_count, signatures_offset = PayKit::Protocols::X402::Protocol::Schemes::Exact.read_short_vec(bytes, 0)
     message_offset = signatures_offset + (signature_count * 64)
     message = bytes.byteslice(message_offset, bytes.bytesize - message_offset)
-    private_key = X402::Protocol::Schemes::Exact.private_key_from_json(JSON.generate(secret(1)))
+    private_key = PayKit::Protocols::X402::Protocol::Schemes::Exact.private_key_from_json(JSON.generate(secret(1)))
     # Client signer is at index 1 (fee_payer is 0).
     signature = private_key.sign(nil, message)
     bytes[signatures_offset + 64, 64] = signature
@@ -1067,9 +1068,9 @@ class X402ServerExactTest < Minitest::Test
     account_keys_offset = account_count_offset + 1
     blockhash_offset = account_keys_offset + (account_count * 32)
 
-    unless transaction.byteslice(account_keys_offset, account_count * 32).include?(X402::Protocol::Schemes::Exact.base58_decode(program))
+    unless transaction.byteslice(account_keys_offset, account_count * 32).include?(PayKit::Protocols::X402::Protocol::Schemes::Exact.base58_decode(program))
       transaction.setbyte(account_count_offset, account_count + 1)
-      transaction.insert(blockhash_offset, X402::Protocol::Schemes::Exact.base58_decode(program))
+      transaction.insert(blockhash_offset, PayKit::Protocols::X402::Protocol::Schemes::Exact.base58_decode(program))
       account_count += 1
     end
 
@@ -1087,9 +1088,9 @@ class X402ServerExactTest < Minitest::Test
     account_keys_offset = account_count_offset + 1
     blockhash_offset = account_keys_offset + (account_count * 32)
     extra_keys = [
-      X402::Protocol::Schemes::Exact.base58_decode(state.pay_to),
-      X402::Protocol::Schemes::Exact.base58_decode(X402::Protocol::Schemes::Exact::SYSTEM_PROGRAM),
-      X402::Protocol::Schemes::Exact.base58_decode(X402::Protocol::Schemes::Exact::ASSOCIATED_TOKEN_PROGRAM)
+      PayKit::Protocols::X402::Protocol::Schemes::Exact.base58_decode(state.pay_to),
+      PayKit::Protocols::X402::Protocol::Schemes::Exact.base58_decode(PayKit::Protocols::X402::Protocol::Schemes::Exact::SYSTEM_PROGRAM),
+      PayKit::Protocols::X402::Protocol::Schemes::Exact.base58_decode(PayKit::Protocols::X402::Protocol::Schemes::Exact::ASSOCIATED_TOKEN_PROGRAM)
     ]
 
     transaction.setbyte(account_count_offset, account_count + extra_keys.length)
@@ -1155,7 +1156,7 @@ class X402ServerExactTest < Minitest::Test
 
     # Add SystemProgram as a new static account key.
     transaction.setbyte(account_count_offset, account_count + 1)
-    transaction.insert(blockhash_offset, X402::Protocol::Schemes::Exact.base58_decode(X402::Protocol::Schemes::Exact::SYSTEM_PROGRAM))
+    transaction.insert(blockhash_offset, PayKit::Protocols::X402::Protocol::Schemes::Exact.base58_decode(PayKit::Protocols::X402::Protocol::Schemes::Exact::SYSTEM_PROGRAM))
     system_program_index = account_count
 
     new_account_count = account_count + 1

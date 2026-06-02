@@ -13,7 +13,7 @@ class HandlerPathsTest < Minitest::Test
       account_keys: [pubkey(1), request.recipient, PROGRAMS::SYSTEM_PROGRAM],
       instructions: [compiled_instruction(2, [0, 1], u32(2) + u64(1000))]
     ))
-    credential = Mpp::Protocol::Core::Credential.new(
+    credential = PayKit::Protocols::Mpp::Protocol::Core::Credential.new(
       challenge: challenges.create_challenge(request).to_echo,
       payload: {"transaction" => transaction}
     )
@@ -33,7 +33,7 @@ class HandlerPathsTest < Minitest::Test
       account_keys: [pubkey(1), request.recipient, PROGRAMS::SYSTEM_PROGRAM],
       instructions: [compiled_instruction(2, [0, 1], u32(2) + u64(1000))]
     ))
-    credential = Mpp::Protocol::Core::Credential.new(challenge: challenges.create_challenge(request).to_echo, payload: {"transaction" => transaction})
+    credential = PayKit::Protocols::Mpp::Protocol::Core::Credential.new(challenge: challenges.create_challenge(request).to_echo, payload: {"transaction" => transaction})
 
     response = handler.handle(credential.to_authorization_header, request)
 
@@ -44,8 +44,8 @@ class HandlerPathsTest < Minitest::Test
   def test_pull_rejects_wrong_surfpool_network
     handler = handler_with(FakeRpc.new, network: "devnet")
 
-    error = assert_raises(Mpp::VerificationError) do
-      handler.send(:check_network_blockhash, Mpp::Server::Charge::Handler::SURFPOOL_BLOCKHASH_PREFIX + "abc")
+    error = assert_raises(PayKit::Protocols::Mpp::VerificationError) do
+      handler.send(:check_network_blockhash, PayKit::Protocols::Mpp::Server::Charge::Handler::SURFPOOL_BLOCKHASH_PREFIX + "abc")
     end
     assert_match(/Signed against localnet/, error.message)
   end
@@ -53,7 +53,7 @@ class HandlerPathsTest < Minitest::Test
   def test_push_fetch_timeout_and_failed_meta
     request = charge_request
     timeout = handler_with(FakeRpc.new(transaction_response: nil), attempts: 1)
-    credential = Mpp::Protocol::Core::Credential.new(challenge: challenges.create_challenge(request).to_echo, payload: {"signature" => valid_signature})
+    credential = PayKit::Protocols::Mpp::Protocol::Core::Credential.new(challenge: challenges.create_challenge(request).to_echo, payload: {"signature" => valid_signature})
     response = timeout.handle(credential.to_authorization_header, request)
 
     assert_equal 402, response.status
@@ -68,7 +68,7 @@ class HandlerPathsTest < Minitest::Test
 
   def test_push_rejects_missing_transaction_metadata_and_wire
     request = charge_request
-    credential = Mpp::Protocol::Core::Credential.new(challenge: challenges.create_challenge(request).to_echo, payload: {"signature" => valid_signature})
+    credential = PayKit::Protocols::Mpp::Protocol::Core::Credential.new(challenge: challenges.create_challenge(request).to_echo, payload: {"signature" => valid_signature})
 
     missing_meta = handler_with(FakeRpc.new(transaction_response: {"transaction" => ["tx", "base64"]}))
     response = missing_meta.handle(credential.to_authorization_header, request)
@@ -84,14 +84,14 @@ class HandlerPathsTest < Minitest::Test
   private
 
   def challenges
-    @challenges ||= Mpp::Protocol::Core::ChallengeStore.new(secret_key: "secret", realm: "api")
+    @challenges ||= PayKit::Protocols::Mpp::Protocol::Core::ChallengeStore.new(secret_key: "secret", realm: "api")
   end
 
   def handler_with(rpc, network: "localnet", attempts: 40)
-    Mpp::Server::Charge::Handler.new(
+    PayKit::Protocols::Mpp::Server::Charge::Handler.new(
       challenges: challenges,
       rpc: rpc,
-      replay_store: Mpp::MemoryStore.new,
+      replay_store: PayKit::Protocols::Mpp::MemoryStore.new,
       network: network,
       confirmation_attempts: attempts,
       confirmation_delay: 0

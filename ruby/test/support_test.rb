@@ -7,16 +7,16 @@ class SupportTest < Minitest::Test
   include RubyMppTestHelpers
 
   def test_memory_store_and_file_store_replay_boundaries
-    memory = Mpp::MemoryStore.new
+    memory = PayKit::Protocols::Mpp::MemoryStore.new
     assert memory.put_if_absent("k", true)
     refute memory.put_if_absent("k", true)
 
     Dir.mktmpdir do |dir|
       path = File.join(dir, "store.json")
-      store = Mpp::FileStore.new(path)
+      store = PayKit::Protocols::Mpp::FileStore.new(path)
       assert store.put_if_absent("sig", true)
       refute store.put_if_absent("sig", true)
-      assert_instance_of Mpp::FileStore, Mpp::FileStore.new(path)
+      assert_instance_of PayKit::Protocols::Mpp::FileStore, PayKit::Protocols::Mpp::FileStore.new(path)
     end
   end
 

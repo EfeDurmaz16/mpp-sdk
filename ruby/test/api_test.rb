@@ -4,7 +4,7 @@ require_relative "test_helper"
 require "json"
 require "sinatra/base"
 require "rack/mock"
-require "mpp/sinatra"
+require "pay_kit/protocols/mpp/sinatra"
 
 # Stub RPC that never hits the network.
 class StubRpc
@@ -24,7 +24,7 @@ end
 class MethodsSolanaChargeTest < Minitest::Test
   def test_charge_factory_returns_a_method_with_static_config
     rpc = StubRpc.new
-    method = Mpp::Protocol::Solana.charge(
+    method = PayKit::Protocols::Mpp::Protocol::Solana.charge(
       recipient: "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY",
       currency: "USDC",
       network: "mainnet",
@@ -32,7 +32,7 @@ class MethodsSolanaChargeTest < Minitest::Test
       decimals: 6
     )
 
-    assert_instance_of Mpp::Protocol::Solana::ChargeMethod, method
+    assert_instance_of PayKit::Protocols::Mpp::Protocol::Solana::ChargeMethod, method
     assert_equal "USDC", method.currency
     assert_equal "mainnet", method.network
     assert_equal ::PayCore::Solana::Mints::TOKEN_PROGRAM, method.token_program
@@ -40,35 +40,35 @@ class MethodsSolanaChargeTest < Minitest::Test
   end
 
   def test_rpc_string_is_coerced_to_an_rpc_client
-    method = Mpp::Protocol::Solana.charge(recipient: "x", currency: "USDC", rpc: "https://example.invalid")
+    method = PayKit::Protocols::Mpp::Protocol::Solana.charge(recipient: "x", currency: "USDC", rpc: "https://example.invalid")
 
     assert_instance_of ::PayCore::Solana::Rpc, method.rpc
   end
 
   def test_blockhash_is_cached_for_a_short_window
     rpc = StubRpc.new
-    method = Mpp::Protocol::Solana.charge(recipient: "x", currency: "USDC", rpc: rpc)
+    method = PayKit::Protocols::Mpp::Protocol::Solana.charge(recipient: "x", currency: "USDC", rpc: rpc)
 
     3.times { method.latest_blockhash }
     assert_equal 1, rpc.calls
   end
 
   def test_decimals_are_derived_from_a_known_mint_symbol
-    method = Mpp::Protocol::Solana.charge(recipient: "x", currency: "USDC", rpc: StubRpc.new)
+    method = PayKit::Protocols::Mpp::Protocol::Solana.charge(recipient: "x", currency: "USDC", rpc: StubRpc.new)
     assert_equal 6, method.decimals
 
-    sol_method = Mpp::Protocol::Solana.charge(recipient: "x", currency: "SOL", rpc: StubRpc.new)
+    sol_method = PayKit::Protocols::Mpp::Protocol::Solana.charge(recipient: "x", currency: "SOL", rpc: StubRpc.new)
     assert_equal 9, sol_method.decimals
   end
 
   def test_decimals_can_be_overridden_explicitly
-    method = Mpp::Protocol::Solana.charge(recipient: "x", currency: "USDC", rpc: StubRpc.new, decimals: 9)
+    method = PayKit::Protocols::Mpp::Protocol::Solana.charge(recipient: "x", currency: "USDC", rpc: StubRpc.new, decimals: 9)
     assert_equal 9, method.decimals
   end
 
   def test_method_details_include_fee_payer_when_configured
     account = ::PayCore::Solana::Account.new(Array.new(64, 1))
-    method = Mpp::Protocol::Solana.charge(
+    method = PayKit::Protocols::Mpp::Protocol::Solana.charge(
       recipient: "x",
       currency: "USDC",
       rpc: StubRpc.new,
@@ -84,14 +84,14 @@ end
 
 class MppCreateTest < Minitest::Test
   def test_create_returns_a_server_instance
-    server = Mpp.create(
-      method: Mpp::Protocol::Solana.charge(recipient: "x", currency: "USDC", rpc: StubRpc.new),
+    server = PayKit::Protocols::Mpp.create(
+      method: PayKit::Protocols::Mpp::Protocol::Solana.charge(recipient: "x", currency: "USDC", rpc: StubRpc.new),
       secret_key: "secret",
-      replay_store: Mpp::MemoryStore.new
+      replay_store: PayKit::Protocols::Mpp::MemoryStore.new
     )
 
-    assert_instance_of Mpp::Server::Charge, server
-    assert_equal Mpp::DEFAULT_REALM, server.realm
+    assert_instance_of PayKit::Protocols::Mpp::Server::Charge, server
+    assert_equal PayKit::Protocols::Mpp::DEFAULT_REALM, server.realm
   end
 
   def test_charge_with_missing_auth_returns_a_challenge
@@ -99,9 +99,9 @@ class MppCreateTest < Minitest::Test
 
     result = server.charge(nil, amount: "1000", description: "Paid endpoint")
 
-    assert_instance_of Mpp::Challenge, result
+    assert_instance_of PayKit::Protocols::Mpp::Challenge, result
     assert_equal 402, result.status
-    assert result.headers.key?(Mpp::Protocol::Core::Headers::WWW_AUTHENTICATE)
+    assert result.headers.key?(PayKit::Protocols::Mpp::Protocol::Core::Headers::WWW_AUTHENTICATE)
     assert_equal "payment_required", result.body["error"]
   end
 
@@ -110,12 +110,12 @@ class MppCreateTest < Minitest::Test
 
     result = server.charge("Payment garbage", amount: "1000", description: "Paid endpoint")
 
-    assert_instance_of Mpp::Challenge, result
+    assert_instance_of PayKit::Protocols::Mpp::Challenge, result
     refute_nil result.reason
   end
 
   def test_method_details_can_be_built_for_an_alternate_currency
-    method = Mpp::Protocol::Solana.charge(recipient: "x", currency: "USDC", rpc: StubRpc.new)
+    method = PayKit::Protocols::Mpp::Protocol::Solana.charge(recipient: "x", currency: "USDC", rpc: StubRpc.new)
 
     usdt_details = method.method_details(currency: "USDT")
     assert_equal 6, usdt_details["decimals"]
@@ -127,22 +127,22 @@ class MppCreateTest < Minitest::Test
   end
 
   def test_charge_accepts_a_different_currency_per_call
-    server = Mpp.create(
-      method: Mpp::Protocol::Solana.charge(
+    server = PayKit::Protocols::Mpp.create(
+      method: PayKit::Protocols::Mpp::Protocol::Solana.charge(
         recipient: "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY",
         currency: "USDC",
         rpc: StubRpc.new
       ),
       secret_key: "secret",
       realm: "Test",
-      replay_store: Mpp::MemoryStore.new
+      replay_store: PayKit::Protocols::Mpp::MemoryStore.new
     )
 
     # Per-call override doesn't crash and still produces a Challenge for a
     # request with no auth. Wire-level verification (that the credential
     # carries USDT) is covered by the method_details test above.
     result = server.charge(nil, amount: "1000", description: "Pay in USDT", currency: "USDT")
-    assert_instance_of Mpp::Challenge, result
+    assert_instance_of PayKit::Protocols::Mpp::Challenge, result
   end
 
   def test_charge_threads_splits_through_method_details
@@ -153,7 +153,7 @@ class MppCreateTest < Minitest::Test
     # assert that the challenge body echoes the splits we passed through.
     result = server.charge(nil, amount: "1000", description: "split", splits: splits)
 
-    assert_instance_of Mpp::Challenge, result
+    assert_instance_of PayKit::Protocols::Mpp::Challenge, result
     # The challenge embeds the requested charge in the WWW-Authenticate header;
     # we only assert that splits appearing in the request did not raise.
     assert result.www_authenticate.include?("realm=\"Test\"")
@@ -162,20 +162,20 @@ class MppCreateTest < Minitest::Test
   private
 
   def build_server
-    Mpp.create(
-      method: Mpp::Protocol::Solana.charge(recipient: "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY", currency: "USDC", rpc: StubRpc.new),
+    PayKit::Protocols::Mpp.create(
+      method: PayKit::Protocols::Mpp::Protocol::Solana.charge(recipient: "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY", currency: "USDC", rpc: StubRpc.new),
       secret_key: "secret",
       realm: "Test",
-      replay_store: Mpp::MemoryStore.new
+      replay_store: PayKit::Protocols::Mpp::MemoryStore.new
     )
   end
 end
 
 class DecoratorTest < Minitest::Test
   def test_make_challenge_response_returns_a_rack_triplet
-    challenge = Mpp::Challenge.new(www_authenticate: "Payment realm=\"Test\"", body: {"error" => "payment_required"})
+    challenge = PayKit::Protocols::Mpp::Challenge.new(www_authenticate: "Payment realm=\"Test\"", body: {"error" => "payment_required"})
 
-    status, headers, body = Mpp::Server::Decorator.make_challenge_response(challenge)
+    status, headers, body = PayKit::Protocols::Mpp::Server::Decorator.make_challenge_response(challenge)
 
     assert_equal 402, status
     assert_equal "application/json", headers["content-type"]
@@ -185,9 +185,9 @@ class DecoratorTest < Minitest::Test
   # Regression: 402 responses must carry Cache-Control: no-store so that
   # proxies and browsers do not cache payment challenges.
   def test_make_challenge_response_includes_cache_control_no_store
-    challenge = Mpp::Challenge.new(www_authenticate: "Payment realm=\"Test\"", body: {"error" => "payment_required"})
+    challenge = PayKit::Protocols::Mpp::Challenge.new(www_authenticate: "Payment realm=\"Test\"", body: {"error" => "payment_required"})
 
-    _status, headers, _body = Mpp::Server::Decorator.make_challenge_response(challenge)
+    _status, headers, _body = PayKit::Protocols::Mpp::Server::Decorator.make_challenge_response(challenge)
 
     assert_equal "no-store", headers["cache-control"],
       "402 challenge response must include Cache-Control: no-store"
@@ -196,7 +196,7 @@ end
 
 class MiddlewareTest < Minitest::Test
   def test_passes_free_routes_through_unchanged
-    middleware = Mpp::Server::Middleware.new(free_app, handler: build_server)
+    middleware = PayKit::Protocols::Mpp::Server::Middleware.new(free_app, handler: build_server)
 
     status, _headers, body = middleware.call({"PATH_INFO" => "/health"})
 
@@ -205,19 +205,19 @@ class MiddlewareTest < Minitest::Test
   end
 
   def test_returns_402_when_route_declares_a_charge_without_auth
-    middleware = Mpp::Server::Middleware.new(paid_app, handler: build_server)
+    middleware = PayKit::Protocols::Mpp::Server::Middleware.new(paid_app, handler: build_server)
 
     status, headers, _body = middleware.call({"PATH_INFO" => "/paid"})
 
     assert_equal 402, status
-    assert headers.key?(Mpp::Protocol::Core::Headers::WWW_AUTHENTICATE)
+    assert headers.key?(PayKit::Protocols::Mpp::Protocol::Core::Headers::WWW_AUTHENTICATE)
   end
 
   # Regression: 402 challenge responses surfaced through the Rack middleware
   # must include Cache-Control: no-store so proxies and browsers cannot
   # cache payment challenges.
   def test_402_challenge_includes_cache_control_no_store
-    middleware = Mpp::Server::Middleware.new(paid_app, handler: build_server)
+    middleware = PayKit::Protocols::Mpp::Server::Middleware.new(paid_app, handler: build_server)
 
     _status, headers, _body = middleware.call({"PATH_INFO" => "/paid"})
 
@@ -226,14 +226,14 @@ class MiddlewareTest < Minitest::Test
   end
 
   def test_settlement_result_merges_headers_into_app_response
-    settlement = Mpp::Settlement.new(
+    settlement = PayKit::Protocols::Mpp::Settlement.new(
       signature: "sig",
       receipt_header: "Receipt token=abc",
       headers: {"payment-receipt" => "Receipt token=abc", "x-payment-settlement-signature" => "sig"}
     )
     stub_handler = Object.new
     stub_handler.define_singleton_method(:charge) { |_auth, **_| settlement }
-    middleware = Mpp::Server::Middleware.new(paid_app, handler: stub_handler)
+    middleware = PayKit::Protocols::Mpp::Server::Middleware.new(paid_app, handler: stub_handler)
 
     status, headers, body = middleware.call({"PATH_INFO" => "/paid"})
 
@@ -247,18 +247,18 @@ class MiddlewareTest < Minitest::Test
   def test_unexpected_handler_result_raises
     stub_handler = Object.new
     stub_handler.define_singleton_method(:charge) { |_auth, **_| Object.new }
-    middleware = Mpp::Server::Middleware.new(paid_app, handler: stub_handler)
+    middleware = PayKit::Protocols::Mpp::Server::Middleware.new(paid_app, handler: stub_handler)
 
-    assert_raises(Mpp::Error) { middleware.call({"PATH_INFO" => "/paid"}) }
+    assert_raises(PayKit::Protocols::Mpp::Error) { middleware.call({"PATH_INFO" => "/paid"}) }
   end
 
   private
 
   def build_server
-    Mpp.create(
-      method: Mpp::Protocol::Solana.charge(recipient: "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY", currency: "USDC", rpc: StubRpc.new),
+    PayKit::Protocols::Mpp.create(
+      method: PayKit::Protocols::Mpp::Protocol::Solana.charge(recipient: "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY", currency: "USDC", rpc: StubRpc.new),
       secret_key: "secret",
-      replay_store: Mpp::MemoryStore.new
+      replay_store: PayKit::Protocols::Mpp::MemoryStore.new
     )
   end
 
@@ -282,9 +282,9 @@ end
 
 class SinatraHelperTest < Minitest::Test
   def test_mpp_charge_halts_with_402_when_auth_missing
-    server = Mpp.create(method: Mpp::Protocol::Solana.charge(recipient: "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY", currency: "USDC", rpc: StubRpc.new), secret_key: "secret", realm: "T", replay_store: Mpp::MemoryStore.new)
+    server = PayKit::Protocols::Mpp.create(method: PayKit::Protocols::Mpp::Protocol::Solana.charge(recipient: "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY", currency: "USDC", rpc: StubRpc.new), secret_key: "secret", realm: "T", replay_store: PayKit::Protocols::Mpp::MemoryStore.new)
     app = Class.new(Sinatra::Base) do
-      helpers Mpp::Sinatra::Helpers
+      helpers PayKit::Protocols::Mpp::Sinatra::Helpers
       set :mpp_server, server
       set :show_exceptions, false
 
@@ -303,18 +303,18 @@ class SinatraHelperTest < Minitest::Test
 
   def test_mpp_charge_raises_when_no_server_is_configured
     app = Class.new(Sinatra::Base) do
-      helpers Mpp::Sinatra::Helpers
+      helpers PayKit::Protocols::Mpp::Sinatra::Helpers
       set :mpp_server, nil
       set :show_exceptions, false
       set :raise_errors, true
       get("/paid") { mpp_charge!(amount: "1000", description: "x") }
     end
 
-    assert_raises(Mpp::Error) { Rack::MockRequest.new(app).get("/paid") }
+    assert_raises(PayKit::Protocols::Mpp::Error) { Rack::MockRequest.new(app).get("/paid") }
   end
 
   def test_mpp_charge_injects_headers_on_settlement
-    settlement = Mpp::Settlement.new(
+    settlement = PayKit::Protocols::Mpp::Settlement.new(
       signature: "sig",
       receipt_header: "Receipt token=abc",
       headers: {"payment-receipt" => "Receipt token=abc", "x-payment-settlement-signature" => "sig"}
@@ -322,7 +322,7 @@ class SinatraHelperTest < Minitest::Test
     stub_server = Object.new
     stub_server.define_singleton_method(:charge) { |_auth, **_| settlement }
     app = Class.new(Sinatra::Base) do
-      helpers Mpp::Sinatra::Helpers
+      helpers PayKit::Protocols::Mpp::Sinatra::Helpers
       set :mpp_server, stub_server
       set :show_exceptions, false
       get "/paid" do
@@ -343,13 +343,13 @@ class SinatraHelperTest < Minitest::Test
     stub_server = Object.new
     stub_server.define_singleton_method(:charge) { |_auth, **_| Object.new }
     app = Class.new(Sinatra::Base) do
-      helpers Mpp::Sinatra::Helpers
+      helpers PayKit::Protocols::Mpp::Sinatra::Helpers
       set :mpp_server, stub_server
       set :show_exceptions, false
       set :raise_errors, true
       get("/paid") { mpp_charge!(amount: "1000", description: "x") }
     end
 
-    assert_raises(Mpp::Error) { Rack::MockRequest.new(app).get("/paid") }
+    assert_raises(PayKit::Protocols::Mpp::Error) { Rack::MockRequest.new(app).get("/paid") }
   end
 end

@@ -10,7 +10,7 @@ class B34Test < Minitest::Test
   include RubyMppTestHelpers
 
   def setup
-    @verifier = Mpp::Protocol::Solana::Verifier.new
+    @verifier = PayKit::Protocols::Mpp::Protocol::Solana::Verifier.new
   end
 
   def test_rejects_signature_credential_when_fee_payer_true
