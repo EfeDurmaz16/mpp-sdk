@@ -11,7 +11,7 @@ local assert_error = helper.assert_error
 
 local mpp_error = require('pay_kit.protocols.mpp.error')
 local charge = require('pay_kit.protocols.mpp.charge')
-local network_check = require('pay_kit.protocols.mpp.server.network_check')
+local network_check = require('pay_kit.solana.network_check')
 local types = require('pay_kit.protocol.core.types')
 local store = require('pay_kit.protocols.mpp.store')
 local expires = require('pay_kit.protocols.mpp.expires')
