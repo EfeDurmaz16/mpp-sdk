@@ -30,5 +30,32 @@
         "acceptedAmount": "1000"
       }
     }
+  },
+  {
+    "id": "x402-exact-v1-build",
+    "intent": "x402-exact",
+    "mode": "build-transaction",
+    "description": "Client builds a v1 X-PAYMENT envelope from the same devnet offer. Asserts the legacy shape: x402Version=1, top-level scheme=\"exact\", network=\"solana-devnet\" (devnet legacy slug), hasAccepted=false (v1 carries no accepted object), payloadHasTransaction=true.",
+    "input": {
+      "x402Version": 1,
+      "x402Offer": {
+        "scheme": "exact",
+        "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+        "amount": "1000",
+        "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+        "payTo": "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY"
+      },
+      "x402PinnedTransaction": "AA=="
+    },
+    "expect": {
+      "outcome": "accept",
+      "x402EnvelopeShape": {
+        "x402Version": 1,
+        "scheme": "exact",
+        "network": "solana-devnet",
+        "hasAccepted": false,
+        "payloadHasTransaction": true
+      }
+    }
   }
 ]

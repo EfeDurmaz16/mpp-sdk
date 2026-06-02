@@ -25,6 +25,29 @@
     }
   },
   {
+    "id": "x402-exact-v1-verify-accept",
+    "intent": "x402-exact",
+    "mode": "verify-transaction",
+    "description": "Server accepts a v1 X-PAYMENT whose scheme=\"exact\" and legacy network slug \"solana-devnet\" resolve to the configured devnet route. v1 has no accepted object, so the server gate is scheme + network only.",
+    "input": {
+      "x402PaymentHeader": "eyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJzb2xhbmEtZGV2bmV0IiwieDQwMlZlcnNpb24iOjEsInBheWxvYWQiOnsidHJhbnNhY3Rpb24iOiJBQT09In19",
+      "x402ServerNetwork": "devnet",
+      "x402ServerRecipient": "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY",
+      "x402ServerCurrency": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+      "x402ServerAmount": "1000"
+    },
+    "expect": {
+      "outcome": "accept",
+      "x402EnvelopeShape": {
+        "x402Version": 1,
+        "scheme": "exact",
+        "network": "solana-devnet",
+        "hasAccepted": false,
+        "payloadHasTransaction": true
+      }
+    }
+  },
+  {
     "id": "x402-exact-unknown-version-reject",
     "intent": "x402-exact",
     "mode": "verify-transaction",
@@ -40,6 +63,24 @@
       "outcome": "reject",
       "rejectCode": "unsupported-version",
       "rejectReason": "x402Version 3 is neither v1 nor v2"
+    }
+  },
+  {
+    "id": "x402-exact-v1-network-mismatch-reject",
+    "intent": "x402-exact",
+    "mode": "verify-transaction",
+    "description": "Server configured for mainnet rejects a v1 X-PAYMENT whose legacy network slug \"solana-devnet\" resolves to devnet. The credential was signed for the wrong network; reject category is wrong-network.",
+    "input": {
+      "x402PaymentHeader": "eyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJzb2xhbmEtZGV2bmV0IiwieDQwMlZlcnNpb24iOjEsInBheWxvYWQiOnsidHJhbnNhY3Rpb24iOiJBQT09In19",
+      "x402ServerNetwork": "mainnet",
+      "x402ServerRecipient": "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY",
+      "x402ServerCurrency": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "x402ServerAmount": "1000"
+    },
+    "expect": {
+      "outcome": "reject",
+      "rejectCode": "wrong-network",
+      "rejectReason": "v1 credential network solana-devnet does not match mainnet server"
     }
   }
 ]
