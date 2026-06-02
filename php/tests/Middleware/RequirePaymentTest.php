@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace PayKit\Tests\Middleware;
 
 use Nyholm\Psr7\Factory\Psr17Factory;
-use PayKit\Client;
+use PayKit\PayKit;
 use PayKit\Config;
 use PayKit\PayCore\Currency;
 use PayKit\Gate;
@@ -25,12 +25,12 @@ use Psr\Http\Server\RequestHandlerInterface;
 
 final class RequirePaymentTest extends TestCase
 {
-    private Client $client;
+    private PayKit $client;
     private Psr17Factory $factory;
 
     protected function setUp(): void
     {
-        $this->client = new Client(new Config(
+        $this->client = new PayKit(new Config(
             network: Network::SolanaDevnet,
             operator: new Operator(recipient: Signer::generate()->pubkey(), signer: Signer::generate(), feePayer: true),
             preflight: false,

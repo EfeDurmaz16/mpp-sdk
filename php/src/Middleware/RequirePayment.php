@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace PayKit\Middleware;
 
 use Closure;
-use PayKit\Client;
+use PayKit\PayKit;
 use PayKit\Exception\InvalidProofException;
 use PayKit\Exception\PaymentRequiredException;
 use PayKit\Gate;
@@ -46,7 +46,7 @@ final class RequirePayment implements MiddlewareInterface
      * @param Gate|string|Closure(ServerRequestInterface):Gate $gateRef
      */
     public function __construct(
-        private readonly Client $client,
+        private readonly PayKit $client,
         private readonly Gate|string|Closure $gateRef,
         private readonly ?Pricing $pricing = null,
         ?MppAdapter $mpp = null,
