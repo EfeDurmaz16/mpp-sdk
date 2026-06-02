@@ -175,6 +175,213 @@ func TestBuildPaymentHeaderNilEntry(t *testing.T) {
 	}
 }
 
+// TestBuildPaymentHeaderV1Envelope proves the legacy v1 producer emits an
+// X-PAYMENT envelope with x402Version=1, top-level scheme="exact", the
+// legacy network string, no `accepted`, and a proof byte-for-byte
+// identical to the v2 producer's. Mirrors Rust build_payment_header_v1.
+func TestBuildPaymentHeaderV1Envelope(t *testing.T) {
+	signer := testutil.NewPrivateKey()
+	e := entry(testutil.NewPrivateKey().PublicKey().String(), "100000", mainnetCAIP2)
+
+	header, err := BuildPaymentHeaderV1(context.Background(), signer, testutil.NewFakeRPC(), &e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(header)
+	if err != nil {
+		t.Fatalf("v1 header is not STANDARD base64: %v", err)
+	}
+
+	// Assert the wire shape directly so absent fields are proven absent.
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(wire["x402Version"]); got != "1" {
+		t.Errorf("x402Version: got %s want 1", got)
+	}
+	if got := string(wire["scheme"]); got != `"exact"` {
+		t.Errorf("scheme: got %s want \"exact\"", got)
+	}
+	if got := string(wire["network"]); got != `"solana"` {
+		t.Errorf("network: got %s want \"solana\" (mainnet legacy)", got)
+	}
+	if _, present := wire["accepted"]; present {
+		t.Error("v1 envelope must omit accepted")
+	}
+	if _, present := wire["resource"]; present {
+		t.Error("v1 envelope must omit resource")
+	}
+
+	var cred x402.Credential
+	if err := json.Unmarshal(raw, &cred); err != nil {
+		t.Fatal(err)
+	}
+	if cred.Accepted != nil {
+		t.Error("v1 credential.Accepted must be nil")
+	}
+	if _, err := solanatx.DecodeTransactionBase64(cred.Payload.Transaction); err != nil {
+		t.Fatalf("v1 payload is not a decodable signed tx: %v", err)
+	}
+}
+
+// TestBuildPaymentHeaderV1DevnetNetwork proves a devnet offer maps to the
+// "solana-devnet" legacy network string (section 5 mapping).
+func TestBuildPaymentHeaderV1DevnetNetwork(t *testing.T) {
+	signer := testutil.NewPrivateKey()
+	e := entry(testutil.NewPrivateKey().PublicKey().String(), "100000", devnetCAIP2)
+
+	header, err := BuildPaymentHeaderV1(context.Background(), signer, testutil.NewFakeRPC(), &e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := base64.StdEncoding.DecodeString(header)
+	var cred x402.Credential
+	if err := json.Unmarshal(raw, &cred); err != nil {
+		t.Fatal(err)
+	}
+	if cred.Network != "solana-devnet" {
+		t.Errorf("devnet legacy network: got %q want %q", cred.Network, "solana-devnet")
+	}
+}
+
+// parsedOffer round-trips an offer JSON object through AcceptsEntry's
+// UnmarshalJSON so the original cluster/network slugs survive (the struct
+// helper `entry` cannot, since it sets the normalized Network directly).
+func parsedOffer(t *testing.T, fields string) x402.AcceptsEntry {
+	t.Helper()
+	payTo := testutil.NewPrivateKey().PublicKey().String()
+	mint := testutil.NewPrivateKey().PublicKey().String()
+	raw := fmt.Sprintf(
+		`{"protocol":"x402","scheme":"exact",%s,"asset":%q,"amount":"100000","payTo":%q,"maxTimeoutSeconds":300,"extra":{"decimals":6,"recentBlockhash":%q}}`,
+		fields, mint, payTo, blockhash(),
+	)
+	var e x402.AcceptsEntry
+	if err := json.Unmarshal([]byte(raw), &e); err != nil {
+		t.Fatalf("parse offer: %v", err)
+	}
+	return e
+}
+
+func v1Network(t *testing.T, e x402.AcceptsEntry) string {
+	t.Helper()
+	header, err := BuildPaymentHeaderV1(context.Background(), testutil.NewPrivateKey(), testutil.NewFakeRPC(), &e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := base64.StdEncoding.DecodeString(header)
+	var cred x402.Credential
+	if err := json.Unmarshal(raw, &cred); err != nil {
+		t.Fatal(err)
+	}
+	return cred.Network
+}
+
+// TestBuildPaymentHeaderV1NetworkMapping proves the legacy v1 network
+// string follows the Rust v1_network_for_requirements two-bucket mapping
+// off the OFFER's original slug (cluster preferred over network): only
+// devnet in any of its forms maps to "solana-devnet"; localnet, mainnet,
+// testnet, and unknown all map to "solana". This is the localnet-vs-devnet
+// parity case the Go normalization (localnet -> devnet CAIP-2) would
+// otherwise break.
+func TestBuildPaymentHeaderV1NetworkMapping(t *testing.T) {
+	cases := []struct {
+		name   string
+		fields string
+		want   string
+	}{
+		{"localnet slug", `"network":"localnet"`, "solana"},
+		{"devnet slug", `"network":"devnet"`, "solana-devnet"},
+		{"solana-devnet slug", `"network":"solana-devnet"`, "solana-devnet"},
+		{"devnet CAIP-2", `"network":"solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"`, "solana-devnet"},
+		{"mainnet slug", `"network":"mainnet"`, "solana"},
+		{"mainnet CAIP-2", `"network":"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"`, "solana"},
+		{"testnet slug", `"network":"testnet"`, "solana"},
+		// Cluster wins over network (Rust selector precedence): a
+		// cluster=devnet offer maps to devnet even when network=solana.
+		{"cluster over network", `"cluster":"devnet","network":"solana"`, "solana-devnet"},
+		// And a cluster=localnet offer maps to "solana" even when the
+		// network slug is devnet.
+		{"cluster localnet over network devnet", `"cluster":"localnet","network":"devnet"`, "solana"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := parsedOffer(t, tc.fields)
+			if got := v1Network(t, e); got != tc.want {
+				t.Errorf("v1 network for %s: got %q want %q", tc.fields, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildPaymentHeaderV1NilEntry proves the nil guard fires.
+func TestBuildPaymentHeaderV1NilEntry(t *testing.T) {
+	if _, err := BuildPaymentHeaderV1(context.Background(), testutil.NewPrivateKey(), testutil.NewFakeRPC(), nil); err == nil {
+		t.Fatal("expected error for nil entry")
+	}
+}
+
+// TestParseChallengeV1FlatRequirements proves the client parses a legacy
+// v1 challenge from the X-PAYMENT-REQUIRED header: a raw-JSON flat
+// PaymentRequirements object (using recipient/maxAmountRequired/currency,
+// no base64, no accepts[] wrapper). Mirrors the Rust v1 challenge arm.
+func TestParseChallengeV1FlatRequirements(t *testing.T) {
+	payTo := testutil.NewPrivateKey().PublicKey().String()
+	mint := testutil.NewPrivateKey().PublicKey().String()
+	flat := fmt.Sprintf(
+		`{"scheme":"exact","network":"solana-devnet","recipient":%q,"maxAmountRequired":"100000","currency":%q,"maxTimeoutSeconds":300}`,
+		payTo, mint,
+	)
+	h := http.Header{}
+	h.Set("X-PAYMENT-REQUIRED", flat)
+
+	got, ok := ParseChallenge(h, nil, ChallengeSelection{})
+	if !ok || got == nil {
+		t.Fatal("expected the v1 flat PaymentRequirements to parse")
+	}
+	// The v1 flat aliases must collapse onto the canonical fields.
+	if got.PayTo != payTo {
+		t.Errorf("recipient->payTo: got %q want %q", got.PayTo, payTo)
+	}
+	if got.Amount != "100000" {
+		t.Errorf("maxAmountRequired->amount: got %q want 100000", got.Amount)
+	}
+	if got.Asset != mint {
+		t.Errorf("currency->asset: got %q want %q", got.Asset, mint)
+	}
+	// Legacy network string normalizes to CAIP-2.
+	if got.Network != devnetCAIP2 {
+		t.Errorf("network normalize: got %q want %q", got.Network, devnetCAIP2)
+	}
+}
+
+// TestParseChallengePrefersV2OverV1 proves the v2 PAYMENT-REQUIRED header
+// wins when both v1 and v2 challenge headers are present, matching the
+// Rust strict order (payment.rs:227-249).
+func TestParseChallengePrefersV2OverV1(t *testing.T) {
+	v2Mint := testutil.NewPrivateKey().PublicKey().String()
+	v2Entry := entry(v2Mint, "100000", mainnetCAIP2)
+	v2Body, _ := json.Marshal(challengeEnvelope{X402Version: 2, Accepts: []x402.AcceptsEntry{v2Entry}})
+
+	v1Mint := testutil.NewPrivateKey().PublicKey().String()
+	v1Flat := fmt.Sprintf(
+		`{"scheme":"exact","network":"solana","recipient":%q,"maxAmountRequired":"999999","currency":%q}`,
+		testutil.NewPrivateKey().PublicKey().String(), v1Mint,
+	)
+
+	h := http.Header{}
+	h.Set(paymentRequiredHeader, base64.StdEncoding.EncodeToString(v2Body))
+	h.Set("X-PAYMENT-REQUIRED", v1Flat)
+
+	got, ok := ParseChallenge(h, nil, ChallengeSelection{})
+	if !ok || got == nil {
+		t.Fatal("expected a parsed challenge")
+	}
+	if got.Asset != v2Mint {
+		t.Errorf("expected the v2 offer to win, got asset %q", got.Asset)
+	}
+}
+
 func TestCurrencyMatches(t *testing.T) {
 	mint := testutil.NewPrivateKey().PublicKey().String()
 	if !currencyMatches(mint, mint) {

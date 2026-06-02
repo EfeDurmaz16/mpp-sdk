@@ -56,7 +56,10 @@ type X402EnvelopeShape struct {
 	AcceptedAmount        string `json:"acceptedAmount,omitempty"`
 }
 
-const x402VersionV2 = 2
+const (
+	x402VersionV1 = 1
+	x402VersionV2 = 2
+)
 
 // runX402 dispatches an x402-exact vector by mode. build-transaction
 // produces an envelope and emits its shape; verify-transaction runs the
@@ -106,7 +109,7 @@ func buildX402Envelope(vector Vector) (*X402EnvelopeShape, error) {
 	if in.X402Offer == nil {
 		return nil, fmt.Errorf("x402 build vector is missing input.x402Offer")
 	}
-	if in.X402Version != x402VersionV2 {
+	if in.X402Version != x402VersionV1 && in.X402Version != x402VersionV2 {
 		return nil, fmt.Errorf("x402 build vector has unsupported input.x402Version %d", in.X402Version)
 	}
 	tx := in.X402PinnedTransaction
@@ -118,12 +121,24 @@ func buildX402Envelope(vector Vector) (*X402EnvelopeShape, error) {
 		return nil, err
 	}
 
-	// Mirrors client.BuildPaymentHeader: no top-level scheme/network,
-	// accepted echoes the selected offer verbatim.
-	credential := x402.Credential{
-		X402Version: x402VersionV2,
-		Payload:     x402.CredentialPayload{Transaction: tx},
-		Accepted:    entry,
+	var credential x402.Credential
+	if in.X402Version == x402VersionV1 {
+		// Mirrors client.BuildPaymentHeaderV1: top-level scheme="exact",
+		// legacy network slug from the offer, NO accepted object.
+		credential = x402.Credential{
+			X402Version: x402VersionV1,
+			Scheme:      "exact",
+			Network:     entry.LegacyNetworkString(),
+			Payload:     x402.CredentialPayload{Transaction: tx},
+		}
+	} else {
+		// Mirrors client.BuildPaymentHeader: no top-level scheme/network,
+		// accepted echoes the selected offer verbatim.
+		credential = x402.Credential{
+			X402Version: x402VersionV2,
+			Payload:     x402.CredentialPayload{Transaction: tx},
+			Accepted:    entry,
+		}
 	}
 
 	raw, err := json.Marshal(credential)
@@ -216,6 +231,16 @@ func verifyX402Envelope(vector Vector) (*X402EnvelopeShape, error) {
 	expectedNetwork := caip2NetworkForCluster(in.X402ServerNetwork)
 
 	switch shape.X402Version {
+	case x402VersionV1:
+		// v1 gate: scheme must be "exact"; legacy network slug must
+		// normalize to the server's configured network. No accepted object,
+		// so the route binding is scheme + network only.
+		if shape.Scheme != "exact" {
+			return nil, fmt.Errorf("invalid payload: unexpected scheme %q", shape.Scheme)
+		}
+		if caip2NetworkForCluster(shape.Network) != expectedNetwork {
+			return nil, fmt.Errorf("network mismatch: expected %s, got %s", expectedNetwork, shape.Network)
+		}
 	case x402VersionV2:
 		// v2 gate: accepted must exist, its network/amount/recipient/asset
 		// must all match the route (accepted-vs-route comparison).

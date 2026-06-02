@@ -50,7 +50,7 @@ func (c *Client) RequireFunc(resolve GateFunc) func(http.Handler) http.Handler {
 				Path:          r.URL.Path,
 				Host:          r.Host,
 				Authorization: r.Header.Get("Authorization"),
-				PaymentSig:    r.Header.Get("Payment-Signature"),
+				PaymentSig:    paymentSigFromRequest(r),
 				Gate:          &gate,
 			})
 			if err != nil {
@@ -93,13 +93,27 @@ func IsPaidFor(ctx context.Context, gate Gate) bool {
 	return gate.Name == "" || pmt.Gate == gate.Name
 }
 
+// paymentSigFromRequest reads the x402 payment credential from the v2
+// `Payment-Signature` header, falling back to the legacy v1 `X-PAYMENT`
+// header for backward compatibility. The adapter branches on the
+// decoded envelope's x402Version, so the same base64 value is forwarded
+// regardless of which header carried it. Mirrors the Rust spine reading
+// both X402_V2_PAYMENT_HEADER and X402_V1_PAYMENT_HEADER. http.Header
+// matching is case-insensitive via canonicalization.
+func paymentSigFromRequest(r *http.Request) string {
+	if sig := r.Header.Get("Payment-Signature"); sig != "" {
+		return sig
+	}
+	return r.Header.Get("X-PAYMENT")
+}
+
 func (c *Client) pickAdapter(gate *Gate, r *http.Request) Adapter {
 	accept := gate.Accept
 	if len(accept) == 0 {
 		accept = c.Config.Accept
 	}
 	auth := r.Header.Get("Authorization")
-	sig := r.Header.Get("Payment-Signature")
+	sig := paymentSigFromRequest(r)
 	for _, s := range accept {
 		switch s {
 		case X402:
