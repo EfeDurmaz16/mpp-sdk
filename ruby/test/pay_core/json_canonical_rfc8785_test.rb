@@ -5,7 +5,7 @@
 # so RFC 8785 (canonical JSON) and RFC 3339 (expires parser) live in
 # dedicated files. Battle-tested vector imports are tracked separately
 # (see follow-up issue referenced on the same PR thread).
-require_relative "test_helper"
+require_relative "../test_helper"
 require "base64"
 
 class JsonCanonicalRfc8785Test < Minitest::Test

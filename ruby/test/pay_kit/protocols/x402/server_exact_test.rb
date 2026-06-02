@@ -2,9 +2,9 @@
 
 require "base64"
 require "json"
-require_relative "test_helper"
+require_relative "../../../test_helper"
 require "pay_kit"
-require_relative "support/x402_exact_client_fixture"
+require_relative "../../../support/x402_exact_client_fixture"
 
 class X402ServerExactTest < Minitest::Test
   NETWORK = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"

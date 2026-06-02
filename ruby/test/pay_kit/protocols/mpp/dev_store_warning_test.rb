@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require_relative "../test_helper"
+require_relative "../../../test_helper"
 
 # Regression for: PayKit::Protocols::Mpp.create must loudly warn when no replay_store is
 # supplied (the default volatile MemoryStore is dev-only and unsafe in

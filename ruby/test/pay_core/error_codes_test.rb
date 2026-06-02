@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require_relative "test_helper"
+require_relative "../test_helper"
 
 class ErrorCodesTest < Minitest::Test
   include ::PayCore::ErrorCodes

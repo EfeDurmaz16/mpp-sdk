@@ -5,7 +5,7 @@
 # (canonical JSON) and RFC 3339 (expires) live in dedicated files.
 # Battle-tested vector imports are tracked separately (see follow-up
 # issue referenced on the same PR thread).
-require_relative "test_helper"
+require_relative "../test_helper"
 
 class ExpiresRfc3339Test < Minitest::Test
   include RubyMppTestHelpers

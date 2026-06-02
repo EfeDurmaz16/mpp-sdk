@@ -341,6 +341,27 @@ class PayKitConfigTest < Minitest::Test
     assert preflight_called, "Preflight.run must run when neither flag opts out"
   end
 
+  def test_unknown_network_symbol_raises
+    assert_raises(PayKit::ConfigurationError) do
+      PayKit.configure { |c| c.network = :ethereum_mainnet }
+    end
+  end
+
+  def test_x402_scheme_setter_accepts_exact
+    PayKit.configure do |c|
+      c.pay_to = "AyNAa2VPe2t5pgg8M61iE6kqMudkV98zsT4rkAZuU6tj"
+      c.mpp.secret = "x"
+      c.x402.scheme = :exact
+    end
+    assert_equal :exact, PayKit.config.x402.scheme
+  end
+
+  def test_x402_unknown_scheme_raises
+    assert_raises(PayKit::ConfigurationError) do
+      PayKit.configure { |c| c.x402.scheme = :batch }
+    end
+  end
+
   private
 
   # Replace `PayKit::Preflight.run` with a no-op spy for the duration of

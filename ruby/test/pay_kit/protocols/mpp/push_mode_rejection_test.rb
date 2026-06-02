@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
-require_relative "test_helper"
+require_relative "../../../test_helper"
 
 # B34: push-mode credentials (`type=signature`) must be rejected on routes
 # that use a server-side fee payer. Verified directly against the Solana
 # verifier so the reject runs before any RPC call. Mirrors the Rust spine
 # unit test and matches PHP #100 / Python #106.
-class B34Test < Minitest::Test
+class PushModeRejectionTest < Minitest::Test
   include RubyMppTestHelpers
 
   def setup
