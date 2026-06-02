@@ -123,7 +123,7 @@ class PayKitGateTest < Minitest::Test
     end
   end
 
-  def test_mixed_denominations_raise
+  def test_mixed_currencies_raise
     PayKitTestHelpers.with_config(accept: %i[mpp]) do
       assert_raises(PayKit::ConfigurationError) do
         PayKit::Gate.build(

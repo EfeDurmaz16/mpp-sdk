@@ -18,7 +18,7 @@ class PayKitBranchCoverageTest < Minitest::Test
 
   def test_price_to_s
     PayKitTestHelpers.with_config do
-      price = PayKit::Price.build(denom: :USD, amount: "1.00", coins: [:USDC, :USDT])
+      price = PayKit::Price.build(currency: :USD, amount: "1.00", coins: [:USDC, :USDT])
       assert_includes price.to_s, "USD 1.00"
       assert_includes price.to_s, "USDC"
     end
@@ -26,7 +26,7 @@ class PayKitBranchCoverageTest < Minitest::Test
 
   def test_price_primary_coin_returns_first_settlement_coin
     PayKitTestHelpers.with_config do
-      price = PayKit::Price.build(denom: :USD, amount: "1.00", coins: [:USDC, :USDT])
+      price = PayKit::Price.build(currency: :USD, amount: "1.00", coins: [:USDC, :USDT])
       assert_equal :USDC, price.primary_coin
     end
   end
@@ -45,7 +45,7 @@ class PayKitBranchCoverageTest < Minitest::Test
   def test_price_rejects_empty_amount_string
     assert_raises(PayKit::ConfigurationError) do
       PayKit::Price.new(
-        denom: :USD,
+        currency: :USD,
         amount: "",
         settlements: [PayKit::Settlement.new(coin: :USDC, amount: "1.00")]
       )
@@ -54,7 +54,7 @@ class PayKitBranchCoverageTest < Minitest::Test
 
   def test_price_rejects_non_settlement_in_settlements_array
     assert_raises(PayKit::ConfigurationError) do
-      PayKit::Price.new(denom: :USD, amount: "1.00", settlements: ["not_a_settlement"])
+      PayKit::Price.new(currency: :USD, amount: "1.00", settlements: ["not_a_settlement"])
     end
   end
 
@@ -73,8 +73,8 @@ class PayKitBranchCoverageTest < Minitest::Test
   def test_eur_and_gbp_helpers
     PayKitTestHelpers.with_config(stablecoins: %i[USDC]) do
       helper = Class.new { include PayKit::Helpers::Pricing }.new
-      assert_equal :EUR, helper.eur("1.00", :USDC).denom
-      assert_equal :GBP, helper.gbp("1.00", :USDC).denom
+      assert_equal :EUR, helper.eur("1.00", :USDC).currency
+      assert_equal :GBP, helper.gbp("1.00", :USDC).currency
     end
   end
 
@@ -92,7 +92,7 @@ class PayKitBranchCoverageTest < Minitest::Test
 
   def test_fee_builder_rejects_non_string_recipient
     PayKitTestHelpers.with_config do
-      price = PayKit::Price.build(denom: :USD, amount: "1.00", coins: [:USDC])
+      price = PayKit::Price.build(currency: :USD, amount: "1.00", coins: [:USDC])
       assert_raises(PayKit::ConfigurationError) do
         PayKit::FeeBuilder.from_hash({123 => price}, kind: :within)
       end
@@ -107,7 +107,7 @@ class PayKitBranchCoverageTest < Minitest::Test
 
   def test_fee_within_and_on_top_predicates
     PayKitTestHelpers.with_config do
-      price = PayKit::Price.build(denom: :USD, amount: "1.00", coins: [:USDC])
+      price = PayKit::Price.build(currency: :USD, amount: "1.00", coins: [:USDC])
       within = PayKit::Fee.new(recipient: "x", price: price, kind: :within)
       on_top = PayKit::Fee.new(recipient: "y", price: price, kind: :on_top)
       assert within.within?
