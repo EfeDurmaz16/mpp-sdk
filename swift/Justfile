@@ -1,0 +1,40 @@
+set shell := ["bash", "-uc"]
+
+# Line-coverage gate. Shared across the local Justfile and CI so the
+# threshold lives in one place.
+coverage_threshold := "90"
+
+default:
+    @just --list
+
+# Build the umbrella + all targets.
+build:
+    swift build
+
+# Run the full test suite (PayCore + Mpp + X402).
+test:
+    swift test
+
+# Format with swift-format if available (no-op otherwise).
+fmt:
+    @if command -v swift-format >/dev/null 2>&1; then \
+        swift-format -i -r Sources Tests; \
+    else \
+        echo "swift-format not installed; skipping"; \
+    fi
+
+# Run tests with coverage and enforce the {{coverage_threshold}}% line gate
+# over Sources (Tests and .build excluded).
+test-cover:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    swift test --enable-code-coverage
+    prof="$(find .build -name default.profdata | head -1)"
+    xctest="$(find .build -name '*.xctest' | head -1)"
+    exe="${xctest}/Contents/MacOS/$(basename "${xctest%.xctest}")"
+    pct="$(xcrun llvm-cov export "$exe" -instr-profile "$prof" \
+        -ignore-filename-regex='(Tests|\.build)' -summary-only \
+        | python3 -c "import sys,json; print('%.2f' % json.load(sys.stdin)['data'][0]['totals']['lines']['percent'])")"
+    echo "Swift line coverage: ${pct}% (threshold {{coverage_threshold}}%)"
+    awk -v p="$pct" -v t="{{coverage_threshold}}" 'BEGIN { exit (p+0 >= t+0) ? 0 : 1 }' \
+        || { echo "coverage ${pct}% below threshold {{coverage_threshold}}%"; exit 1; }

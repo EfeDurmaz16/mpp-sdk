@@ -8,19 +8,30 @@ on:
 
 jobs:
   test-swift:
-    name: Swift tests
+    name: Swift tests + 90% coverage
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Run tests with coverage
+      - name: Run tests with coverage and enforce 90% line gate
         working-directory: swift
-        run: swift test --enable-code-coverage
+        run: |
+          set -euo pipefail
+          swift test --enable-code-coverage
+          prof="$(find .build -name default.profdata | head -1)"
+          xctest="$(find .build -name '*.xctest' | head -1)"
+          exe="${xctest}/Contents/MacOS/$(basename "${xctest%.xctest}")"
+          pct="$(xcrun llvm-cov export "$exe" -instr-profile "$prof" \
+              -ignore-filename-regex='(Tests|\.build)' -summary-only \
+              | python3 -c "import sys,json; print('%.2f' % json.load(sys.stdin)['data'][0]['totals']['lines']['percent'])")"
+          echo "Swift line coverage: ${pct}% (threshold 90%)"
+          awk -v p="$pct" -v t="90" 'BEGIN { exit (p+0 >= t+0) ? 0 : 1 }' \
+              || { echo "::error::coverage ${pct}% below 90% threshold"; exit 1; }
       - name: Upload Swift coverage
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: swift-coverage
-          path: swift/.build/debug/codecov/
+          path: swift/.build/*/debug/codecov/
           if-no-files-found: ignore
 
   interop-swift:
