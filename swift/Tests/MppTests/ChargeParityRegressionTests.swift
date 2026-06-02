@@ -44,7 +44,7 @@ struct ChargeParityRegressionTests {
         let credData = try Base64URL.decode(credEncoded)
         let credential = try JSONDecoder().decode(PaymentCredential.self, from: credData)
         guard case let .transaction(tx) = credential.payload else {
-            throw MppError.invalidTransaction("expected transaction payload")
+            throw PayCoreError.invalidTransaction("expected transaction payload")
         }
         return tx
     }

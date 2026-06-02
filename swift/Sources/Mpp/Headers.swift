@@ -9,19 +9,19 @@ public enum MppHeaders {
         let params = try parseAuthParams(rest)
 
         guard let request = params["request"], !request.isEmpty else {
-            throw MppError.missingField("request")
+            throw PayCoreError.missingField("request")
         }
         guard let id = params["id"], !id.isEmpty else {
-            throw MppError.missingField("id")
+            throw PayCoreError.missingField("id")
         }
         guard let realm = params["realm"], !realm.isEmpty else {
-            throw MppError.missingField("realm")
+            throw PayCoreError.missingField("realm")
         }
         guard let method = params["method"], !method.isEmpty else {
-            throw MppError.missingField("method")
+            throw PayCoreError.missingField("method")
         }
         guard let intent = params["intent"], !intent.isEmpty else {
-            throw MppError.missingField("intent")
+            throw PayCoreError.missingField("intent")
         }
 
         return try PaymentChallenge(
@@ -139,7 +139,7 @@ public enum MppHeaders {
     private static func paymentSchemePayload(_ header: String) throws -> String {
         let trimmed = header.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.lowercased().hasPrefix(paymentScheme.lowercased()) else {
-            throw MppError.invalidPaymentScheme
+            throw PayCoreError.invalidPaymentScheme
         }
         let index = trimmed.index(trimmed.startIndex, offsetBy: paymentScheme.count)
         return String(trimmed[index...]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -162,11 +162,11 @@ public enum MppHeaders {
                 index = value.index(after: index)
             }
             guard index < value.endIndex else {
-                throw MppError.invalidHeader
+                throw PayCoreError.invalidHeader
             }
             let key = value[keyStart..<index].trimmingCharacters(in: .whitespaces)
             guard !key.isEmpty else {
-                throw MppError.invalidHeader
+                throw PayCoreError.invalidHeader
             }
             index = value.index(after: index)
 
@@ -174,7 +174,7 @@ public enum MppHeaders {
                 index = value.index(after: index)
             }
             guard index < value.endIndex, value[index] == "\"" else {
-                throw MppError.invalidHeader
+                throw PayCoreError.invalidHeader
             }
             index = value.index(after: index)
 
@@ -197,7 +197,7 @@ public enum MppHeaders {
                 }
             }
             guard closed, !escaped else {
-                throw MppError.invalidHeader
+                throw PayCoreError.invalidHeader
             }
             params[key] = decoded
         }

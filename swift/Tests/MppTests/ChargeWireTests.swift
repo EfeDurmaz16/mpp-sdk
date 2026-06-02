@@ -125,7 +125,7 @@ struct ChargeWireTests {
             intent: "charge",
             request: requestB64
         )
-        await #expect(throws: MppError.self) {
+        await #expect(throws: PayCoreError.self) {
             _ = try await Charge.buildPullCredential(challenge: challenge, signer: signer)
         }
     }
@@ -166,7 +166,7 @@ struct ChargeWireTests {
             intent: "charge",
             request: requestB64
         )
-        await #expect(throws: MppError.self) {
+        await #expect(throws: PayCoreError.self) {
             _ = try await Charge.buildPullCredential(challenge: challenge, signer: signer)
         }
     }
@@ -204,7 +204,7 @@ struct ChargeWireTests {
             intent: "charge",
             request: requestB64
         )
-        await #expect(throws: MppError.self) {
+        await #expect(throws: PayCoreError.self) {
             _ = try await Charge.buildPullCredential(challenge: challenge, signer: signer)
         }
     }
@@ -330,7 +330,7 @@ struct ChargeWireTests {
             intent: "charge",
             request: requestB64
         )
-        await #expect(throws: MppError.self) {
+        await #expect(throws: PayCoreError.self) {
             _ = try await Charge.buildPullCredential(challenge: challenge, signer: signer)
         }
     }
@@ -372,7 +372,7 @@ struct ChargeWireTests {
             intent: "charge",
             request: requestB64
         )
-        await #expect(throws: MppError.self) {
+        await #expect(throws: PayCoreError.self) {
             _ = try await Charge.buildPullCredential(challenge: challenge, signer: signer, rpc: rpc)
         }
     }
@@ -438,7 +438,7 @@ struct ChargeWireTests {
             intent: "charge",
             request: requestB64
         )
-        await #expect(throws: MppError.self) {
+        await #expect(throws: PayCoreError.self) {
             _ = try await Charge.buildPullCredential(challenge: challenge, signer: signer)
         }
     }

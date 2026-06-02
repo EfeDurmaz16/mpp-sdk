@@ -1,7 +1,7 @@
 import Foundation
 import PayCore
 
-// MppError moved to PayCore/Errors.swift (shared payment-core error consumed by
+// PayCoreError moved to PayCore/Errors.swift (shared payment-core error consumed by
 // both the MPP and x402 protocol layers; keeps the protocols decoupled).
 
 public struct PaymentChallenge: Codable, Equatable, Sendable {
@@ -20,7 +20,7 @@ public struct PaymentChallenge: Codable, Equatable, Sendable {
             do {
                 return try JSONDecoder().decode(ChargeRequest.self, from: data)
             } catch {
-                throw MppError.invalidJSON(String(describing: error))
+                throw PayCoreError.invalidJSON(String(describing: error))
             }
         }
     }
@@ -48,7 +48,7 @@ public struct PaymentChallenge: Codable, Equatable, Sendable {
 
     public func requireSolanaCharge() throws {
         guard method == "solana", intent == "charge" else {
-            throw MppError.unsupportedChallenge(method: method, intent: intent)
+            throw PayCoreError.unsupportedChallenge(method: method, intent: intent)
         }
     }
 

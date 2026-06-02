@@ -19,7 +19,7 @@ public enum Base64URL {
         }
 
         guard let data = Data(base64Encoded: base64) else {
-            throw MppError.invalidBase64URL
+            throw PayCoreError.invalidBase64URL
         }
         return data
     }

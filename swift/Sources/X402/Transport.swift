@@ -61,7 +61,7 @@ public struct X402HTTPClient: Sendable {
 
         let (probeData, probeURLResponse) = try await urlSession.data(for: probeRequest)
         guard let probeHTTP = probeURLResponse as? HTTPURLResponse else {
-            throw MppError.rpcFailure("non-HTTP response")
+            throw PayCoreError.rpcFailure("non-HTTP response")
         }
 
         if probeHTTP.statusCode != 402 {
@@ -79,7 +79,7 @@ public struct X402HTTPClient: Sendable {
             body: bodyStr,
             selection: selection
         ) else {
-            throw MppError.unsupportedChallenge(
+            throw PayCoreError.unsupportedChallenge(
                 method: "x402", intent: "no supported offer in challenge"
             )
         }
@@ -96,7 +96,7 @@ public struct X402HTTPClient: Sendable {
 
         let (retryData, retryURLResponse) = try await urlSession.data(for: retryRequest)
         guard let retryHTTP = retryURLResponse as? HTTPURLResponse else {
-            throw MppError.rpcFailure("non-HTTP response on x402 retry")
+            throw PayCoreError.rpcFailure("non-HTTP response on x402 retry")
         }
         return _makeResponse(
             http: retryHTTP, body: retryData,

@@ -29,11 +29,11 @@ public struct RpcClient: Sendable {
             let value = (outer["value"] as? [String: Any]),
             let blockhashStr = value["blockhash"] as? String
         else {
-            throw MppError.rpcFailure("getLatestBlockhash returned malformed body")
+            throw PayCoreError.rpcFailure("getLatestBlockhash returned malformed body")
         }
         let bytes = try Base58.decode(blockhashStr)
         guard bytes.count == 32 else {
-            throw MppError.rpcFailure("blockhash is not 32 bytes")
+            throw PayCoreError.rpcFailure("blockhash is not 32 bytes")
         }
         return (bytes: bytes, base58: blockhashStr)
     }
@@ -51,10 +51,10 @@ public struct RpcClient: Sendable {
             let outer = result as? [String: Any],
             let value = outer["value"] as? [String: Any]
         else {
-            throw MppError.rpcFailure("getAccountInfo returned malformed body for \(pubkeyBase58)")
+            throw PayCoreError.rpcFailure("getAccountInfo returned malformed body for \(pubkeyBase58)")
         }
         guard let owner = value["owner"] as? String else {
-            throw MppError.rpcFailure("account \(pubkeyBase58) has no owner field (does it exist?)")
+            throw PayCoreError.rpcFailure("account \(pubkeyBase58) has no owner field (does it exist?)")
         }
         return owner
     }
@@ -68,7 +68,7 @@ public struct RpcClient: Sendable {
         ]
         let result = try await rpcCall(method: "sendTransaction", params: [base64SignedTx, options])
         guard let signature = result as? String else {
-            throw MppError.rpcFailure("sendTransaction returned non-string result")
+            throw PayCoreError.rpcFailure("sendTransaction returned non-string result")
         }
         return signature
     }
@@ -87,22 +87,22 @@ public struct RpcClient: Sendable {
 
         let (data, urlResponse) = try await urlSession.data(for: request)
         guard let http = urlResponse as? HTTPURLResponse else {
-            throw MppError.rpcFailure("non-HTTP response")
+            throw PayCoreError.rpcFailure("non-HTTP response")
         }
         guard (200..<300).contains(http.statusCode) else {
-            throw MppError.rpcFailure("RPC HTTP \(http.statusCode)")
+            throw PayCoreError.rpcFailure("RPC HTTP \(http.statusCode)")
         }
         let parsed = try JSONSerialization.jsonObject(with: data)
         guard let object = parsed as? [String: Any] else {
-            throw MppError.rpcFailure("RPC body is not an object")
+            throw PayCoreError.rpcFailure("RPC body is not an object")
         }
         if let error = object["error"] as? [String: Any] {
             let message = (error["message"] as? String) ?? "unknown error"
             let code = (error["code"] as? Int) ?? 0
-            throw MppError.rpcFailure("RPC error \(code): \(message)")
+            throw PayCoreError.rpcFailure("RPC error \(code): \(message)")
         }
         guard let result = object["result"] else {
-            throw MppError.rpcFailure("RPC body missing result field")
+            throw PayCoreError.rpcFailure("RPC body missing result field")
         }
         return result
     }

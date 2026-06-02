@@ -38,7 +38,7 @@ struct ChargeCredentialTests {
     func rejectsUnterminatedQuotedAuthParam() throws {
         let request = try Self.encodedRequest()
 
-        #expect(throws: MppError.invalidHeader) {
+        #expect(throws: PayCoreError.invalidHeader) {
             _ = try MppHeaders.parseWWWAuthenticate(
                 """
                 Payment id="challenge-1", realm="MPP Payment", method="solana", intent="charge", request="\(request)
@@ -49,7 +49,7 @@ struct ChargeCredentialTests {
 
     @Test
     func rejectsDanglingEscapeInQuotedAuthParam() throws {
-        #expect(throws: MppError.invalidHeader) {
+        #expect(throws: PayCoreError.invalidHeader) {
             _ = try MppHeaders.parseWWWAuthenticate(
                 """
                 Payment id="challenge-1\\
@@ -72,7 +72,7 @@ struct ChargeCredentialTests {
         do {
             _ = try challenge.chargeRequest
             Issue.record("expected invalid JSON error")
-        } catch let MppError.invalidJSON(detail) {
+        } catch let PayCoreError.invalidJSON(detail) {
             #expect(detail.contains("currency"))
         }
     }
@@ -134,14 +134,14 @@ struct ChargeCredentialTests {
             transactionProvider: StaticChargeTransactionProvider(transaction: "tx")
         )
 
-        await #expect(throws: MppError.unsupportedChallenge(method: "solana", intent: "session")) {
+        await #expect(throws: PayCoreError.unsupportedChallenge(method: "solana", intent: "session")) {
             _ = try await builder.authorizationHeader(for: challenge)
         }
     }
 
     @Test
     func rejectsMalformedRequestBase64() throws {
-        #expect(throws: MppError.invalidBase64URL) {
+        #expect(throws: PayCoreError.invalidBase64URL) {
             _ = try PaymentChallenge(
                 id: "challenge-3",
                 realm: "MPP Payment",

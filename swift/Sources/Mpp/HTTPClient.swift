@@ -58,7 +58,7 @@ public struct MppHTTPClient: Sendable {
 
         let (firstData, firstResponse) = try await urlSession.data(for: request)
         guard let firstHttp = firstResponse as? HTTPURLResponse else {
-            throw MppError.rpcFailure("non-HTTP response")
+            throw PayCoreError.rpcFailure("non-HTTP response")
         }
         if firstHttp.statusCode != 402 {
             return responseFor(http: firstHttp, body: firstData, settlementHeader: settlementHeader)
@@ -81,7 +81,7 @@ public struct MppHTTPClient: Sendable {
 
         let (retryData, retryResponse) = try await urlSession.data(for: retry)
         guard let retryHttp = retryResponse as? HTTPURLResponse else {
-            throw MppError.rpcFailure("non-HTTP response on MPP retry")
+            throw PayCoreError.rpcFailure("non-HTTP response on MPP retry")
         }
         return responseFor(http: retryHttp, body: retryData, settlementHeader: settlementHeader)
     }
