@@ -35,7 +35,7 @@ import (
 	_ "github.com/solana-foundation/pay-kit/go/protocols/mpp"
 	_ "github.com/solana-foundation/pay-kit/go/protocols/x402"
 	"github.com/solana-foundation/pay-kit/go/protocols/mpp/server"
-	"github.com/solana-foundation/pay-kit/go/signer"
+	"github.com/solana-foundation/pay-kit/go/paycore/signer"
 )
 
 type readyMessage struct {

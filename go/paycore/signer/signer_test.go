@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/solana-foundation/pay-kit/go/signer"
+	"github.com/solana-foundation/pay-kit/go/paycore/signer"
 )
 
 // testSecret returns a fresh valid 64-byte Ed25519 secret key as the

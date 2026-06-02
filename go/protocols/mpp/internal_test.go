@@ -8,7 +8,7 @@ import (
 	solana "github.com/gagliardetto/solana-go"
 	"github.com/solana-foundation/pay-kit/go/paykit"
 	core "github.com/solana-foundation/pay-kit/go/protocols/mpp/core"
-	"github.com/solana-foundation/pay-kit/go/signer"
+	"github.com/solana-foundation/pay-kit/go/paycore/signer"
 )
 
 // errSigner is a paykit.Signer stub whose Sign method always returns the given

@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/solana-foundation/pay-kit/go/paykit"
-	"github.com/solana-foundation/pay-kit/go/signer"
+	"github.com/solana-foundation/pay-kit/go/paycore/signer"
 )
 
 // Finding #11: the server enforces the credential's echoed `accepted`
