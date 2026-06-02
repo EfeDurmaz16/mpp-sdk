@@ -141,8 +141,8 @@ class PayKitPricingTest < Minitest::Test
   def test_coerce_raises_when_symbol_passed_without_registry
     PayKit.reset!
     PayKit.configure do |c|
-      c.pay_to = "AyNAa2VPe2t5pgg8M61iE6kqMudkV98zsT4rkAZuU6tj"
-      c.mpp.secret = "x"
+      c.operator { |op| op.recipient = "AyNAa2VPe2t5pgg8M61iE6kqMudkV98zsT4rkAZuU6tj" }
+      c.mpp.challenge_binding_secret = "x"
     end
     assert_raises(PayKit::NoRegistryConfigured) do
       PayKit::Pricing.coerce(:something, registry: nil)

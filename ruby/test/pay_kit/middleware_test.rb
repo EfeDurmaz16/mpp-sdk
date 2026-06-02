@@ -72,13 +72,13 @@ class PayKitMiddlewareTest < Minitest::Test
     # the helper's scope.
     PayKit.reset!
     PayKit.configure do |c|
-      c.pay_to = "AyNAa2VPe2t5pgg8M61iE6kqMudkV98zsT4rkAZuU6tj"
+      c.operator { |op| op.recipient = "AyNAa2VPe2t5pgg8M61iE6kqMudkV98zsT4rkAZuU6tj" }
       c.network = :solana_devnet
       c.accept = %i[x402 mpp]
       c.stablecoins = %i[USDC]
-      c.x402.facilitator = "https://example.test"
+      c.rpc_url = "https://example.test"
       c.mpp.realm = "Test"
-      c.mpp.secret = "test"
+      c.mpp.challenge_binding_secret = "test"
     end
     PayKit.pricing = TestPricing.new
   end

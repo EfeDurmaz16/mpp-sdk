@@ -219,7 +219,7 @@ class PayKitGateTest < Minitest::Test
       fee_on_top: fee_on_top,
       description: description,
       accept_default: PayKit.config.accept,
-      default_pay_to: PayKit.config.pay_to
+      default_pay_to: PayKit.config.operator.effective_recipient
     )
   end
 
