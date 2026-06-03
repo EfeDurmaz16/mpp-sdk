@@ -146,6 +146,43 @@ private fun lookupHeader(headers: Map<String, String>, name: String): String? {
     return headers.entries.firstOrNull { it.key.lowercase() == target }?.value
 }
 
+/**
+ * Extracts the x402 v2 top-level ``extensions`` blob from challenge headers
+ * and/or body, decoding the standard-base64 ``payment-required`` header first
+ * and falling back to a JSON body. Returns ``null`` when the server advertised
+ * no extensions.
+ *
+ * Mirrors the rust spine: ``PaymentRequiredEnvelope.extensions`` is an untyped
+ * ``Option<serde_json::Value>`` passthrough (types.rs:458), echoed verbatim
+ * onto the outbound envelope. The client reads it back here so it can call
+ * [com.solana.paykit.protocols.x402.exact.PaymentExtensions.echoing].
+ */
+fun parseX402Extensions(headers: Map<String, String>, body: String?): JsonObject? {
+    val headerValue = lookupHeader(headers, "payment-required")
+    if (headerValue != null) {
+        extractExtensions(
+            try {
+                Base64.getDecoder().decode(headerValue).decodeToString()
+            } catch (_: Exception) {
+                null
+            },
+        )?.let { return it }
+    }
+    if (body != null) {
+        extractExtensions(body)?.let { return it }
+    }
+    return null
+}
+
+private fun extractExtensions(text: String?): JsonObject? {
+    if (text == null) return null
+    return try {
+        json.parseToJsonElement(text).jsonObject["extensions"] as? JsonObject
+    } catch (_: Exception) {
+        null
+    }
+}
+
 private fun selectFromHeader(headerValue: String, selection: ChallengeSelection): X402AcceptsEntry? =
     try {
         selectFromJsonText(Base64.getDecoder().decode(headerValue).decodeToString(), selection)
@@ -245,6 +282,7 @@ fun buildPayment(
     requirement: X402AcceptsEntry,
     rpcBlockhashProvider: () -> ByteArray,
     nonceProvider: () -> String = ::defaultMemoNonce,
+    extensions: PaymentExtensions? = null,
 ): X402Envelope {
     val asset = requirement.effectiveAsset
         ?: throw IllegalArgumentException("x402 offer is missing `asset`")
@@ -365,6 +403,9 @@ fun buildPayment(
         x402Version = X402_VERSION,
         accepted = requirement,
         payload = X402PayloadField(transaction = encoded),
+        // Omit empty extensions: never emit an empty `extensions: {}`, matching
+        // rust skip_serializing_if = Option::is_none + PaymentExtensions::is_empty.
+        extensions = extensions?.takeUnless { it.isEmpty() },
     )
 }
 
@@ -382,8 +423,9 @@ fun buildPaymentHeader(
     requirement: X402AcceptsEntry,
     rpcBlockhashProvider: () -> ByteArray,
     nonceProvider: () -> String = ::defaultMemoNonce,
+    extensions: PaymentExtensions? = null,
 ): String {
-    val envelope = buildPayment(signer, requirement, rpcBlockhashProvider, nonceProvider)
+    val envelope = buildPayment(signer, requirement, rpcBlockhashProvider, nonceProvider, extensions)
     // Echo the offered object verbatim when it was parsed off the wire so the
     // rust verifier's structural match sees every server-specific field; fall
     // back to the typed entry for offers built in code.
@@ -393,6 +435,11 @@ fun buildPaymentHeader(
         put("x402Version", JsonPrimitive(envelope.x402Version))
         put("accepted", acceptedJson)
         put("payload", json.encodeToJsonElement(X402PayloadField.serializer(), envelope.payload))
+        // Append extensions only when non-empty: never emit `extensions: {}`,
+        // matching rust skip_serializing_if = Option::is_none. Keys are sorted
+        // (PaymentExtensions backs a sorted map, mirroring rust BTreeMap), so
+        // the wire bytes are deterministic.
+        envelope.extensions?.let { put("extensions", it.toJsonObject()) }
     }
     val payload = json.encodeToString(JsonObject.serializer(), envelopeJson)
     return Base64.getEncoder().encodeToString(payload.encodeToByteArray())

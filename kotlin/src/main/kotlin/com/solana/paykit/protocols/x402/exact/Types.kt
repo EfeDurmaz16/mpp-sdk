@@ -3,6 +3,7 @@ package com.solana.paykit.protocols.x402.exact
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 
 /**
  * x402 ``exact`` wire shapes for Kotlin.
@@ -136,6 +137,13 @@ val X402AcceptsEntry.effectiveFeePayerKey: String? get() {
 data class X402Challenge(
     val x402Version: Int? = null,
     val accepts: List<X402AcceptsEntry> = emptyList(),
+    // x402 v2 top-level ``extensions`` blob, carried untyped as a passthrough.
+    // Mirrors rust ``PaymentRequiredEnvelope.extensions:
+    // Option<serde_json::Value>`` (types.rs:458): unknown advertised extensions
+    // survive so the client can echo them back verbatim on the outbound
+    // ``PAYMENT-SIGNATURE`` envelope (x402 v2 §5.1.2 echo-and-append). ``null``
+    // when the server advertised none.
+    val extensions: JsonObject? = null,
 )
 
 /** The ``payload`` block inside an x402 envelope. */
@@ -150,4 +158,11 @@ data class X402Envelope(
     val x402Version: Int,
     val accepted: X402AcceptsEntry,
     val payload: X402PayloadField,
+    // Echoed extensions from the inbound ``PAYMENT-REQUIRED`` envelope, with any
+    // required client-supplied fields appended (e.g.
+    // ``payment-identifier.info.id``). Mirrors rust
+    // ``PaymentSignatureEnvelope.extensions: Option<PaymentExtensions>``
+    // (types.rs:606-607). ``null`` (and omitted from the wire) when the server
+    // advertised no extensions, per §5.1.2 + skip_serializing_if = Option::is_none.
+    @Transient val extensions: PaymentExtensions? = null,
 )

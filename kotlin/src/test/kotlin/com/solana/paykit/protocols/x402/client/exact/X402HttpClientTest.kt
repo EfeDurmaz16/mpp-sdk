@@ -188,6 +188,97 @@ class X402HttpClientTest {
         assertNull(retry.getHeader("X-Payment"), "must not use old X-Payment header name")
     }
 
+    // ── x402 v2 extensions echo-and-append (interceptor path) ─────────────────
+
+    /** Decodes the sent Payment-Signature header into its JSON envelope. */
+    private fun decodeSentEnvelope(header: String): kotlinx.serialization.json.JsonObject =
+        kotlinx.serialization.json.Json.parseToJsonElement(
+            Base64.getDecoder().decode(header).decodeToString(),
+        ).let { it as kotlinx.serialization.json.JsonObject }
+
+    /** A devnet challenge carrying a top-level extensions blob. */
+    private fun challengeWithExtensions(extensionsJson: String): String {
+        val json = """{"accepts":[{
+            "scheme":"exact",
+            "network":"${Network.SOLANA_DEVNET}",
+            "asset":"SOL",
+            "amount":"1000",
+            "payTo":"CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY"
+        }],"extensions":$extensionsJson}"""
+        return Base64.getEncoder().encodeToString(json.toByteArray())
+    }
+
+    @Test
+    fun echoesRequiredPaymentIdentifierWithGeneratedId() = runBlocking {
+        // Server advertises payment-identifier required → client echoes it and
+        // appends a fresh pay_ id; schema echoed verbatim.
+        server.enqueue(
+            MockResponse().setResponseCode(402).addHeader(
+                "payment-required",
+                challengeWithExtensions(
+                    """{"payment-identifier":{"info":{"required":true},""" +
+                        """"schema":{"type":"object","required":["id"]}}}""",
+                ),
+            ),
+        )
+        server.enqueue(MockResponse().setResponseCode(200).setBody("ok"))
+
+        defaultClient().get(server.url("/paid-ext").toString()).response.close()
+
+        server.takeRequest()
+        val sent = server.takeRequest().getHeader("Payment-Signature")!!
+        val ext = decodeSentEnvelope(sent)["extensions"]!!
+            .let { it as kotlinx.serialization.json.JsonObject }
+        val pid = ext["payment-identifier"] as kotlinx.serialization.json.JsonObject
+        val info = pid["info"] as kotlinx.serialization.json.JsonObject
+        // Server info.required preserved, schema echoed verbatim, id appended.
+        assertEquals(
+            "true",
+            (info["required"] as kotlinx.serialization.json.JsonPrimitive).content,
+        )
+        assertTrue(pid.containsKey("schema"), "schema must be echoed verbatim")
+        val id = info["id"]!!.let { (it as kotlinx.serialization.json.JsonPrimitive).content }
+        assertTrue(Regex("^[A-Za-z0-9_-]{16,128}$").matches(id), "bad generated id: $id")
+    }
+
+    @Test
+    fun preservesUnknownExtensionsVerbatimFromBody() = runBlocking {
+        // Echo-and-append from a JSON body: an unknown extension survives
+        // alongside payment-identifier (no required flag → no id generated).
+        val body = """{"accepts":[{
+            "scheme":"exact","network":"${Network.SOLANA_DEVNET}","asset":"SOL",
+            "amount":"1000","payTo":"CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY"
+        }],"extensions":{"future-extension":{"info":{"foo":"bar"}},""" +
+            """"payment-identifier":{"info":{}}}}"""
+        server.enqueue(MockResponse().setResponseCode(402).setBody(body))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("ok"))
+
+        defaultClient().get(server.url("/paid-body-ext").toString()).response.close()
+
+        server.takeRequest()
+        val sent = server.takeRequest().getHeader("Payment-Signature")!!
+        val ext = decodeSentEnvelope(sent)["extensions"]
+            .let { it as kotlinx.serialization.json.JsonObject }
+        // Both keys survive, sorted (rust BTreeMap order).
+        assertEquals(listOf("future-extension", "payment-identifier"), ext.keys.toList())
+    }
+
+    @Test
+    fun omitsExtensionsWhenServerAdvertisedNone() = runBlocking {
+        // No extensions advertised → outbound envelope must NOT carry an
+        // extensions key (no empty {}).
+        server.enqueue(
+            MockResponse().setResponseCode(402).addHeader("payment-required", devnetChallenge()),
+        )
+        server.enqueue(MockResponse().setResponseCode(200).setBody("ok"))
+
+        defaultClient().get(server.url("/paid-no-ext").toString()).response.close()
+
+        server.takeRequest()
+        val sent = server.takeRequest().getHeader("Payment-Signature")!!
+        assertNull(decodeSentEnvelope(sent)["extensions"], "must omit extensions when none advertised")
+    }
+
     // ── 402 without a valid challenge ─────────────────────────────────────────
 
     @Test
