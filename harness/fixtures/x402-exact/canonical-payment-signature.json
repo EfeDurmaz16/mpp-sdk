@@ -1,0 +1,20 @@
+{
+  "_description": "TS-wire PAYMENT-SIGNATURE credential. Mirrors the shape the TS reference client emits in harness/src/fixtures/typescript/exact-client.ts. Used by the wire-compat tier (test/x402-exact.compat.test.ts) to assert every registered adapter's parser handles a foreign-issued credential gracefully (accept, or reject with a parseable token). NOTE on Rust-spine parity: the Rust spine deserializes `payload` as PaymentProof — `{ \"transaction\": base64(...) }` or `{ \"signature\": \"...\" }` (rust/crates/x402/src/protocol/schemes/exact/types.rs::PaymentProof). See canonical-payment-signature-rust.json for the Rust-canonical PaymentProof variant the live matrix exchanges. This stub payload uses `challengeId/resource` and is treated by the rust spine as an unknown payload (early reject at deserialization or at verify time, both acceptable for the compat tier).",
+  "x402Version": 2,
+  "accepted": {
+    "scheme": "exact",
+    "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+    "asset": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    "payTo": "5xYbHvVQfTUyzCzKx5KjVxyqXqQ4Ujm5SbqQXJ5w8nVA",
+    "amount": "1000",
+    "extra": {
+      "decimals": 6,
+      "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    }
+  },
+  "payload": {
+    "challengeId": "canonical-fixture-challenge-0001",
+    "resource": "/protected"
+  },
+  "resource": "/protected"
+}

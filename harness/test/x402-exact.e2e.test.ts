@@ -21,6 +21,10 @@ import {
   serverImplementations,
 } from "../src/implementations";
 import { runClient, startServer, stopServer } from "../src/process";
+import {
+  allowedX402Pair,
+  baseLang,
+} from "../src/x402-pair-policy";
 
 const MATRIX_ENABLED = process.env.X402_INTEROP_MATRIX === "1";
 
@@ -91,33 +95,39 @@ describe("x402 exact intent — cross-language matrix", () => {
   // The pair selector is data-driven so that as new language adapters
   // land (rebased onto this PR), the matrix widens automatically
   // without further test edits.
-  const TS_REFERENCE_ID = "ts-x402";
-  const RUST_SPINE_PREFIX = "rust-x402";
+  // Pair policy lives in src/x402-pair-policy.ts so the e2e and live
+  // matrix tests cannot drift apart silently.
+  const allowedPair = allowedX402Pair;
 
-  const isTsReference = (id: string): boolean => id === TS_REFERENCE_ID;
-  const isRustSpine = (id: string): boolean =>
-    id === RUST_SPINE_PREFIX ||
-    id === `${RUST_SPINE_PREFIX}-client` ||
-    id === `${RUST_SPINE_PREFIX}-server`;
+  // Explicit per-language self-pair group: each registered x402-exact
+  // language adapter (client + server of the same baseLang) gets a
+  // documented self-pair test. The `allowedPair` filter below already
+  // covers same-baseLang via the generic loop, but enumerating
+  // self-pairs explicitly makes regressions easier to spot in the
+  // vitest output ("`ts-x402 self-pair` failed" reads more clearly
+  // than "client ts-x402 ↔ server ts-x402 failed" buried in the
+  // full cross-product log).
+  const selfPairLangs = Array.from(
+    new Set(x402Clients.map(impl => baseLang(impl.id))),
+  ).filter(lang =>
+    x402Servers.some(impl => baseLang(impl.id) === lang),
+  );
 
-  const baseLang = (id: string): string =>
-    id.replace(/-client$/, "").replace(/-server$/, "");
-
-  const allowedPair = (clientId: string, serverId: string): boolean => {
-    // TS reference only pairs with itself (stub payload would fail
-    // real signature verification on any other server).
-    if (isTsReference(clientId) || isTsReference(serverId)) {
-      return isTsReference(clientId) && isTsReference(serverId);
+  describe("self-pair (each language ↔ itself)", () => {
+    if (selfPairLangs.length === 0) {
+      it.skip("no x402-exact adapters registered", () => {});
+      return;
     }
-    // Rust spine self-pair.
-    if (isRustSpine(clientId) && isRustSpine(serverId)) return true;
-    // Same-language self-pair (e.g. go-x402-client ↔ go-x402-server).
-    if (baseLang(clientId) === baseLang(serverId)) return true;
-    // Cross-spine pair: language adapter on one side, Rust spine on
-    // the other (either direction).
-    if (isRustSpine(clientId) || isRustSpine(serverId)) return true;
-    return false;
-  };
+    for (const lang of selfPairLangs) {
+      it(`${lang} self-pair is enumerated`, () => {
+        const client = x402Clients.find(impl => baseLang(impl.id) === lang);
+        const server = x402Servers.find(impl => baseLang(impl.id) === lang);
+        expect(client).toBeTruthy();
+        expect(server).toBeTruthy();
+        expect(allowedPair(client!.id, server!.id)).toBe(true);
+      });
+    }
+  });
 
   for (const server of x402Servers) {
     for (const client of x402Clients) {

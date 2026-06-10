@@ -165,6 +165,76 @@ X402_INTEROP_FACILITATOR_SECRET_KEY='[...]' \
 pnpm test x402-exact.e2e.test.ts
 ```
 
+#### x402-exact test tiers
+
+The x402-exact intent splits its coverage across three tiers:
+
+1. **Wire compat (`test/x402-exact.compat.test.ts`)** — runs in the
+   default `pnpm test` invocation. No live RPC, no cargo build, no
+   funded keypair. Drives each registered x402-exact adapter (gated by
+   `COMPAT_INCLUDE_IDS`) against the canonical fixtures in
+   `harness/fixtures/x402-exact/`:
+   - **canonical-challenge.json** — the 402 envelope every client must
+     parse.
+   - **canonical-payment-signature.json** — the TS-wire credential every
+     server must parse (accept or reject with a known token). Wire-only
+     adapters may emit `payment_invalid` as fallback.
+   - **canonical-payment-signature-rust.json** — Rust-spine canonical
+     `PaymentSignatureEnvelope` with a `PaymentProof::Transaction`
+     payload. Asserts the Rust serde envelope parser accepts a
+     well-formed envelope and the verifier rejects with a specific
+     `invalid_exact_svm_payload_*` token (used by the live matrix
+     against the Rust spine server).
+   - **canonical-reject-tokens.json** — the union of taxonomy-aligned
+     reject tokens (high-level + `invalid_exact_svm_payload_*` family,
+     mirrored from `rust/crates/x402/src/protocol/schemes/exact/verify.rs`).
+   - **attack-scenarios.json** — tampered credential overrides; each
+     scenario enumerates the reject tokens a spec-compliant server may
+     emit. Wire-only adapters may emit `payment_invalid` as fallback.
+
+2. **Self-pair + spine cross-pair (`test/x402-exact.e2e.test.ts`)** —
+   the canonical cross-language matrix, env-gated behind
+   `X402_INTEROP_MATRIX=1`. Enumerates every same-language self-pair
+   plus every adapter ↔ Rust spine cross-pair.
+
+3. **Live full matrix (`test/x402-exact.live.matrix.test.ts`)** —
+   superset of tier 2: every `allowedPair` from the policy in
+   `implementations.ts`. Also env-gated. Designed to widen
+   automatically as new x402-exact adapters register; no test edit
+   required to pick them up.
+
+To extend with a new language adapter:
+- Register `{id, label, role, command, intents: ["x402-exact"], enabled}`
+  in `harness/src/implementations.ts`.
+- Add the adapter id to `COMPAT_INCLUDE_IDS` in
+  `test/x402-exact.compat.test.ts` once the adapter has a fast startup
+  cost (no cargo build per test); otherwise leave it out and rely on
+  the live matrix.
+- The live matrix picks up the adapter automatically via the
+  `allowedPair` policy.
+
+Why the Rust spine is excluded from the compat suite: the spine
+deserializes `payload` as `PaymentProof::Transaction | Signature`
+(rust/crates/x402/src/protocol/schemes/exact/types.rs), so the TS-wire
+canonical credential — which carries `payload.challengeId/resource` —
+is rejected at the proof layer with a generic `payment_invalid` before
+the per-scenario assertions can run. Rust spine coverage is provided
+by the live matrix (tier 3), which builds real signed transactions
+and exercises the full structural verifier.
+
+Optional opt-in flag:
+
+- `X402_COMPAT_STUB_ACCEPT=<id,id,...>` — declares that the listed
+  full-verifier adapters intentionally accept the TS-wire stub
+  credential. Without this, a full-verifier adapter that returns 200
+  on the canonical credential is flagged as a verifier bypass.
+- `X402_COMPAT_REPLAY_TRUST=<id,id,...>` — declares that the listed
+  adapters' verifier accepts the canonical stub credential and is
+  therefore eligible for the replay assertion. Without this, only
+  adapters in `WIRE_ONLY_ADAPTER_IDS` run the replay test (other
+  adapters cover replay via the live matrix with a real signed
+  transaction).
+
 Cross-server portability and idempotent-resubmit scenarios are gated
 separately:
 
