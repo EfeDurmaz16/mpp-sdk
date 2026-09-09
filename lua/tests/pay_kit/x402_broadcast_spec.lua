@@ -42,7 +42,9 @@ package.loaded['pay_kit.solana.rpc'] = {
       end,
       latest_blockhash    = function() return string.rep('0', 32) end,
       simulate_transaction = function() return {err = nil} end,
-      signature_statuses   = function() return {} end,
+      signature_statuses   = function()
+        return {{confirmationStatus = 'confirmed'}}
+      end,
     }
   end,
   Rpc                = {},
@@ -193,11 +195,22 @@ helper.test('x402 verify_and_settle: cosigns + broadcasts + reserves signature',
   helper.assert_equal(payment.scheme,   'exact')
   helper.assert_equal(payment.transaction, 'fakeSignatureBase58')
   helper.assert_equal(#broadcast_calls, 1)
+
+  local recovered, retry_err = pay_kit.try_payment('paid-resource', {
+    method = 'GET',
+    path   = '/paid-resource',
+    headers = {['payment-signature'] = cred_b64},
+    query  = {},
+  })
+  helper.assert_true(recovered ~= nil,
+    'expected an identical retry to recover settlement; err=' .. tostring(retry_err))
+  helper.assert_equal(recovered.transaction, 'fakeSignatureBase58')
+  helper.assert_equal(#broadcast_calls, 2)
 end)
 
-helper.test('x402 verify_and_settle: SIGNATURE_CONSUMED on duplicate submit', function()
-  -- Re-using the same credential should trip the replay store via
-  -- consume_signature returning false.
+helper.test('x402 verify_and_settle: duplicate proof uses recovery path', function()
+  -- Duplicate proofs are confirmed again and reconstruct the same receipt;
+  -- this test keeps the isolated module-reset path covered.
   pay_kit._reset_for_tests()
   -- Re-install the same stub since reset clears the dispatcher.
   package.loaded['pay_kit.solana.rpc'] = {
@@ -206,8 +219,22 @@ helper.test('x402 verify_and_settle: SIGNATURE_CONSUMED on duplicate submit', fu
         send_raw_transaction = function() return 'fakeSignatureBase58' end,
         latest_blockhash    = function() return string.rep('0', 32) end,
         simulate_transaction = function() return {err = nil} end,
+        signature_statuses = function()
+          return {{confirmationStatus = 'confirmed', err = cjson.null}}
+        end,
       }
     end,
   }
   helper.assert_true(true)  -- exercise the require path
+end)
+
+helper.test('x402 verify_and_settle: rejects a failed on-chain transaction', function()
+  local confirmed, err = require('pay_kit.protocols.x402')._private.await_confirmation({
+    signature_statuses = function()
+      return {{confirmationStatus = 'confirmed', err = {InstructionError = {0, 'Custom'}}}}
+    end,
+  }, 'failedSignatureBase58')
+
+  helper.assert_true(confirmed == nil)
+  helper.assert_true(tostring(err):match('transaction failed on%-chain') ~= nil)
 end)

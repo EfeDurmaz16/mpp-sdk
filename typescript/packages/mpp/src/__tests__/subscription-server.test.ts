@@ -22,12 +22,15 @@ import {
     setTransactionMessageFeePayerSigner,
     setTransactionMessageLifetimeUsingBlockhash,
 } from '@solana/kit';
+import { findAssociatedTokenPda } from '@solana-program/token';
 import { Store } from 'mppx/server';
 
 import {
     SUBSCRIPTIONS_PROGRAM,
     SUBSCRIPTIONS_SUBSCRIBE_DISCRIMINATOR,
     SUBSCRIPTIONS_TRANSFER_DISCRIMINATOR,
+    MEMO_PROGRAM,
+    SYSTEM_PROGRAM,
     TOKEN_2022_PROGRAM,
     TOKEN_PROGRAM,
 } from '../constants.js';
@@ -61,11 +64,39 @@ function rpcSuccess(result: unknown) {
     });
 }
 
+function buildDelegationData(subscriber: string, plan: string, amountPulled: bigint): Uint8Array {
+    const data = new Uint8Array(155);
+    data[0] = 4;
+    data[1] = 1;
+    data[2] = 255;
+    data.set(__testing.decodeBase58(subscriber), 3);
+    data.set(__testing.decodeBase58(plan), 35);
+    writeU64Le(data, 107, 10_000_000n);
+    writeU64Le(data, 115, 720n);
+    writeU64Le(data, 131, amountPulled);
+    writeU64Le(data, 139, 1_737_216_000n);
+    return data;
+}
+
+function writeU64Le(buf: Uint8Array, offset: number, value: bigint) {
+    for (let i = 0; i < 8; i += 1) {
+        buf[offset + i] = Number((value >> BigInt(i * 8)) & 0xffn);
+    }
+}
+
 /** Build a compiled-message-style activation transaction (subscriber-signed). */
 async function buildActivationTransactionBase64(
     options: {
-        extraInstructions?: 'duplicate-subscribe' | 'duplicate-transfer' | 'reorder' | 'no-subscribe' | 'no-transfer';
+        extraInstructions?:
+            | 'duplicate-subscribe'
+            | 'duplicate-transfer'
+            | 'foreign-program'
+            | 'reorder'
+            | 'no-subscribe'
+            | 'no-transfer';
         feePayerKey?: string;
+        memo?: string;
+        receiver?: string;
     } = {},
 ): Promise<{ subscriberAddress: string; transaction: string }> {
     const subscriber = await generateKeyPairSigner();
@@ -74,10 +105,36 @@ async function buildActivationTransactionBase64(
         data: new Uint8Array([SUBSCRIPTIONS_SUBSCRIBE_DISCRIMINATOR]),
         programAddress: address(SUBSCRIPTIONS_PROGRAM),
     };
+    const [recipientAta] = await findAssociatedTokenPda({
+        mint: address(MINT),
+        owner: address(options.receiver ?? RECIPIENT),
+        tokenProgram: address(TOKEN_PROGRAM),
+    });
     const transferIx: Instruction = {
-        accounts: [{ address: subscriber.address, role: AccountRole.READONLY }],
+        // Previous nine-account client layout. The verifier also accepts the
+        // Codama v0.5 ten-account layout and binds receiver_ata at slot 4.
+        accounts: [
+            { address: subscriber.address, role: AccountRole.READONLY },
+            { address: address(PLAN_ID), role: AccountRole.READONLY },
+            { address: subscriber.address, role: AccountRole.READONLY },
+            { address: subscriber.address, role: AccountRole.READONLY },
+            { address: subscriber.address, role: AccountRole.READONLY },
+            { address: subscriber.address, role: AccountRole.READONLY },
+            { address: recipientAta, role: AccountRole.WRITABLE },
+            { address: address(MINT), role: AccountRole.READONLY },
+            { address: address(TOKEN_PROGRAM), role: AccountRole.READONLY },
+        ],
         data: new Uint8Array([SUBSCRIPTIONS_TRANSFER_DISCRIMINATOR]),
         programAddress: address(SUBSCRIPTIONS_PROGRAM),
+    };
+    const foreignIx: Instruction = {
+        accounts: [{ address: subscriber.address, role: AccountRole.WRITABLE_SIGNER }],
+        data: new Uint8Array([2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]),
+        programAddress: address(SYSTEM_PROGRAM),
+    };
+    const memoIx: Instruction = {
+        data: new TextEncoder().encode(options.memo ?? ''),
+        programAddress: address(MEMO_PROGRAM),
     };
 
     let instructions: Instruction[];
@@ -87,6 +144,9 @@ async function buildActivationTransactionBase64(
             break;
         case 'duplicate-transfer':
             instructions = [subscribeIx, transferIx, transferIx];
+            break;
+        case 'foreign-program':
+            instructions = [subscribeIx, foreignIx, transferIx];
             break;
         case 'reorder':
             instructions = [transferIx, subscribeIx];
@@ -100,6 +160,7 @@ async function buildActivationTransactionBase64(
         default:
             instructions = [subscribeIx, transferIx];
     }
+    if (options.memo !== undefined) instructions.push(memoIx);
 
     const txMessage = pipe(
         createTransactionMessage({ version: 0 }),
@@ -343,49 +404,89 @@ describe('subscription().request()', () => {
 
 describe('validateActivationInstructions', () => {
     const challenge = {
-        methodDetails: { programId: SUBSCRIPTIONS_PROGRAM },
+        amount: '10000000',
+        methodDetails: {
+            mint: MINT,
+            programId: SUBSCRIPTIONS_PROGRAM,
+            tokenProgram: TOKEN_PROGRAM,
+        },
+        recipient: RECIPIENT,
     } as never;
 
     test('accepts a well-formed [subscribe, transfer_subscription] sequence', async () => {
-        const { transaction } = await buildActivationTransactionBase64();
-        expect(() => __testing.validateActivationInstructions(transaction, challenge)).not.toThrow();
+        const { subscriberAddress, transaction } = await buildActivationTransactionBase64();
+        await expect(
+            __testing.validateActivationInstructions(transaction, challenge, subscriberAddress),
+        ).resolves.toBeUndefined();
     });
 
     test('rejects a transaction missing subscribe', async () => {
-        const { transaction } = await buildActivationTransactionBase64({ extraInstructions: 'no-subscribe' });
-        expect(() => __testing.validateActivationInstructions(transaction, challenge)).toThrow(/missing subscribe/);
+        const { subscriberAddress, transaction } = await buildActivationTransactionBase64({
+            extraInstructions: 'no-subscribe',
+        });
+        await expect(
+            __testing.validateActivationInstructions(transaction, challenge, subscriberAddress),
+        ).rejects.toThrow(/missing subscribe/);
     });
 
     test('rejects a transaction missing transfer_subscription', async () => {
-        const { transaction } = await buildActivationTransactionBase64({ extraInstructions: 'no-transfer' });
-        expect(() => __testing.validateActivationInstructions(transaction, challenge)).toThrow(
-            /missing transfer_subscription/,
-        );
+        const { subscriberAddress, transaction } = await buildActivationTransactionBase64({
+            extraInstructions: 'no-transfer',
+        });
+        await expect(
+            __testing.validateActivationInstructions(transaction, challenge, subscriberAddress),
+        ).rejects.toThrow(/missing transfer_subscription/);
     });
 
     test('rejects multiple subscribe instructions', async () => {
-        const { transaction } = await buildActivationTransactionBase64({ extraInstructions: 'duplicate-subscribe' });
-        expect(() => __testing.validateActivationInstructions(transaction, challenge)).toThrow(/Multiple subscribe/);
+        const { subscriberAddress, transaction } = await buildActivationTransactionBase64({
+            extraInstructions: 'duplicate-subscribe',
+        });
+        await expect(
+            __testing.validateActivationInstructions(transaction, challenge, subscriberAddress),
+        ).rejects.toThrow(/Multiple subscribe/);
     });
 
     test('rejects multiple transfer_subscription instructions', async () => {
-        const { transaction } = await buildActivationTransactionBase64({ extraInstructions: 'duplicate-transfer' });
-        expect(() => __testing.validateActivationInstructions(transaction, challenge)).toThrow(
-            /Multiple transfer_subscription/,
-        );
+        const { subscriberAddress, transaction } = await buildActivationTransactionBase64({
+            extraInstructions: 'duplicate-transfer',
+        });
+        await expect(
+            __testing.validateActivationInstructions(transaction, challenge, subscriberAddress),
+        ).rejects.toThrow(/Multiple transfer_subscription/);
+    });
+
+    test('rejects an extra instruction to another program', async () => {
+        const { subscriberAddress, transaction } = await buildActivationTransactionBase64({
+            extraInstructions: 'foreign-program',
+        });
+        await expect(
+            __testing.validateActivationInstructions(transaction, challenge, subscriberAddress),
+        ).rejects.toThrow(/Unsupported program/);
     });
 
     test('rejects when transfer_subscription precedes subscribe', async () => {
-        const { transaction } = await buildActivationTransactionBase64({ extraInstructions: 'reorder' });
-        expect(() => __testing.validateActivationInstructions(transaction, challenge)).toThrow(
-            /subscribe must precede/,
+        const { subscriberAddress, transaction } = await buildActivationTransactionBase64({
+            extraInstructions: 'reorder',
+        });
+        await expect(
+            __testing.validateActivationInstructions(transaction, challenge, subscriberAddress),
+        ).rejects.toThrow(/subscribe must precede/);
+    });
+
+    test('rejects an undecodable base64 input', async () => {
+        await expect(__testing.validateActivationInstructions('not-a-real-tx', challenge, RECIPIENT)).rejects.toThrow(
+            /Invalid transaction/,
         );
     });
 
-    test('rejects an undecodable base64 input', () => {
-        expect(() => __testing.validateActivationInstructions('not-a-real-tx', challenge)).toThrow(
-            /Invalid transaction/,
-        );
+    test('rejects transfer_subscription to an ATA owned by another recipient', async () => {
+        const { subscriberAddress, transaction } = await buildActivationTransactionBase64({
+            receiver: '11111111111111111111111111111111',
+        });
+        await expect(
+            __testing.validateActivationInstructions(transaction, challenge, subscriberAddress),
+        ).rejects.toThrow(/receiver does not match the challenge recipient/);
     });
 });
 
@@ -447,6 +548,30 @@ describe('extractSubscriberFromTransaction', () => {
         } as never;
         expect(__testing.extractSubscriberFromTransaction(txBase64, challenge).toString()).toBe(subscriber.address);
     });
+
+    test('does not treat a non-signer account as the sponsored subscriber', async () => {
+        const feePayer = await generateKeyPairSigner();
+        const nonSigner = await generateKeyPairSigner();
+        const ix: Instruction = {
+            accounts: [{ address: nonSigner.address, role: AccountRole.READONLY }],
+            data: new Uint8Array([SUBSCRIPTIONS_SUBSCRIBE_DISCRIMINATOR]),
+            programAddress: address(SUBSCRIPTIONS_PROGRAM),
+        };
+        const txMessage = pipe(
+            createTransactionMessage({ version: 0 }),
+            msg => setTransactionMessageFeePayerSigner(feePayer, msg),
+            msg => setTransactionMessageLifetimeUsingBlockhash({ blockhash: BLOCKHASH, lastValidBlockHeight: 1n }, msg),
+            msg => appendTransactionMessageInstructions([ix], msg),
+        );
+        const signed = await partiallySignTransactionMessageWithSigners(txMessage);
+        const challenge = {
+            methodDetails: { feePayer: true, feePayerKey: feePayer.address, puller: PULLER },
+        } as never;
+
+        expect(() =>
+            __testing.extractSubscriberFromTransaction(getBase64EncodedWireTransaction(signed), challenge),
+        ).toThrow(/Could not identify subscriber/);
+    });
 });
 
 // ══════════════════════════════════════════════════════════════════════
@@ -455,52 +580,25 @@ describe('extractSubscriberFromTransaction', () => {
 
 describe('decodeSubscriptionDelegation', () => {
     test('reads each field at the expected offset', () => {
-        const data = new Uint8Array(1 + 32 * 3 + 8 + 32 + 32 + 8 + 8 + 8 + 8);
-        let off = 0;
-        data[off] = 1; // discriminator
-        off += 1;
-        // subscriber, delegatee, payer pubkeys — fill with distinct patterns
-        data.set(new Uint8Array(32).fill(0xaa), off);
-        off += 32;
-        data.set(new Uint8Array(32).fill(0xbb), off);
-        off += 32;
-        data.set(new Uint8Array(32).fill(0xcc), off);
-        off += 32;
-        // init_id u64
-        off += 8;
-        // plan_pda
-        data.set(new Uint8Array(32).fill(0xdd), off);
-        off += 32;
-        // mint
-        data.set(new Uint8Array(32).fill(0xee), off);
-        off += 32;
-        // amount_per_period u64 = 10_000_000
-        writeU64Le(data, off, 10_000_000n);
-        off += 8;
-        // period_hours u64 = 720
-        writeU64Le(data, off, 720n);
-        off += 8;
-        // current_period_start_ts i64 = 1737216000 (2025-01-18T16:00:00Z)
-        writeU64Le(data, off, 1737216000n);
-        off += 8;
-        // amount_pulled_in_period u64 = 10_000_000
-        writeU64Le(data, off, 10_000_000n);
+        const data = new Uint8Array(155);
+        data[0] = 4;
+        data[1] = 1;
+        data[2] = 255;
+        data.set(new Uint8Array(32).fill(0xaa), 3);
+        data.set(new Uint8Array(32).fill(0xbb), 35);
+        writeU64Le(data, 107, 10_000_000n);
+        writeU64Le(data, 115, 720n);
+        writeU64Le(data, 131, 10_000_000n);
+        writeU64Le(data, 139, 1_737_216_000n);
 
         const decoded = __testing.decodeSubscriptionDelegation(data);
         expect(decoded.subscriber).toBe(__testing.encodeBase58(new Uint8Array(32).fill(0xaa)));
-        expect(decoded.planPda).toBe(__testing.encodeBase58(new Uint8Array(32).fill(0xdd)));
-        expect(decoded.mint).toBe(__testing.encodeBase58(new Uint8Array(32).fill(0xee)));
+        expect(decoded.planPda).toBe(__testing.encodeBase58(new Uint8Array(32).fill(0xbb)));
         expect(decoded.amountPerPeriod).toBe('10000000');
         expect(decoded.periodHours).toBe(720);
         expect(decoded.currentPeriodStartTs).toBe(1737216000);
         expect(decoded.amountPulledInPeriod).toBe('10000000');
     });
-
-    function writeU64Le(buf: Uint8Array, offset: number, value: bigint) {
-        for (let i = 0; i < 8; i += 1) {
-            buf[offset + i] = Number((value >> BigInt(i * 8)) & 0xffn);
-        }
-    }
 });
 
 // ══════════════════════════════════════════════════════════════════════
@@ -552,24 +650,7 @@ describe('subscription().verify() (push mode)', () => {
 
         // Build a `SubscriptionDelegation` byte buffer with amount_pulled = 0 so
         // verify() raises "first-period charge not executed".
-        const data = new Uint8Array(1 + 32 * 3 + 8 + 32 + 32 + 8 + 8 + 8 + 8);
-        // Set subscriber bytes to match the activation tx signer (decoded base58).
-        const subscriberBytes = __testing.decodeBase58(subscriberAddress);
-        data.set(subscriberBytes, 1);
-        // plan_pda, mint left as zeros — verify will fail on plan mismatch before
-        // reaching amount checks. To exercise the "first charge" path we set them.
-        const planBytes = __testing.decodeBase58(PLAN_ID);
-        const mintBytes = __testing.decodeBase58(MINT);
-        data.set(planBytes, 1 + 32 * 3 + 8);
-        data.set(mintBytes, 1 + 32 * 3 + 8 + 32);
-        // amount_per_period = 10_000_000
-        writeU64Le(data, 1 + 32 * 3 + 8 + 32 + 32, 10_000_000n);
-        // period_hours = 720
-        writeU64Le(data, 1 + 32 * 3 + 8 + 32 + 32 + 8, 720n);
-        // current_period_start_ts = anything
-        writeU64Le(data, 1 + 32 * 3 + 8 + 32 + 32 + 8 + 8, 1737216000n);
-        // amount_pulled_in_period = 0 (the failure we want to test)
-        writeU64Le(data, 1 + 32 * 3 + 8 + 32 + 32 + 8 + 8 + 8, 0n);
+        const data = buildDelegationData(subscriberAddress, PLAN_ID, 0n);
 
         const accountB64 = Buffer.from(data).toString('base64');
 
@@ -702,20 +783,15 @@ describe('subscription().verify() (push mode)', () => {
     });
 
     test('returns a successful receipt when on-chain state matches the challenge (pull mode)', async () => {
-        const { transaction, subscriberAddress } = await buildActivationTransactionBase64();
+        const { transaction, subscriberAddress } = await buildActivationTransactionBase64({ memo: 'order-99' });
         const txSignature = '5J8KKfgKBLPDoCSk7B7TwAdSP3KtkfxYGYQH52SVgyM5XQXfeaG3xH8E3uYmGNLcoNNgWp3JjPdvzNwM4ZmJyREq';
-        const data = new Uint8Array(1 + 32 * 3 + 8 + 32 + 32 + 8 + 8 + 8 + 8);
-        data.set(__testing.decodeBase58(subscriberAddress), 1);
-        data.set(__testing.decodeBase58(PLAN_ID), 1 + 32 * 3 + 8);
-        data.set(__testing.decodeBase58(MINT), 1 + 32 * 3 + 8 + 32);
-        writeU64Le(data, 1 + 32 * 3 + 8 + 32 + 32, 10_000_000n);
-        writeU64Le(data, 1 + 32 * 3 + 8 + 32 + 32 + 8, 720n);
-        writeU64Le(data, 1 + 32 * 3 + 8 + 32 + 32 + 8 + 8, 1737216000n);
-        writeU64Le(data, 1 + 32 * 3 + 8 + 32 + 32 + 8 + 8 + 8, 10_000_000n);
+        const data = buildDelegationData(subscriberAddress, PLAN_ID, 10_000_000n);
         const accountB64 = Buffer.from(data).toString('base64');
 
+        const rpcMethods: string[] = [];
         globalThis.fetch = async (_input, init) => {
             const body = JSON.parse(init?.body as string) as { method?: string };
+            if (body.method) rpcMethods.push(body.method);
             switch (body.method) {
                 case 'simulateTransaction':
                     return rpcSuccess({ value: { err: null, logs: [] } });
@@ -750,46 +826,45 @@ describe('subscription().verify() (push mode)', () => {
             rpcUrl: 'https://mock-rpc',
             tokenProgram: TOKEN_PROGRAM,
         });
-        const receipt = await method.verify!({
-            credential: {
-                challenge: {
-                    id: 'test-challenge',
-                    request: {
-                        amount: '10000000',
-                        currency: MINT,
-                        externalId: 'order-99',
-                        methodDetails: {
-                            decimals: 6,
-                            mint: MINT,
-                            network: 'devnet',
-                            planId: PLAN_ID,
-                            programId: SUBSCRIPTIONS_PROGRAM,
-                            puller: PULLER,
-                            tokenProgram: TOKEN_PROGRAM,
-                        },
-                        periodCount: '30',
-                        periodUnit: 'day',
-                        recipient: RECIPIENT,
+        const credential = {
+            challenge: {
+                id: 'test-challenge',
+                request: {
+                    amount: '10000000',
+                    currency: MINT,
+                    externalId: 'order-99',
+                    methodDetails: {
+                        decimals: 6,
+                        mint: MINT,
+                        network: 'devnet',
+                        planId: PLAN_ID,
+                        programId: SUBSCRIPTIONS_PROGRAM,
+                        puller: PULLER,
+                        tokenProgram: TOKEN_PROGRAM,
                     },
+                    periodCount: '30',
+                    periodUnit: 'day',
+                    recipient: RECIPIENT,
                 },
-                payload: { transaction, type: 'transaction' },
-            } as never,
+            },
+            payload: { transaction, type: 'transaction' },
+        } as never;
+        const receipt = await method.verify!({
+            credential,
             request: {} as never,
         });
         expect((receipt as { status: string }).status).toBe('success');
+
+        const recovered = await method.verify!({ credential, request: {} as never });
+        expect((recovered as { reference: string }).reference).toBe((receipt as { reference: string }).reference);
+        expect(rpcMethods.filter(method => method === 'simulateTransaction')).toHaveLength(1);
+        expect(rpcMethods.filter(method => method === 'sendTransaction')).toHaveLength(1);
     });
 
     test('rejects when on-chain delegation references a different plan', async () => {
         const { transaction, subscriberAddress } = await buildActivationTransactionBase64();
         const wrongPlan = '11111111111111111111111111111111';
-        const data = new Uint8Array(1 + 32 * 3 + 8 + 32 + 32 + 8 + 8 + 8 + 8);
-        data.set(__testing.decodeBase58(subscriberAddress), 1);
-        data.set(__testing.decodeBase58(wrongPlan), 1 + 32 * 3 + 8);
-        data.set(__testing.decodeBase58(MINT), 1 + 32 * 3 + 8 + 32);
-        writeU64Le(data, 1 + 32 * 3 + 8 + 32 + 32, 10_000_000n);
-        writeU64Le(data, 1 + 32 * 3 + 8 + 32 + 32 + 8, 720n);
-        writeU64Le(data, 1 + 32 * 3 + 8 + 32 + 32 + 8 + 8, 1737216000n);
-        writeU64Le(data, 1 + 32 * 3 + 8 + 32 + 32 + 8 + 8 + 8, 10_000_000n);
+        const data = buildDelegationData(subscriberAddress, wrongPlan, 10_000_000n);
         const accountB64 = Buffer.from(data).toString('base64');
 
         globalThis.fetch = async (_input, init) => {
@@ -1074,6 +1149,69 @@ describe('subscription().verify() (push mode)', () => {
                 request: {} as never,
             }),
         ).rejects.toThrow(/already consumed/);
+    });
+
+    test('concurrent push-mode activation returns exactly one receipt', async () => {
+        const { transaction, subscriberAddress } = await buildActivationTransactionBase64();
+        const accountB64 = Buffer.from(buildDelegationData(subscriberAddress, PLAN_ID, 10_000_000n)).toString('base64');
+        globalThis.fetch = async (_input, init) => {
+            const body = JSON.parse(init?.body as string) as { method?: string };
+            if (body.method === 'getTransaction') {
+                await Promise.resolve();
+                return rpcSuccess({ meta: { err: null }, transaction: [transaction, 'base64'] });
+            }
+            if (body.method === 'getAccountInfo') {
+                return rpcSuccess({
+                    value: {
+                        data: [accountB64, 'base64'],
+                        executable: false,
+                        lamports: 0,
+                        owner: SUBSCRIPTIONS_PROGRAM,
+                        rentEpoch: 0,
+                    },
+                });
+            }
+            return rpcSuccess({});
+        };
+        const method = subscription({
+            decimals: 6,
+            mint: MINT,
+            network: 'devnet',
+            periodCount: 30,
+            periodUnit: 'day',
+            planId: PLAN_ID,
+            puller: PULLER,
+            recipient: RECIPIENT,
+            rpcUrl: 'https://mock-rpc',
+            store: Store.memory(),
+            tokenProgram: TOKEN_PROGRAM,
+        });
+        const credential = {
+            challenge: {
+                request: {
+                    amount: '10000000',
+                    currency: MINT,
+                    methodDetails: {
+                        decimals: 6,
+                        mint: MINT,
+                        planId: PLAN_ID,
+                        programId: SUBSCRIPTIONS_PROGRAM,
+                        puller: PULLER,
+                        tokenProgram: TOKEN_PROGRAM,
+                    },
+                    periodCount: '30',
+                    periodUnit: 'day',
+                    recipient: RECIPIENT,
+                },
+            },
+            payload: { signature: 'same-activation-signature', type: 'signature' },
+        } as never;
+
+        const results = await Promise.allSettled(
+            Array.from({ length: 16 }, () => method.verify!({ credential, request: {} as never })),
+        );
+        expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+        expect(results.filter(result => result.status === 'rejected')).toHaveLength(15);
     });
 
     test('rejects when push-mode getTransaction returns null', async () => {
