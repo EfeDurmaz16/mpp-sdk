@@ -15,9 +15,9 @@ import {
     generateKeyPairSigner,
     getTransactionDecoder,
 } from '@solana/kit';
+import { getPlanEncoder, getSubscriptionAuthorityEncoder } from '@solana/subscriptions';
 
 import {
-    SUBSCRIPTIONS_INIT_AUTHORITY_DISCRIMINATOR,
     SUBSCRIPTIONS_PROGRAM,
     SUBSCRIPTIONS_SUBSCRIBE_DISCRIMINATOR,
     SUBSCRIPTIONS_TRANSFER_DISCRIMINATOR,
@@ -57,26 +57,54 @@ function rpcSuccess(result: unknown) {
  * blockhash for getLatestBlockhash, accept sendTransaction, and report the
  * signature as confirmed.
  */
-function defaultMockFetch(opts: { authorityExists?: boolean } = {}): typeof globalThis.fetch {
+function defaultMockFetch(opts: { authorityExists?: boolean } = { authorityExists: true }): typeof globalThis.fetch {
     return async (_input: RequestInfo | URL, init?: RequestInit) => {
-        const body = JSON.parse(init?.body as string) as { method?: string };
+        const body = JSON.parse(init?.body as string) as { method?: string; params?: unknown[] };
         switch (body.method) {
-            case 'getAccountInfo':
-                return rpcSuccess(
-                    opts.authorityExists
-                        ? {
-                              context: { slot: 1 },
-                              value: {
-                                  data: ['', 'base64'],
-                                  executable: false,
-                                  lamports: 1,
-                                  owner: SUBSCRIPTIONS_PROGRAM,
-                                  rentEpoch: 0,
-                                  space: 0,
-                              },
-                          }
-                        : { context: { slot: 1 }, value: null },
-                );
+            case 'getAccountInfo': {
+                const requested = String(body.params?.[0]);
+                if (requested === PLAN_ID) {
+                    const encoded = getPlanEncoder().encode({
+                        bump: 1,
+                        data: {
+                            destinations: [
+                                address(RECIPIENT),
+                                address('11111111111111111111111111111111'),
+                                address('11111111111111111111111111111111'),
+                                address('11111111111111111111111111111111'),
+                            ],
+                            endTs: 0n,
+                            metadataUri: '',
+                            mint: address(MINT),
+                            planId: 1n,
+                            pullers: [
+                                address(PULLER),
+                                address('11111111111111111111111111111111'),
+                                address('11111111111111111111111111111111'),
+                                address('11111111111111111111111111111111'),
+                            ],
+                            terms: { amount: 10_000_000n, createdAt: 1n, periodHours: 720n },
+                        },
+                        discriminator: 1,
+                        owner: address(PULLER),
+                        status: 1,
+                    });
+                    return rpcSuccess({
+                        context: { slot: 1 },
+                        value: accountValue(getBase64Codec().decode(encoded)),
+                    });
+                }
+                if (!opts.authorityExists) return rpcSuccess({ context: { slot: 1 }, value: null });
+                const encoded = getSubscriptionAuthorityEncoder().encode({
+                    bump: 1,
+                    discriminator: 0,
+                    initId: 42n,
+                    payer: address(PULLER),
+                    tokenMint: address(MINT),
+                    user: address(PULLER),
+                });
+                return rpcSuccess({ context: { slot: 1 }, value: accountValue(getBase64Codec().decode(encoded)) });
+            }
             case 'getLatestBlockhash':
                 return rpcSuccess({ context: { slot: 1 }, value: { blockhash: BLOCKHASH, lastValidBlockHeight: 1 } });
             case 'sendTransaction':
@@ -88,6 +116,17 @@ function defaultMockFetch(opts: { authorityExists?: boolean } = {}): typeof glob
             default:
                 return rpcSuccess({});
         }
+    };
+}
+
+function accountValue(data: string) {
+    return {
+        data: [data, 'base64'],
+        executable: false,
+        lamports: 1,
+        owner: SUBSCRIPTIONS_PROGRAM,
+        rentEpoch: 0,
+        space: 491,
     };
 }
 
@@ -116,7 +155,8 @@ function baseRequest(): Parameters<typeof buildSubscriptionActivationTransaction
             decimals: 6,
             mint: MINT,
             network: 'devnet',
-            planId: PLAN_ID,
+            planAddress: PLAN_ID,
+            subscriptionProgram: SUBSCRIPTIONS_PROGRAM,
             puller: PULLER,
             tokenProgram: TOKEN_PROGRAM,
         },
@@ -131,7 +171,7 @@ function baseRequest(): Parameters<typeof buildSubscriptionActivationTransaction
 // ══════════════════════════════════════════════════════════════════════
 
 describe('buildSubscriptionActivationTransaction', () => {
-    test('includes initialize_subscription_authority when the authority does not exist', async () => {
+    test('uses the current subscribe and transfer layouts', async () => {
         globalThis.fetch = defaultMockFetch();
         const signer = await generateKeyPairSigner();
         const tx = await buildSubscriptionActivationTransaction({
@@ -141,24 +181,27 @@ describe('buildSubscriptionActivationTransaction', () => {
         });
         const message = decodeMessage(tx);
         const discriminators = instructionDiscriminatorsByProgram(message, SUBSCRIPTIONS_PROGRAM);
-        expect(discriminators).toEqual([
-            SUBSCRIPTIONS_INIT_AUTHORITY_DISCRIMINATOR,
-            SUBSCRIPTIONS_SUBSCRIBE_DISCRIMINATOR,
-            SUBSCRIPTIONS_TRANSFER_DISCRIMINATOR,
-        ]);
+        expect(discriminators).toEqual([SUBSCRIPTIONS_SUBSCRIBE_DISCRIMINATOR, SUBSCRIPTIONS_TRANSFER_DISCRIMINATOR]);
     });
 
-    test('omits initialize_subscription_authority when the authority already exists', async () => {
-        globalThis.fetch = defaultMockFetch({ authorityExists: true });
+    test('binds subscription activation to the supplied authority init id', async () => {
+        globalThis.fetch = defaultMockFetch();
         const signer = await generateKeyPairSigner();
         const tx = await buildSubscriptionActivationTransaction({
             request: baseRequest(),
             rpcUrl: 'https://mock-rpc',
             signer,
+            subscriptionAuthorityInitId: 42n,
         });
         const message = decodeMessage(tx);
         const discriminators = instructionDiscriminatorsByProgram(message, SUBSCRIPTIONS_PROGRAM);
-        expect(discriminators).toEqual([SUBSCRIPTIONS_SUBSCRIBE_DISCRIMINATOR, SUBSCRIPTIONS_TRANSFER_DISCRIMINATOR]);
+        const subscribe = message.instructions.find(
+            ix =>
+                message.staticAccounts[ix.programAddressIndex].toString() === SUBSCRIPTIONS_PROGRAM &&
+                ix.data[0] === SUBSCRIPTIONS_SUBSCRIBE_DISCRIMINATOR,
+        );
+        expect(subscribe?.data).toHaveLength(74);
+        expect(new DataView(subscribe!.data.buffer, subscribe!.data.byteOffset).getBigInt64(66, true)).toBe(42n);
     });
 
     test('uses the server-provided recentBlockhash when present', async () => {
@@ -340,6 +383,22 @@ describe('subscription() client wrapper', () => {
         // builder ran end-to-end and that no broadcast happened.
         expect(typeof cred).toBe('string');
         expect(cred.length).toBeGreaterThan(0);
+        expect(calls).not.toContain('sendTransaction');
+    });
+
+    test('requires explicit authority initialization in pull mode', async () => {
+        const calls: string[] = [];
+        globalThis.fetch = async (input, init) => {
+            const body = JSON.parse(init?.body as string) as { method?: string };
+            calls.push(body.method ?? '');
+            return defaultMockFetch({ authorityExists: false })(input, init);
+        };
+        const signer = await generateKeyPairSigner();
+        const method = subscriptionClient({ rpcUrl: 'https://mock-rpc', signer });
+
+        await expect(method.createCredential!({ challenge: await buildChallenge() })).rejects.toThrow(
+            /initializeSubscriptionAuthority/,
+        );
         expect(calls).not.toContain('sendTransaction');
     });
 

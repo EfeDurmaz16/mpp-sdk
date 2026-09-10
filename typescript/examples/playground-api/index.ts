@@ -41,9 +41,17 @@ const RECIPIENT = process.env.RECIPIENT ?? operator.address
 // A second recipient for the marketplace-split demo (the platform's cut).
 const PLATFORM = (await generateKeyPairSigner()).address
 
+// Fund the generated operator before creating sandbox state. Client wallets are
+// funded through the faucet after onboarding.
+if (NETWORK === 'localnet') {
+  await fundSandbox(RPC_URL, operator.address, RECIPIENT)
+  await fundUsdc(RPC_URL, PLATFORM)
+}
+
 // Subscription plan PDA: bootstrapped on the sandbox (or supplied via env). The
 // subscription route is only mounted when one is available.
-const PLAN_ID = NETWORK === 'localnet' ? await bootstrapPlan(RPC_URL) : process.env.PLAN_ID ?? null
+const PLAN_ID =
+  NETWORK === 'localnet' ? await bootstrapPlan(RPC_URL, operator, RECIPIENT) : (process.env.PLAN_ID ?? null)
 
 // ── PayKit: one config object declares the server + the priced routes ──
 const pay = await createPayKit({
@@ -78,7 +86,10 @@ const pay = await createPayKit({
     // drive (they expect GET /api/v1/fortune → 402 → `{ "fortune": ... }`).
     fortune: { amount: usd('0.01'), description: 'A fortune cookie' },
     quote: { amount: usd('0.01'), description: 'Stock quote' },
-    stream: session(usd('1.00'), { closeDelayMs: 2000, description: 'Metered token stream', unitPrice: usd('0.0001') }),
+    // Leave enough room for a cold sandbox channel-open before the first
+    // streamed voucher arrives. Two seconds was racy in browser E2E: the idle
+    // close could start while the client was reserving its first delivery.
+    stream: session(usd('1.00'), { closeDelayMs: 5000, description: 'Metered token stream', unitPrice: usd('0.0001') }),
     summarize: usage(usd('0.1'), { description: 'Summarize text, billed per token' }),
   },
   rpcUrl: RPC_URL,
@@ -119,8 +130,6 @@ app.use(cors({ exposedHeaders: ['www-authenticate', 'payment-required', 'x-payme
 
 // Local sandbox funding + faucet (no-op on real networks).
 if (NETWORK === 'localnet') {
-  await fundSandbox(RPC_URL, operator.address, RECIPIENT)
-  await fundUsdc(RPC_URL, PLATFORM) // the split recipient needs a USDC account to receive its cut
   registerFaucet(app, RPC_URL)
 }
 

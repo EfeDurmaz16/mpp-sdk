@@ -1,14 +1,19 @@
 import {
-    AccountRole,
     type Address,
     address,
     appendTransactionMessageInstructions,
     type Base64EncodedWireTransaction,
     type Blockhash,
+    createSignableMessage,
     createSolanaRpc,
     createTransactionMessage,
+    getBase58Decoder,
+    getBase58Encoder,
+    getBase64Codec,
     getBase64EncodedWireTransaction,
+    getPublicKeyFromAddress,
     type Instruction,
+    type MessagePartialSigner,
     partiallySignTransactionMessageWithSigners,
     pipe,
     prependTransactionMessageInstructions,
@@ -16,21 +21,22 @@ import {
     setTransactionMessageFeePayerSigner,
     setTransactionMessageLifetimeUsingBlockhash,
     type TransactionSigner,
+    verifySignature,
 } from '@solana/kit';
+import {
+    findEventAuthorityPda,
+    getInitSubscriptionAuthorityInstructionAsync,
+    getPlanDecoder,
+    getSubscribeInstructionAsync,
+    getSubscriptionAuthorityDecoder,
+    getTransferSubscriptionInstruction,
+} from '@solana/subscriptions';
 import { getSetComputeUnitLimitInstruction, getSetComputeUnitPriceInstruction } from '@solana-program/compute-budget';
-import { findAssociatedTokenPda } from '@solana-program/token';
+import { findAssociatedTokenPda, getCreateAssociatedTokenIdempotentInstruction } from '@solana-program/token';
+import type { Challenge as MppxChallenge } from 'mppx';
 import { Credential, Method } from 'mppx';
 
-import {
-    DEFAULT_RPC_URLS,
-    MEMO_PROGRAM,
-    normalizeNetwork,
-    SUBSCRIPTIONS_INIT_AUTHORITY_DISCRIMINATOR,
-    SUBSCRIPTIONS_PROGRAM,
-    SUBSCRIPTIONS_SUBSCRIBE_DISCRIMINATOR,
-    SUBSCRIPTIONS_TRANSFER_DISCRIMINATOR,
-    SYSTEM_PROGRAM,
-} from '../constants.js';
+import { DEFAULT_RPC_URLS, MEMO_PROGRAM, normalizeNetwork, SYSTEM_PROGRAM } from '../constants.js';
 import * as Methods from '../Methods.js';
 import {
     assertPeriodHoursInRange,
@@ -39,11 +45,102 @@ import {
     mapSubscriptionPeriodToHours,
 } from '../shared/subscription.js';
 
+/** Domain separator for reusable subscription authentication proofs. */
+export const SUBSCRIPTION_AUTHENTICATION_DOMAIN = 'mpp-subscription-auth-v1';
+
+/** Reusable payer proof bound to one activation challenge and delegation. */
+export interface SubscriptionAuthentication {
+    readonly challengeId: string;
+    readonly payer: string;
+    readonly signature: string;
+    readonly type: 'proof';
+}
+
+/** A signer that can authorize both the activation transaction and bearer proof. */
+export type SubscriptionSigner = MessagePartialSigner & TransactionSigner;
+
+/** Canonical JCS bytes signed by a reusable subscription proof. */
+export function subscriptionAuthenticationMessage(parameters: {
+    readonly challengeId: string;
+    readonly payer: string;
+    readonly subscriptionDelegation: string;
+}): Uint8Array {
+    return new TextEncoder().encode(
+        JSON.stringify({
+            domain: SUBSCRIPTION_AUTHENTICATION_DOMAIN,
+            payer: parameters.payer,
+            subscriptionChallengeId: parameters.challengeId,
+            subscriptionDelegation: parameters.subscriptionDelegation,
+        }),
+    );
+}
+
+/** Creates a reusable payer proof for access under an active subscription. */
+export async function signSubscriptionAuthentication(parameters: {
+    readonly challengeId: string;
+    readonly signer: MessagePartialSigner;
+    readonly subscriptionDelegation: string;
+}): Promise<SubscriptionAuthentication> {
+    const message = subscriptionAuthenticationMessage({
+        challengeId: parameters.challengeId,
+        payer: parameters.signer.address,
+        subscriptionDelegation: parameters.subscriptionDelegation,
+    });
+    const [signatures] = await parameters.signer.signMessages([createSignableMessage(message)]);
+    const signature = signatures?.[parameters.signer.address];
+    if (!signature) throw new Error(`Signer ${parameters.signer.address} did not return a subscription proof`);
+    return {
+        challengeId: parameters.challengeId,
+        payer: parameters.signer.address,
+        signature: getBase58Decoder().decode(new Uint8Array(signature)),
+        type: 'proof',
+    };
+}
+
+/** Verifies a reusable payer proof against its bound delegation. */
+export async function verifySubscriptionAuthentication(
+    authentication: SubscriptionAuthentication,
+    subscriptionDelegation: string,
+): Promise<boolean> {
+    try {
+        const publicKey = await getPublicKeyFromAddress(authentication.payer as Address);
+        const signature = getBase58Encoder().encode(authentication.signature);
+        return await verifySignature(
+            publicKey,
+            signature as Parameters<typeof verifySignature>[1],
+            subscriptionAuthenticationMessage({
+                challengeId: authentication.challengeId,
+                payer: authentication.payer,
+                subscriptionDelegation,
+            }),
+        );
+    } catch {
+        return false;
+    }
+}
+
+/** Serializes a later-use credential from the proof retained at activation. */
+export function serializeSubscriptionAccessCredential(parameters: {
+    readonly authentication: SubscriptionAuthentication;
+    readonly challenge: MppxChallenge.Challenge;
+    readonly subscriptionDelegation: string;
+}): string {
+    return Credential.serialize({
+        challenge: parameters.challenge,
+        payload: {
+            authentication: parameters.authentication,
+            subscriptionDelegation: parameters.subscriptionDelegation,
+            type: 'proof',
+        },
+    });
+}
+
 /**
  * Creates a Solana `subscription` method for usage on the client.
  *
- * Builds the activation transaction (initialize_subscription_authority if
- * needed, subscribe, transfer_subscription) and signs as the subscriber.
+ * Builds the activation transaction (subscribe, transfer_subscription) and
+ * signs as the subscriber. Pull mode requires callers to initialize the
+ * authority explicitly; push mode initializes it when needed.
  * When `feePayer: true` is advertised in the challenge, the server's
  * `feePayerKey` is used as fee payer and the transaction is partially
  * signed; the server completes the signature before broadcasting.
@@ -70,23 +167,54 @@ export function subscription(parameters: subscription.Parameters) {
                 throw new Error('broadcast=true cannot be used with fee sponsorship (feePayer: true)');
             }
 
+            const subscriptionDelegation = await deriveSubscriptionPda({
+                planPda: address(challenge.request.methodDetails.planAddress),
+                programId: address(challenge.request.methodDetails.subscriptionProgram),
+                subscriber: signer.address,
+            });
+            const authentication = await signSubscriptionAuthentication({
+                challengeId: challenge.id,
+                signer,
+                subscriptionDelegation,
+            });
+            parameters.onAuthentication?.({
+                authentication,
+                challenge,
+                subscriptionDelegation,
+            });
+
+            const rpcUrl =
+                parameters.rpcUrl ??
+                DEFAULT_RPC_URLS[normalizeNetwork(network ?? 'mainnet')] ??
+                DEFAULT_RPC_URLS.mainnet;
+            const authorityParameters = {
+                mint: methodDetails.mint,
+                programId: methodDetails.subscriptionProgram,
+                rpcUrl,
+                signer,
+                tokenProgram: methodDetails.tokenProgram,
+            };
+            let subscriptionAuthorityInitId = await readSubscriptionAuthorityInitId(authorityParameters);
+            if (subscriptionAuthorityInitId === null) {
+                if (!broadcast) {
+                    throw new Error(
+                        'SubscriptionAuthority is not initialized; call initializeSubscriptionAuthority before using pull mode',
+                    );
+                }
+                subscriptionAuthorityInitId = await initializeSubscriptionAuthority(authorityParameters);
+            }
+
             const encodedTx = await buildSubscriptionActivationTransaction({
                 computeUnitLimit: parameters.computeUnitLimit,
                 computeUnitPrice: parameters.computeUnitPrice,
                 onProgress,
                 request: challenge.request,
-                rpcUrl:
-                    parameters.rpcUrl ??
-                    DEFAULT_RPC_URLS[normalizeNetwork(network ?? 'mainnet')] ??
-                    DEFAULT_RPC_URLS.mainnet,
+                rpcUrl,
                 signer,
+                subscriptionAuthorityInitId,
             });
 
-            const rpc = createSolanaRpc(
-                parameters.rpcUrl ??
-                    DEFAULT_RPC_URLS[normalizeNetwork(network ?? 'mainnet')] ??
-                    DEFAULT_RPC_URLS.mainnet,
-            );
+            const rpc = createSolanaRpc(rpcUrl);
 
             if (broadcast) {
                 onProgress?.({ type: 'paying' });
@@ -99,14 +227,14 @@ export function subscription(parameters: subscription.Parameters) {
 
                 return Credential.serialize({
                     challenge,
-                    payload: { signature, type: 'signature' },
+                    payload: { authentication, signature, type: 'signature' },
                 });
             }
 
             onProgress?.({ transaction: encodedTx, type: 'signed' });
             return Credential.serialize({
                 challenge,
-                payload: { transaction: encodedTx, type: 'transaction' },
+                payload: { authentication, transaction: encodedTx, type: 'transaction' },
             });
         },
     });
@@ -117,27 +245,25 @@ export function subscription(parameters: subscription.Parameters) {
 /**
  * Build and sign the activation transaction for a Solana subscription challenge.
  *
- * The transaction layout matches the spec's required ordering:
- *
- *   [ComputeBudgetSetUnitPrice, ComputeBudgetSetUnitLimit,
- *    initialize_subscription_authority?,
- *    subscribe,
- *    transfer_subscription,
- *    memo(externalId)?]
+ * The SubscriptionAuthority is initialized in a separate transaction because
+ * the subscribe instruction binds to its on-chain init id. The activation is
+ * then assembled from the current Codama client so it stays aligned with the
+ * deployed subscriptions program.
  */
 export async function buildSubscriptionActivationTransaction(
     parameters: buildSubscriptionActivationTransaction.Parameters,
 ): Promise<Base64EncodedWireTransaction> {
     const {
         signer,
+        subscriptionAuthorityInitId,
         request: { amount, externalId, recipient, methodDetails, periodCount, periodUnit },
         onProgress,
     } = parameters;
     const {
         network,
         mint,
-        planId,
-        programId = SUBSCRIPTIONS_PROGRAM,
+        planAddress: planId,
+        subscriptionProgram,
         tokenProgram,
         feePayer: serverPaysFees,
         feePayerKey,
@@ -168,7 +294,7 @@ export async function buildSubscriptionActivationTransaction(
     const subscriberAddress = signer.address;
     const mintAddress = address(mint);
     const planPda = address(planId);
-    const programAddress = address(programId);
+    const programAddress = address(subscriptionProgram);
     const tokenProgramAddress = address(tokenProgram);
     const recipientAddress = address(recipient);
 
@@ -194,48 +320,91 @@ export async function buildSubscriptionActivationTransaction(
         tokenProgram: tokenProgramAddress,
     });
 
-    const authorityExists = await checkAccountExists(rpc, subscriptionAuthority);
-
-    const instructions: Instruction[] = [];
-
-    if (!authorityExists) {
-        instructions.push(
-            buildInitSubscriptionAuthorityInstruction({
-                ata: subscriberAta,
-                mint: mintAddress,
-                programAddress,
-                subscriber: subscriberAddress,
-                subscriptionAuthority,
-                tokenProgram: tokenProgramAddress,
-            }),
-        );
+    const liveAuthorityInitId =
+        subscriptionAuthorityInitId ?? (await fetchAuthorityInitId(rpc, subscriptionAuthority, programAddress));
+    if (liveAuthorityInitId === null) {
+        throw new Error('SubscriptionAuthority must be initialized before building an activation transaction');
     }
 
-    instructions.push(
-        buildSubscribeInstruction({
-            payer: useServerFeePayer && feePayerKey ? address(feePayerKey) : subscriberAddress,
-            planPda,
-            programAddress,
-            subscriber: subscriberAddress,
-            subscriptionAuthority,
-            subscriptionPda,
-        }),
-    );
+    const plan = await fetchPlan(rpc, planPda, programAddress);
+    if (plan.data.mint !== mintAddress) throw new Error('Subscription plan mint does not match the challenge');
+    if (plan.data.terms.amount !== BigInt(amount))
+        throw new Error('Subscription plan amount does not match the challenge');
+    if (plan.data.terms.periodHours !== BigInt(periodHours)) {
+        throw new Error('Subscription plan period does not match the challenge');
+    }
 
-    instructions.push(
-        buildTransferSubscriptionInstruction({
+    const payerAddress = useServerFeePayer ? address(feePayerKey!) : subscriberAddress;
+    const payerSigner = payerAddress === subscriberAddress ? signer : remoteSigner(payerAddress);
+    const pullerAddress = methodDetails.puller ? address(methodDetails.puller) : subscriberAddress;
+    const pullerSigner = pullerAddress === subscriberAddress ? signer : remoteSigner(pullerAddress);
+    const [eventAuthority] = await findEventAuthorityPda({ programAddress });
+
+    const subscriberAtaIx = stripRemoteSigner(
+        getCreateAssociatedTokenIdempotentInstruction({
+            ata: subscriberAta,
             mint: mintAddress,
-            planPda,
-            programAddress,
-            puller: methodDetails.puller ? address(methodDetails.puller) : subscriberAddress,
-            recipientAta,
-            subscriber: subscriberAddress,
-            subscriberAta,
-            subscriptionAuthority,
-            subscriptionPda,
+            owner: subscriberAddress,
+            payer: payerSigner,
             tokenProgram: tokenProgramAddress,
         }),
+        payerAddress,
     );
+    const recipientAtaIx = stripRemoteSigner(
+        getCreateAssociatedTokenIdempotentInstruction({
+            ata: recipientAta,
+            mint: mintAddress,
+            owner: recipientAddress,
+            payer: payerSigner,
+            tokenProgram: tokenProgramAddress,
+        }),
+        payerAddress,
+    );
+    const generatedSubscribe = await getSubscribeInstructionAsync(
+        {
+            eventAuthority,
+            merchant: plan.owner,
+            payer: payerSigner,
+            planPda,
+            selfProgram: programAddress,
+            subscribeData: {
+                expectedAmount: BigInt(amount),
+                expectedCreatedAt: plan.data.terms.createdAt,
+                expectedMint: mintAddress,
+                expectedPeriodHours: BigInt(periodHours),
+                expectedSubscriptionAuthorityInitId: liveAuthorityInitId,
+                planBump: plan.bump,
+                planId: plan.data.planId,
+            },
+            subscriber: signer,
+            subscriptionAuthorityPda: subscriptionAuthority,
+            subscriptionPda,
+            systemProgram: address(SYSTEM_PROGRAM),
+        },
+        { programAddress },
+    );
+    const subscribeIx = stripRemoteSigner(generatedSubscribe, payerAddress);
+    const transferIx = stripRemoteSigner(
+        getTransferSubscriptionInstruction(
+            {
+                caller: pullerSigner,
+                delegatorAta: subscriberAta,
+                eventAuthority,
+                planPda,
+                receiverAta: recipientAta,
+                selfProgram: programAddress,
+                subscriptionAuthority,
+                subscriptionPda,
+                tokenMint: mintAddress,
+                tokenProgram: tokenProgramAddress,
+                transferData: { amount: BigInt(amount), delegator: subscriberAddress, mint: mintAddress },
+            },
+            { programAddress },
+        ),
+        pullerAddress,
+    );
+
+    const instructions: Instruction[] = [subscriberAtaIx, recipientAtaIx, subscribeIx, transferIx];
 
     if (externalId) {
         instructions.push(buildMemoInstruction(externalId));
@@ -265,91 +434,118 @@ export async function buildSubscriptionActivationTransaction(
             ),
     );
 
-    const signedTx = useServerFeePayer
-        ? await partiallySignTransactionMessageWithSigners(txMessage)
-        : await partiallySignTransactionMessageWithSigners(txMessage);
-
-    return getBase64EncodedWireTransaction(signedTx);
+    return getBase64EncodedWireTransaction(await partiallySignTransactionMessageWithSigners(txMessage));
 }
 
-// ── Instruction builders (v0, hand-rolled) ──
-//
-// These build the subscriptions program's instructions by inlining
-// account orders and discriminator bytes. A follow-up should replace
-// them with the Codama-generated overlay instructions exported by the
-// `subscriptions` client package.
+/** Explicitly initialize the subscriber authority and return its live init id. */
+export async function initializeSubscriptionAuthority(parameters: {
+    mint: string;
+    programId: string;
+    rpcUrl: string;
+    signer: SubscriptionSigner;
+    tokenProgram: string;
+}): Promise<bigint> {
+    const rpc = createSolanaRpc(parameters.rpcUrl);
+    const mint = address(parameters.mint);
+    const programAddress = address(parameters.programId);
+    const tokenProgram = address(parameters.tokenProgram);
+    const authority = await deriveSubscriptionAuthorityPda({
+        mint,
+        programId: programAddress,
+        subscriber: parameters.signer.address,
+    });
+    const existing = await fetchAuthorityInitId(rpc, authority, programAddress);
+    if (existing !== null) return existing;
 
-function buildInitSubscriptionAuthorityInstruction(params: {
-    ata: Address;
-    mint: Address;
-    programAddress: Address;
-    subscriber: Address;
-    subscriptionAuthority: Address;
-    tokenProgram: Address;
-}): Instruction {
+    const [ata] = await findAssociatedTokenPda({ mint, owner: parameters.signer.address, tokenProgram });
+    const createAta = getCreateAssociatedTokenIdempotentInstruction({
+        ata,
+        mint,
+        owner: parameters.signer.address,
+        payer: parameters.signer,
+        tokenProgram,
+    });
+    const init = await getInitSubscriptionAuthorityInstructionAsync(
+        {
+            owner: parameters.signer,
+            subscriptionAuthority: authority,
+            tokenMint: mint,
+            tokenProgram,
+            userAta: ata,
+        },
+        { programAddress },
+    );
+    const latestBlockhash = (await rpc.getLatestBlockhash().send()).value;
+    const message = pipe(
+        createTransactionMessage({ version: 0 }),
+        msg => setTransactionMessageFeePayerSigner(parameters.signer, msg),
+        msg => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, msg),
+        msg => appendTransactionMessageInstructions([createAta, init], msg),
+    );
+    const transaction = getBase64EncodedWireTransaction(await partiallySignTransactionMessageWithSigners(message));
+    const signature = await rpc.sendTransaction(transaction, { encoding: 'base64', skipPreflight: false }).send();
+    await confirmTransaction(rpc, signature);
+    const initialized = await fetchAuthorityInitId(rpc, authority, programAddress);
+    if (initialized === null) throw new Error('SubscriptionAuthority account missing after initialization');
+    return initialized;
+}
+
+async function readSubscriptionAuthorityInitId(parameters: {
+    mint: string;
+    programId: string;
+    rpcUrl: string;
+    signer: SubscriptionSigner;
+    tokenProgram: string;
+}): Promise<bigint | null> {
+    const rpc = createSolanaRpc(parameters.rpcUrl);
+    const programAddress = address(parameters.programId);
+    const authority = await deriveSubscriptionAuthorityPda({
+        mint: address(parameters.mint),
+        programId: programAddress,
+        subscriber: parameters.signer.address,
+    });
+    return await fetchAuthorityInitId(rpc, authority, programAddress);
+}
+
+function remoteSigner(remoteAddress: Address): TransactionSigner {
     return {
-        accounts: [
-            { address: params.subscriber, role: AccountRole.WRITABLE_SIGNER },
-            { address: params.subscriptionAuthority, role: AccountRole.WRITABLE },
-            { address: params.mint, role: AccountRole.READONLY },
-            { address: params.ata, role: AccountRole.WRITABLE },
-            { address: params.tokenProgram, role: AccountRole.READONLY },
-            { address: address(SYSTEM_PROGRAM), role: AccountRole.READONLY },
-        ],
-        data: new Uint8Array([SUBSCRIPTIONS_INIT_AUTHORITY_DISCRIMINATOR]),
-        programAddress: params.programAddress,
+        address: remoteAddress,
+        signTransactions() {
+            return Promise.reject(new Error(`Remote signer ${remoteAddress} must be completed by the server`));
+        },
+    } as TransactionSigner;
+}
+
+function stripRemoteSigner(instruction: Instruction, remoteAddress: Address): Instruction {
+    return {
+        ...instruction,
+        accounts: instruction.accounts?.map(meta =>
+            meta.address === remoteAddress ? { address: meta.address, role: meta.role } : meta,
+        ),
     };
 }
 
-function buildSubscribeInstruction(params: {
-    payer: Address;
-    planPda: Address;
-    programAddress: Address;
-    subscriber: Address;
-    subscriptionAuthority: Address;
-    subscriptionPda: Address;
-}): Instruction {
-    return {
-        accounts: [
-            { address: params.subscriber, role: AccountRole.WRITABLE_SIGNER },
-            { address: params.payer, role: AccountRole.WRITABLE_SIGNER },
-            { address: params.planPda, role: AccountRole.READONLY },
-            { address: params.subscriptionPda, role: AccountRole.WRITABLE },
-            { address: params.subscriptionAuthority, role: AccountRole.READONLY },
-            { address: address(SYSTEM_PROGRAM), role: AccountRole.READONLY },
-        ],
-        data: new Uint8Array([SUBSCRIPTIONS_SUBSCRIBE_DISCRIMINATOR]),
-        programAddress: params.programAddress,
-    };
+async function fetchPlan(
+    rpc: ReturnType<typeof createSolanaRpc>,
+    plan: Address,
+    expectedOwner: Address,
+): Promise<ReturnType<ReturnType<typeof getPlanDecoder>['decode']>> {
+    const account = await rpc.getAccountInfo(plan, { encoding: 'base64' }).send();
+    if (!account.value) throw new Error('Subscription Plan account not found');
+    if (account.value.owner !== expectedOwner) throw new Error('Subscription Plan owner does not match the program');
+    return getPlanDecoder().decode(getBase64Codec().encode(account.value.data[0]));
 }
 
-function buildTransferSubscriptionInstruction(params: {
-    mint: Address;
-    planPda: Address;
-    programAddress: Address;
-    puller: Address;
-    recipientAta: Address;
-    subscriber: Address;
-    subscriberAta: Address;
-    subscriptionAuthority: Address;
-    subscriptionPda: Address;
-    tokenProgram: Address;
-}): Instruction {
-    return {
-        accounts: [
-            { address: params.puller, role: AccountRole.WRITABLE_SIGNER },
-            { address: params.subscriptionPda, role: AccountRole.WRITABLE },
-            { address: params.planPda, role: AccountRole.READONLY },
-            { address: params.subscriptionAuthority, role: AccountRole.READONLY },
-            { address: params.subscriber, role: AccountRole.READONLY },
-            { address: params.subscriberAta, role: AccountRole.WRITABLE },
-            { address: params.recipientAta, role: AccountRole.WRITABLE },
-            { address: params.mint, role: AccountRole.READONLY },
-            { address: params.tokenProgram, role: AccountRole.READONLY },
-        ],
-        data: new Uint8Array([SUBSCRIPTIONS_TRANSFER_DISCRIMINATOR]),
-        programAddress: params.programAddress,
-    };
+async function fetchAuthorityInitId(
+    rpc: ReturnType<typeof createSolanaRpc>,
+    authority: Address,
+    expectedOwner: Address,
+): Promise<bigint | null> {
+    const account = await rpc.getAccountInfo(authority, { encoding: 'base64' }).send();
+    if (!account.value) return null;
+    if (account.value.owner !== expectedOwner)
+        throw new Error('SubscriptionAuthority owner does not match the program');
+    return getSubscriptionAuthorityDecoder().decode(getBase64Codec().encode(account.value.data[0])).initId;
 }
 
 function buildMemoInstruction(memo: string): Instruction {
@@ -362,11 +558,6 @@ function buildMemoInstruction(memo: string): Instruction {
         data,
         programAddress: address(MEMO_PROGRAM),
     };
-}
-
-async function checkAccountExists(rpc: ReturnType<typeof createSolanaRpc>, accountAddress: Address): Promise<boolean> {
-    const account = await rpc.getAccountInfo(accountAddress, { encoding: 'base64' }).send();
-    return account.value !== null;
 }
 
 async function confirmTransaction(
@@ -399,12 +590,18 @@ export declare namespace subscription {
         computeUnitLimit?: number;
         /** Compute unit price in micro-lamports for priority fees. Defaults to 1. */
         computeUnitPrice?: bigint;
+        /** Receives the reusable access proof. Store it as a secret bearer credential. */
+        onAuthentication?: (access: {
+            authentication: SubscriptionAuthentication;
+            challenge: MppxChallenge.Challenge;
+            subscriptionDelegation: Address;
+        }) => void;
         /** Called at each step of the activation process. */
         onProgress?: (event: ProgressEvent) => void;
         /** Custom RPC URL. If not set, inferred from the challenge's network field. */
         rpcUrl?: string;
         /** Solana transaction signer. The subscriber's funding key. */
-        signer: TransactionSigner;
+        signer: SubscriptionSigner;
     };
 
     type ProgressEvent =
@@ -453,11 +650,11 @@ export declare namespace buildSubscriptionActivationTransaction {
                 feePayerKey?: string;
                 mint: string;
                 network?: string;
-                planId: string;
-                programId?: string;
+                planAddress: string;
                 puller: string;
                 recentBlockhash?: string;
                 splits?: Array<{ bps: number; recipient: string }>;
+                subscriptionProgram: string;
                 tokenProgram: string;
             };
             periodCount: string;
@@ -468,6 +665,8 @@ export declare namespace buildSubscriptionActivationTransaction {
         /** Custom RPC URL. If not set, inferred from the challenge network field. */
         rpcUrl?: string;
         /** Solana transaction signer (the subscriber). */
-        signer: TransactionSigner;
+        signer: SubscriptionSigner;
+        /** Live init id returned by the separately initialized SubscriptionAuthority. */
+        subscriptionAuthorityInitId?: bigint;
     };
 }

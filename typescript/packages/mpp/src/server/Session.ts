@@ -488,9 +488,15 @@ session.routes = function routes(parameters: session.Parameters): session.Routes
             if (amount === 0n) return jsonError(400, 'amount must be positive');
 
             try {
+                const deliveriesUrl = new URL(request.url);
+                // Advertise a path-only sibling URL: the client resolves it
+                // against its public resource origin. This avoids leaking an
+                // internal reverse-proxy origin and preserves mount prefixes
+                // such as `/gateway/__402/session/*`.
+                const commitPath = deliveriesUrl.pathname.replace(/\/deliveries\/?$/, '/commit');
                 const directive = await reserveDelivery(store, {
                     amount,
-                    commitUrl: body.commitUrl,
+                    commitUrl: commitPath,
                     currency,
                     deliveryId: body.deliveryId,
                     expiresAt: body.expiresAt ?? DEFAULT_DIRECTIVE_EXPIRES_AT,
@@ -591,13 +597,15 @@ async function handleOpen(args: HandleOpenArgs): Promise<Receipt.Receipt> {
     const verified = await verifyOpenTx({ expected, openPayload: payload });
     const existingChannel = await args.store.getChannel(verified.channelId);
     if (!existingChannel) {
-        const currentSlot = await currentClusterSlot(args.rpc);
-        if (openSlot > currentSlot) {
-            throw new Error(`open openSlot ${openSlot.toString()} is ahead of the current cluster slot ${currentSlot}`);
-        }
-        if (currentSlot - openSlot > OPEN_SLOT_WINDOW) {
+        const observedSlot = await currentClusterSlot(args.rpc);
+        // A load-balanced RPC can serve getSlot from a replica one slot behind
+        // the getLatestBlockhash context used for this server-signed challenge.
+        // The challenge already bounds openSlot <= recentSlot, so use the newer
+        // observation without weakening the future-slot or freshness checks.
+        const verificationSlot = observedSlot < recentSlot ? recentSlot : observedSlot;
+        if (verificationSlot - openSlot > OPEN_SLOT_WINDOW) {
             throw new Error(
-                `open openSlot ${openSlot.toString()} is outside the ${OPEN_SLOT_WINDOW.toString()}-slot freshness window of the current cluster slot ${currentSlot.toString()}`,
+                `open openSlot ${openSlot.toString()} is outside the ${OPEN_SLOT_WINDOW.toString()}-slot freshness window of the current cluster slot ${verificationSlot.toString()}`,
             );
         }
     }
