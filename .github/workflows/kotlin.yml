@@ -30,6 +30,9 @@ jobs:
   # Any change under .github/ invalidates every filter.
   changes:
     name: Detect changed paths
+    permissions:
+      contents: read
+      pull-requests: read
     runs-on: ubuntu-latest
     outputs:
       kotlin: ${{ steps.filter.outputs.kotlin }}
