@@ -6,8 +6,57 @@ on:
   pull_request:
   workflow_call:
 
+concurrency:
+  # Cancel a pull-request run when a newer push supersedes it. Measured over
+  # the last 810 pull-request runs, 119 of them kept running after a newer
+  # push had already started, for 11.2 hours of runner time spent on commits
+  # nobody was waiting on.
+  #
+  # Non-pull-request runs get a group of their own, keyed on run_id, rather
+  # than sharing one keyed on the ref. A shared group would queue them against
+  # each other, and a concurrency group only holds one pending run: a third
+  # push landing while the first is still running evicts the second, which
+  # would then report no result at all for that commit. `cancel-in-progress`
+  # being false does not prevent that, it only protects the running run.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Which parts of the tree this pull request touches. Every other job in
+  # this workflow gates on these outputs for pull_request events; pushes to
+  # main and workflow_call runs are never filtered. A harness leg's filter
+  # lists every language that participates in the leg, not just the server
+  # language, so a cross-SDK change still runs the pairs it can break (#261).
+  # Any change under .github/ invalidates every filter.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      python: ${{ steps.filter.outputs.python }}
+      harness: ${{ steps.filter.outputs.harness }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            python:
+              - 'python/**'
+              - 'html/**'
+              - '.github/**'
+            harness:
+              - 'python/**'
+              - 'html/**'
+              - 'harness/**'
+              - 'typescript/**'
+              - 'rust/**'
+              - 'package.json'
+              - '.node-version'
+              - '.github/**'
+
   test-python:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.python == 'true'
     name: Python tests
     runs-on: ubuntu-latest
     steps:
@@ -42,8 +91,7 @@ jobs:
             --cov=solana_pay_kit \
             --cov-report=term-missing \
             --cov-report=json:coverage.json \
-            --cov-fail-under=90 \
-            --ignore=tests/test_server_html.py
+            --cov-fail-under=90
       - name: Upload Python coverage
         if: always()
         uses: actions/upload-artifact@v7
@@ -54,7 +102,8 @@ jobs:
   harness-python:
     name: Python harness matrix
     runs-on: ubuntu-latest
-    needs: test-python
+    needs: [changes, test-python]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.harness == 'true') && (needs['test-python'].result == 'success' || needs['test-python'].result == 'skipped') }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -72,42 +121,12 @@ jobs:
           cargo-bins: "paykit-harness-bins:mpp_harness_client,mpp_harness_server,x402_harness_client,x402_harness_server,x402_harness_upto_client,x402_harness_upto_server"
           cargo-cache-key: python
       # x402 upto settles on the canonical payment-channels program; the upto
-      # e2e deploys this localnet SBF artifact onto the embedded surfnet. Mirrors
-      # the harness-go job in .github/workflows/go.yml.
-      - name: Checkout payment channels program
-        uses: actions/checkout@v5
-        with:
-          repository: Moonsong-Labs/solana-payment-channels
-          ref: 0c07d5751c8972abf6a219570a3f39a72f46f879
-          path: _payment-channels
-          fetch-depth: 1
-      - name: Install Anza CLI
-        run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-      - name: Patch payment channels treasury owner
-        working-directory: _payment-channels
-        run: |
-          program_id="CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX"
-          lib_file="program/payment_channels/src/lib.rs"
-          sentinel_file="program/payment_channels/src/constants.rs"
-          sentinel_prefix="    0xb0, 0x41, 0xd9, 0xd3, 0x37, 0xb7, 0x21, 0xbe, 0x57, 0x89, 0x4e, 0xb6, 0x9c, 0x3b, 0x68, 0x09,"
-          sentinel_suffix="    0xa5, 0x3a, 0x0e, 0x2b, 0x6a, 0x23, 0x99, 0xfc, 0x7d, 0x5b, 0x7e, 0xda, 0x8c, 0xac, 0x89, 0xaa,"
-          # The pinned upstream ref already declares our canonical program id, so
-          # only the localnet treasury-owner sentinel needs patching. Guard the id
-          # assumption so a future ref bump that changes it fails loudly here.
-          if ! grep -Fq "declare_id!(\"$program_id\")" "$lib_file"; then
-            echo "::error::payment-channels no longer declares $program_id; revisit this patch"
-            exit 1
-          fi
-          perl -0pi -e 's/const TREASURY_OWNER_SENTINEL: \[u8; 32\] = \[\n.*?\n\];/const TREASURY_OWNER_SENTINEL: [u8; 32] = [\n    0xb0, 0x41, 0xd9, 0xd3, 0x37, 0xb7, 0x21, 0xbe, 0x57, 0x89, 0x4e, 0xb6, 0x9c, 0x3b, 0x68, 0x09,\n    0xa5, 0x3a, 0x0e, 0x2b, 0x6a, 0x23, 0x99, 0xfc, 0x7d, 0x5b, 0x7e, 0xda, 0x8c, 0xac, 0x89, 0xaa,\n];/s' "$sentinel_file"
-          if ! grep -Fq "$sentinel_prefix" "$sentinel_file" || ! grep -Fq "$sentinel_suffix" "$sentinel_file"; then
-            echo "::error::payment-channels treasury sentinel patch did not apply"
-            exit 1
-          fi
+      # e2e deploys this localnet SBF artifact onto the embedded surfnet. The
+      # composite action carries the checkout, the sentinel patch, and the
+      # build, and caches the resulting .so on the pinned ref, so a warm run
+      # skips the Anza CLI install and the platform-tools download entirely.
       - name: Build payment channels program
-        working-directory: _payment-channels/program/payment_channels
-        run: cargo build-sbf --tools-version v1.52 --arch v1
+        uses: ./.github/actions/build-payment-channels
       # Sync the uv environment the conformance runner (runners/python.json:
       # ``uv run python conformance_runner.py``) executes in, so the cross-SDK
       # vectors - including the frozen 48-byte session voucher preimage - run

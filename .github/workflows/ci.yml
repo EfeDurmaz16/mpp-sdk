@@ -6,12 +6,92 @@ on:
   pull_request:
   workflow_call:
 
+concurrency:
+  # Cancel a pull-request run when a newer push supersedes it. Measured over
+  # the last 810 pull-request runs, 119 of them kept running after a newer
+  # push had already started, for 11.2 hours of runner time spent on commits
+  # nobody was waiting on.
+  #
+  # Non-pull-request runs get a group of their own, keyed on run_id, rather
+  # than sharing one keyed on the ref. A shared group would queue them against
+  # each other, and a concurrency group only holds one pending run: a third
+  # push landing while the first is still running evicts the second, which
+  # would then report no result at all for that commit. `cancel-in-progress`
+  # being false does not prevent that, it only protects the running run.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 defaults:
   run:
     working-directory: typescript
 
 jobs:
+  # Which parts of the tree this pull request touches. Every other job in
+  # this workflow gates on these outputs for pull_request events; pushes to
+  # main and workflow_call runs are never filtered. A harness leg's filter
+  # lists every language that participates in the leg, not just the server
+  # language, so a cross-SDK change still runs the pairs it can break (#261).
+  # Any change under .github/ invalidates every filter.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      ts: ${{ steps.filter.outputs.ts }}
+      rust: ${{ steps.filter.outputs.rust }}
+      linksdemo: ${{ steps.filter.outputs.linksdemo }}
+      linksrust: ${{ steps.filter.outputs.linksrust }}
+      playground: ${{ steps.filter.outputs.playground }}
+      harness: ${{ steps.filter.outputs.harness }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            ts:
+              - 'typescript/**'
+              - 'html/**'
+              - 'package.json'
+              - '.node-version'
+              - '.github/**'
+            rust:
+              - 'rust/**'
+              - 'html/**'
+              - '.github/**'
+            linksdemo:
+              - 'html/**'
+              - 'typescript/**'
+              - 'package.json'
+              - '.node-version'
+              - '.github/**'
+            linksrust:
+              - 'rust/**'
+              - 'html/**'
+              - 'typescript/**'
+              - 'package.json'
+              - '.node-version'
+              - '.github/**'
+            playground:
+              - 'playground/**'
+              - 'html/**'
+              - 'typescript/**'
+              - 'rust/**'
+              - 'harness/**'
+              - 'package.json'
+              - '.node-version'
+              - '.github/**'
+            harness:
+              - 'ruby/**'
+              - 'harness/**'
+              - 'typescript/**'
+              - 'rust/**'
+              - 'package.json'
+              - '.node-version'
+              - '.github/**'
+
   audit:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.ts == 'true'
     name: Audit
     runs-on: ubuntu-latest
     steps:
@@ -45,6 +125,8 @@ jobs:
           fi
 
   lint:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.ts == 'true'
     name: Lint & Format
     runs-on: ubuntu-latest
     steps:
@@ -66,7 +148,8 @@ jobs:
 
   typecheck:
     name: Typecheck
-    needs: build-html
+    needs: [changes, build-html]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -89,7 +172,8 @@ jobs:
 
   test-ts:
     name: TypeScript tests
-    needs: build-html
+    needs: [changes, build-html]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -168,7 +252,8 @@ jobs:
 
   test-rust:
     name: Rust tests
-    needs: build-html
+    needs: [changes, build-html]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     services:
       redis:
@@ -186,14 +271,26 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
+      # See .github/actions/setup-harness/action.yml for why the key must not
+      # hash only the gitignored lockfile: a constant key froze this cache at
+      # its first save and cargo rebuilt all ~890 crates on every run.
+      #
+      # The `-cov` namespace is load-bearing: this job builds coverage-
+      # instrumented artifacts under target/llvm-cov-target, while the E2E
+      # job below builds plain ones. Under a shared key the shorter E2E job
+      # wins the save race every time, this job restores artifacts it cannot
+      # use, and the instrumented build never gets cached at all.
+      - name: Compute cargo cache key
+        id: cargo-key
+        run: echo "rustc=$(rustc -V | tr -d ' ()')" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             rust/target
-          key: ${{ runner.os }}-cargo-rust-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-rust-
+          key: ${{ runner.os }}-cargo-rust-cov-${{ steps.cargo-key.outputs.rustc }}-${{ hashFiles('rust/Cargo.lock', 'rust/**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-rust-cov-${{ steps.cargo-key.outputs.rustc }}-
       - name: Download HTML assets
         uses: actions/download-artifact@v7
         with:
@@ -280,7 +377,8 @@ jobs:
 
   integration:
     name: Integration tests
-    needs: build-html
+    needs: [changes, build-html]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.ts == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -301,7 +399,8 @@ jobs:
 
   test-payment-links-demo:
     name: "Payment links E2E: Playground (TypeScript)"
-    needs: build-html
+    needs: [changes, build-html]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.linksdemo == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -367,7 +466,8 @@ jobs:
 
   test-playground-e2e:
     name: "Playground E2E: all payment patterns"
-    needs: build-html
+    needs: [changes, build-html]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.playground == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -438,19 +538,26 @@ jobs:
 
   test-payment-links-rust:
     name: "Payment links E2E: Rust"
-    needs: build-html
+    needs: [changes, build-html]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.linksrust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      # Same key as the Rust tests job above, same rationale: a key hashing
+      # only the gitignored lockfile is constant, so this cache was frozen and
+      # the test server rebuilt ~490 crates per run.
+      - name: Compute cargo cache key
+        id: cargo-key
+        run: echo "rustc=$(rustc -V | tr -d ' ()')" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             rust/target
-          key: ${{ runner.os }}-cargo-rust-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-rust-
+          key: ${{ runner.os }}-cargo-rust-${{ steps.cargo-key.outputs.rustc }}-${{ hashFiles('rust/Cargo.lock', 'rust/**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-rust-${{ steps.cargo-key.outputs.rustc }}-
       - uses: pnpm/action-setup@v5
         with:
           package_json_file: package.json
@@ -504,7 +611,8 @@ jobs:
 
   harness:
     name: "Harness: TypeScript harness"
-    needs: build-html
+    needs: [changes, build-html]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.harness == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
