@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use solana_instruction::Instruction;
-use solana_keychain::SolanaSigner;
+use solana_keychain::TransactionSigner;
 use solana_message::Message;
 use solana_pubkey::Pubkey;
 use solana_rpc_client::rpc_client::RpcClient;
@@ -170,7 +170,7 @@ fn spawn_next_submission(
     in_flight: &mut tokio::task::JoinSet<Result<String, Error>>,
     pending: &mut std::collections::VecDeque<Vec<Instruction>>,
     pipeline: &TxPipeline,
-    signer: &Arc<dyn SolanaSigner>,
+    signer: &Arc<dyn TransactionSigner>,
     fee_payer: &Pubkey,
 ) {
     let Some(instructions) = pending.pop_front() else {
@@ -190,8 +190,7 @@ fn spawn_next_submission(
             &blockhash,
         );
         let mut tx = Transaction::new_unsigned(message);
-        signer
-            .sign_transaction(&mut tx)
+        crate::core::signing::sign_legacy_transaction(signer.as_ref(), &mut tx)
             .await
             .map_err(|e| Error::Other(format!("fee payer signing failed: {e}")))?;
         pipeline
@@ -314,7 +313,7 @@ pub struct BatchConfig {
     /// Signer that co-signs client setup transactions as fee payer, holds the
     /// channel `rent_payer` and zero-share `payee` seats, and signs redemption
     /// transactions.
-    pub fee_payer_signer: Arc<dyn SolanaSigner>,
+    pub fee_payer_signer: Arc<dyn TransactionSigner>,
     /// Channel program id override (defaults to the canonical deployment).
     pub program_id: Option<String>,
     /// How long a confirmed onchain channel snapshot is trusted before this
@@ -334,7 +333,7 @@ impl BatchConfig {
     pub fn new(
         pay_to: impl Into<String>,
         cluster: impl Into<String>,
-        fee_payer_signer: Arc<dyn SolanaSigner>,
+        fee_payer_signer: Arc<dyn TransactionSigner>,
     ) -> Self {
         Self {
             pay_to: pay_to.into(),
@@ -3041,7 +3040,7 @@ mod tests {
     use crate::x402::protocol::schemes::exact::programs;
     use async_trait::async_trait;
     use ed25519_dalek::{Signer as _, SigningKey};
-    use solana_keychain::{SignTransactionResult, SignerError};
+    use solana_keychain::{SignTransactionResult, SignerError, SolanaSigner};
     use solana_signature::Signature;
 
     const PAY_TO: &str = "CXhrFZJLKqjzmP3sjYLcF4dTeXWKCy9e2SXXZ2Yo6MPY";
@@ -3064,17 +3063,21 @@ mod tests {
         fn pubkey(&self) -> Pubkey {
             self.pubkey
         }
-        async fn sign_transaction(
-            &self,
-            _tx: &mut Transaction,
-        ) -> Result<SignTransactionResult, SignerError> {
-            Err(SignerError::Other("unused in these tests".to_string()))
-        }
         async fn sign_message(&self, message: &[u8]) -> Result<Signature, SignerError> {
             Ok(Signature::from(self.key.sign(message).to_bytes()))
         }
         async fn is_available(&self) -> bool {
             true
+        }
+    }
+
+    #[async_trait]
+    impl TransactionSigner for TestSigner {
+        async fn sign_transaction(
+            &self,
+            _tx: &mut solana_transaction::versioned::VersionedTransaction,
+        ) -> Result<SignTransactionResult, SignerError> {
+            Err(SignerError::Other("unused in these tests".to_string()))
         }
     }
 

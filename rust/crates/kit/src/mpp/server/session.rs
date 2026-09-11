@@ -172,7 +172,7 @@ pub struct SessionConfig {
     /// channel-account rent. When set, challenges advertise `feePayer: true`
     /// and clients leave this signer's fee-payer slot empty for the server to
     /// co-sign after validating the transaction.
-    pub fee_payer_signer: Option<std::sync::Arc<dyn solana_keychain::SolanaSigner>>,
+    pub fee_payer_signer: Option<std::sync::Arc<dyn solana_keychain::TransactionSigner>>,
 
     /// Inactivity thresholds offered for a new channel.
     pub idle_timeout_options_seconds: Option<Vec<u32>>,
@@ -1913,7 +1913,7 @@ async fn verify_submit_and_fetch_open(
     challenged_blockhash: &str,
     pipeline: &crate::core::tx_pipeline::TxPipeline,
     fresh_open: bool,
-    fee_payer_signer: Option<&dyn solana_keychain::SolanaSigner>,
+    fee_payer_signer: Option<&dyn solana_keychain::TransactionSigner>,
 ) -> Result<String> {
     let mut tx = payment_channels::decode_transaction(&payload.transaction)?;
     if tx
@@ -2255,7 +2255,7 @@ async fn verify_submit_and_fetch_open(
     _challenged_blockhash: &str,
     _pipeline: &(),
     _fresh_open: bool,
-    _fee_payer_signer: Option<&dyn solana_keychain::SolanaSigner>,
+    _fee_payer_signer: Option<&dyn solana_keychain::TransactionSigner>,
 ) -> Result<String> {
     Err(Error::Other(
         "session open verification requires the `server` feature".to_string(),
@@ -2400,7 +2400,7 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
     }
 
-    fn signer(seed: u8) -> Box<dyn solana_keychain::SolanaSigner> {
+    fn signer(seed: u8) -> Box<dyn solana_keychain::TransactionSigner> {
         let key = key(seed);
         let mut bytes = [0_u8; 64];
         bytes[..32].copy_from_slice(key.as_bytes());
@@ -2408,7 +2408,7 @@ mod tests {
         Box::new(MemorySigner::from_bytes(&bytes).unwrap())
     }
 
-    fn shared_signer(seed: u8) -> std::sync::Arc<dyn solana_keychain::SolanaSigner> {
+    fn shared_signer(seed: u8) -> std::sync::Arc<dyn solana_keychain::TransactionSigner> {
         std::sync::Arc::from(signer(seed))
     }
 
@@ -3394,7 +3394,9 @@ mod tests {
             &solana_hash::Hash::new_unique(),
         );
         let mut tx = Transaction::new_unsigned(message);
-        payer.sign_transaction(&mut tx).await.unwrap();
+        crate::core::signing::sign_legacy_transaction(payer.as_ref(), &mut tx)
+            .await
+            .unwrap();
         assert_eq!(tx.signatures[0], Signature::default());
         let transaction =
             base64::engine::general_purpose::STANDARD.encode(bincode::serialize(&tx).unwrap());
@@ -3531,7 +3533,9 @@ mod tests {
             &solana_hash::Hash::new_unique(),
         );
         let mut tx = Transaction::new_unsigned(message);
-        payer.sign_transaction(&mut tx).await.unwrap();
+        crate::core::signing::sign_legacy_transaction(payer.as_ref(), &mut tx)
+            .await
+            .unwrap();
         let transaction =
             base64::engine::general_purpose::STANDARD.encode(bincode::serialize(&tx).unwrap());
         // The on-chain account already reflects deposit=1_100 — as if a
