@@ -3,6 +3,7 @@ package x402
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 
 	"github.com/solana-foundation/pay-kit/go/paycore"
 	"github.com/solana-foundation/pay-kit/go/paycore/solanatx"
@@ -59,31 +60,38 @@ type TransferRequirements struct {
 // cosigns or broadcasts it. Port of Rust's verify_exact_instructions
 // (rust/crates/x402/src/protocol/schemes/exact/verify.rs):
 //
-//  1. instruction count in [3, 6]
-//  2. ix[0] = ComputeBudget SetComputeUnitLimit
-//  3. ix[1] = ComputeBudget SetComputeUnitPrice, <= cap
-//  4. ix[2] = transferChecked to ATA(payTo, mint, program) for the
-//     exact amount + mint, authority != fee-payer
-//  5. ix[3..] = only Memo or Lighthouse programs
+// Legacy/v0 carry two ComputeBudget instructions before transferChecked.
+// V1 carries that budget in its config and starts with transferChecked.
+// Both permit at most three trailing Memo or Lighthouse instructions, and
+// bind the transfer to the exact amount, mint and recipient ATA.
 //
 // Returns a *paykit.PaymentError-friendly error string on the first
 // rule it fails so the caller can surface a canonical code.
 func VerifyExactTransaction(tx *solana.Transaction, req TransferRequirements) error {
 	msg := &tx.Message
 	ixs := msg.Instructions
-	if len(ixs) < 3 || len(ixs) > 6 {
+	prefix := 2
+	if msg.GetVersion() == solana.MessageVersionV1 {
+		if err := solanatx.CheckV1BudgetCaps(tx, math.MaxUint32, MaxComputeUnitPriceMicroLamports); err != nil {
+			return VerifyFail("invalid_exact_svm_payload_transaction_instructions_compute_price_instruction_too_high", err.Error())
+		}
+		prefix = 0
+	}
+	if len(ixs) < prefix+1 || len(ixs) > prefix+4 {
 		return VerifyFail("invalid_exact_svm_payload_transaction_instructions_length",
-			fmt.Sprintf("instruction count %d outside [3,6]", len(ixs)))
+			fmt.Sprintf("instruction count %d outside [%d,%d]", len(ixs), prefix+1, prefix+4))
 	}
 	keys := msg.AccountKeys
 
-	if err := verifyComputeLimit(ixs[0], keys); err != nil {
-		return err
+	if prefix != 0 {
+		if err := verifyComputeLimit(ixs[0], keys); err != nil {
+			return err
+		}
+		if err := verifyComputePrice(ixs[1], keys); err != nil {
+			return err
+		}
 	}
-	if err := verifyComputePrice(ixs[1], keys); err != nil {
-		return err
-	}
-	if err := verifyTransfer(ixs[2], keys, req); err != nil {
+	if err := verifyTransfer(ixs[prefix], keys, req); err != nil {
 		return err
 	}
 	// Optional trailing instructions: memo / lighthouse only. Wallets inject
@@ -98,7 +106,7 @@ func VerifyExactTransaction(tx *solana.Transaction, req TransferRequirements) er
 		"invalid_exact_svm_payload_unknown_sixth_instruction",
 	}
 	memoCount := 0
-	for i := 3; i < len(ixs); i++ {
+	for i := prefix + 1; i < len(ixs); i++ {
 		prog, err := programIDForIx(ixs[i], keys)
 		if err != nil {
 			return err
@@ -111,7 +119,7 @@ func VerifyExactTransaction(tx *solana.Transaction, req TransferRequirements) er
 			continue
 		default:
 			code := "invalid_exact_svm_payload_unknown_optional_instruction"
-			if idx := i - 3; idx < len(invalidReasonByIndex) {
+			if idx := i - (prefix + 1); idx < len(invalidReasonByIndex) {
 				code = invalidReasonByIndex[idx]
 			}
 			return VerifyFail(code, fmt.Sprintf("unexpected instruction %d program %s", i, prog))
@@ -124,7 +132,7 @@ func VerifyExactTransaction(tx *solana.Transaction, req TransferRequirements) er
 			return VerifyFail("invalid_exact_svm_payload_memo_count",
 				fmt.Sprintf("expected exactly one memo matching extra.memo, found %d", memoCount))
 		}
-		for i := 3; i < len(ixs); i++ {
+		for i := prefix + 1; i < len(ixs); i++ {
 			prog, err := programIDForIx(ixs[i], keys)
 			if err != nil {
 				return err
@@ -175,12 +183,12 @@ func verifyTransfer(ix solana.CompiledInstruction, keys solana.PublicKeySlice, r
 	progStr := prog.String()
 	if progStr != paycore.TokenProgram && progStr != paycore.Token2022Program {
 		return VerifyFail("invalid_exact_svm_payload_no_transfer_instruction",
-			"ix[2] is not an SPL token transfer")
+			"payment instruction is not an SPL token transfer")
 	}
 	// transferChecked: discriminator 12, then u64 amount, then u8 decimals.
 	if len(ix.Accounts) < 4 || len(ix.Data) != 10 || ix.Data[0] != 12 {
 		return VerifyFail("invalid_exact_svm_payload_no_transfer_instruction",
-			"ix[2] is not a transferChecked")
+			"payment instruction is not a transferChecked")
 	}
 	mint, err := keyForIndex(ix.Accounts[1], keys)
 	if err != nil {

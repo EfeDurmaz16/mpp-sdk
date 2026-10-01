@@ -6,9 +6,8 @@ import (
 	bin "github.com/gagliardetto/binary"
 )
 
-// checkWireVersion preserves the legacy/v0 policy before SDK decoding. The SDK
-// also understands v1, whose envelope starts with the message rather than a
-// signature count; enabling that format belongs to the separate v1 milestone.
+// checkWireVersion distinguishes v1's message-first envelope from legacy/v0's
+// signatures-first envelope. A v1 message inside the old envelope is malformed.
 func checkWireVersion(wire []byte) error {
 	decoder := bin.NewBinDecoder(wire)
 	first, err := decoder.Peek(1)
@@ -16,7 +15,10 @@ func checkWireVersion(wire []byte) error {
 		return err
 	}
 	if first[0] == 0x81 {
-		return fmt.Errorf("unsupported transaction message version 1")
+		return nil
+	}
+	if first[0] > 0x81 {
+		return fmt.Errorf("unsupported transaction message version %d", first[0]&0x7f)
 	}
 
 	signatureCount, err := decoder.ReadCompactU16()

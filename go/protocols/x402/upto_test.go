@@ -608,6 +608,16 @@ func (s signerSigner) Sign(_ context.Context, msg []byte) ([]byte, error) {
 }
 func (s signerSigner) IsDemo() bool { return false }
 
+type countedOpenSigner struct {
+	signerSigner
+	calls int
+}
+
+func (s *countedOpenSigner) Sign(ctx context.Context, msg []byte) ([]byte, error) {
+	s.calls++
+	return s.signerSigner.Sign(ctx, msg)
+}
+
 // uptoTestRPC wraps FakeRPC with channel-account support.
 type uptoTestRPC struct {
 	*testutil.FakeRPC
@@ -1326,77 +1336,98 @@ func TestUptoVerifyOpenRejectsWrongPayer(t *testing.T) {
 	}
 }
 
-// TestUptoVerifyOpenAcceptsLegacyOpenTransaction pins the shared decode
-// boundary: an otherwise-valid open transaction encoded as a legacy
-// (unprefixed) message, as a pre-cutover client sends, is verified under the
-// same rules as a v0 message and broadcast.
-func TestUptoVerifyOpenAcceptsLegacyOpenTransaction(t *testing.T) {
-	operatorKey := testutil.NewPrivateKey()
-	payerKey := testutil.NewPrivateKey()
-	payee := operatorKey.PublicKey()
-	mint := solana.MustPublicKeyFromBase58(paycore.USDCMainnetMint)
-	salt := uint64(7)
-	channel, _, _ := paymentchannels.FindChannelPDA(payerKey.PublicKey(), payee, mint, operatorKey.PublicKey(), salt, 55_555)
-	params := paymentchannels.OpenChannelParams{
-		Payer: payerKey.PublicKey(), RentPayer: operatorKey.PublicKey(), Payee: payee, Mint: mint, AuthorizedSigner: operatorKey.PublicKey(),
-		Salt: salt, OpenSlot: 55_555, Deposit: 1_000_000, GracePeriod: 900,
-		TokenProgram: solana.TokenProgramID, ProgramID: paymentchannels.ProgramPubkey(),
-	}
-	openIx, _ := paymentchannels.BuildOpenInstruction(params)
-	blockhash := solana.MustHashFromBase58("4vJ9JU1bJJbzZ4aJ8AqGxH9bK5VwY8bGf3sD5QG6h7h")
-	// solana.NewTransaction builds a legacy (unprefixed) message.
-	tx, err := solana.NewTransaction([]solana.Instruction{openIx}, blockhash, solana.TransactionPayer(operatorKey.PublicKey()))
-	if err != nil {
-		t.Fatalf("NewTransaction: %v", err)
-	}
-	if tx.Message.GetVersion() != solana.MessageVersionLegacy {
-		t.Fatalf("fixture version = %v, want legacy", tx.Message.GetVersion())
-	}
-	if err := solanatx.SignTransaction(tx, payerSigner{payerKey}); err != nil {
-		t.Fatalf("SignTransaction: %v", err)
-	}
-	txBase64, _ := solanatx.EncodeTransactionBase64(tx)
+// Exercise channel binding and the v1 budget before the operator signs.
+func TestUptoVerifyOpenTransactionVersions(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		version solana.MessageVersion
+		budget  solana.TransactionConfig
+		reject  bool
+	}{
+		{name: "legacy", version: solana.MessageVersionLegacy},
+		{name: "v0", version: solana.MessageVersionV0},
+		{name: "v1", version: solana.MessageVersionV1, budget: solana.TransactionConfig{}.WithComputeUnitLimit(400_000).WithPriorityFee(2_000_000)},
+		{name: "v1_fee_over_cap", version: solana.MessageVersionV1, budget: solana.TransactionConfig{}.WithComputeUnitLimit(400_000).WithPriorityFee(2_000_001), reject: true},
+		{name: "v1_cu_over_cap", version: solana.MessageVersionV1, budget: solana.TransactionConfig{}.WithComputeUnitLimit(400_001), reject: true},
+		{name: "v1_missing_cu", version: solana.MessageVersionV1, reject: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			operatorKey := testutil.NewPrivateKey()
+			operator := &countedOpenSigner{signerSigner: signerSigner{operatorKey}}
+			payerKey := testutil.NewPrivateKey()
+			payee := operatorKey.PublicKey()
+			mint := solana.MustPublicKeyFromBase58(paycore.USDCMainnetMint)
+			salt := uint64(7)
+			channel, _, _ := paymentchannels.FindChannelPDA(payerKey.PublicKey(), payee, mint, operatorKey.PublicKey(), salt, 55_555)
+			params := paymentchannels.OpenChannelParams{
+				Payer: payerKey.PublicKey(), RentPayer: operatorKey.PublicKey(), Payee: payee, Mint: mint, AuthorizedSigner: operatorKey.PublicKey(),
+				Salt: salt, OpenSlot: 55_555, Deposit: 1_000_000, GracePeriod: 900,
+				TokenProgram: solana.TokenProgramID, ProgramID: paymentchannels.ProgramPubkey(),
+			}
+			openIx, _ := paymentchannels.BuildOpenInstruction(params)
+			blockhash := solana.MustHashFromBase58("4vJ9JU1bJJbzZ4aJ8AqGxH9bK5VwY8bGf3sD5QG6h7h")
+			tx, err := solana.NewTransaction([]solana.Instruction{openIx}, blockhash, solana.TransactionPayer(operatorKey.PublicKey()))
+			if err != nil {
+				t.Fatalf("NewTransaction: %v", err)
+			}
+			tx.Message.SetVersion(tc.version)
+			tx.Message.TransactionConfig = tc.budget
+			if err := solanatx.SignTransaction(tx, payerSigner{payerKey}); err != nil {
+				t.Fatalf("SignTransaction: %v", err)
+			}
+			txBase64, _ := solanatx.EncodeTransactionBase64(tx)
 
-	fakeRPC := newUptoTestRPC()
-	fakeRPC.addChannel(channel, &pcgen.Channel{
-		Discriminator:    uint8(pcgen.AccountDiscriminator_Channel),
-		Status:           uint8(pcgen.ChannelStatus_Open),
-		Salt:             salt,
-		Deposit:          1_000_000,
-		GracePeriod:      900,
-		DistributionHash: distributionHash(singleSplitTo(payee)),
-		Payer:            payerKey.PublicKey(),
-		Payee:            payee,
-		AuthorizedSigner: operatorKey.PublicKey(),
-		RentPayer:        operatorKey.PublicKey(),
-		Mint:             mint,
-	})
-	engine, err := NewX402Upto(UptoConfig{
-		Recipient: payee.String(), Currency: "USDC", Decimals: 6, Network: paykit.SolanaLocalnet,
-		RPCURL: "http://localhost:8899", MaxTimeoutSeconds: 300,
-		FeePayerSigner:          signerSigner{operatorKey},
-		RecentBlockhashProvider: func() (string, error) { return blockhash.String(), nil },
-		RecentSlotProvider:      func() (uint64, error) { return 55_555, nil },
-	})
-	if err != nil {
-		t.Fatalf("NewX402Upto: %v", err)
-	}
-	engine.SetRPCForTests(fakeRPC)
-	env := UptoSignatureEnvelope{X402Version: X402Version, Scheme: UptoScheme, Network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", Payload: UptoPayload{
-		From: payerKey.PublicKey().String(), MaxAmount: "1000000",
-		ExpiresAt: time.Now().Add(time.Hour).Unix(), ChannelID: channel.String(), Deposit: "1000000",
-		Nonce: "7", OpenSlot: "55555", AuthorizedSigner: operatorKey.PublicKey().String(), OpenTransaction: txBase64,
-	}}
-	raw, _ := json.Marshal(env)
-	verified, err := engine.VerifyOpen(context.Background(), base64.StdEncoding.EncodeToString(raw), "1.00")
-	if err != nil {
-		t.Fatalf("VerifyOpen: %v", err)
-	}
-	if !verified.ChannelID.Equals(channel) {
-		t.Fatalf("channelID = %s, want %s", verified.ChannelID, channel)
-	}
-	if len(fakeRPC.Sent) != 1 || fakeRPC.Sent[0].Message.GetVersion() != solana.MessageVersionLegacy {
-		t.Fatalf("sent = %d transactions, want the legacy open broadcast as-is", len(fakeRPC.Sent))
+			fakeRPC := newUptoTestRPC()
+			fakeRPC.addChannel(channel, &pcgen.Channel{
+				Discriminator:    uint8(pcgen.AccountDiscriminator_Channel),
+				Status:           uint8(pcgen.ChannelStatus_Open),
+				Salt:             salt,
+				Deposit:          1_000_000,
+				GracePeriod:      900,
+				DistributionHash: distributionHash(singleSplitTo(payee)),
+				Payer:            payerKey.PublicKey(),
+				Payee:            payee,
+				AuthorizedSigner: operatorKey.PublicKey(),
+				RentPayer:        operatorKey.PublicKey(),
+				Mint:             mint,
+			})
+			engine, err := NewX402Upto(UptoConfig{
+				Recipient: payee.String(), Currency: "USDC", Decimals: 6, Network: paykit.SolanaLocalnet,
+				RPCURL: "http://localhost:8899", MaxTimeoutSeconds: 300,
+				FeePayerSigner:          operator,
+				RecentBlockhashProvider: func() (string, error) { return blockhash.String(), nil },
+				RecentSlotProvider:      func() (uint64, error) { return 55_555, nil },
+			})
+			if err != nil {
+				t.Fatalf("NewX402Upto: %v", err)
+			}
+			engine.SetRPCForTests(fakeRPC)
+			env := UptoSignatureEnvelope{X402Version: X402Version, Scheme: UptoScheme, Network: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", Payload: UptoPayload{
+				From: payerKey.PublicKey().String(), MaxAmount: "1000000",
+				ExpiresAt: time.Now().Add(time.Hour).Unix(), ChannelID: channel.String(), Deposit: "1000000",
+				Nonce: "7", OpenSlot: "55555", AuthorizedSigner: operatorKey.PublicKey().String(), OpenTransaction: txBase64,
+			}}
+			raw, _ := json.Marshal(env)
+			verified, err := engine.VerifyOpen(context.Background(), base64.StdEncoding.EncodeToString(raw), "1.00")
+			if tc.reject {
+				if err == nil || !strings.Contains(err.Error(), "compute budget") || operator.calls != 0 || len(fakeRPC.Sent) != 0 {
+					t.Fatalf("expected rejection before signing/send: calls=%d sends=%d err=%v", operator.calls, len(fakeRPC.Sent), err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("VerifyOpen: %v", err)
+			}
+			if !verified.ChannelID.Equals(channel) {
+				t.Fatalf("channelID = %s, want %s", verified.ChannelID, channel)
+			}
+			if len(fakeRPC.Sent) != 1 || fakeRPC.Sent[0].Message.GetVersion() != tc.version || operator.calls != 1 {
+				t.Fatalf("sent = %d transactions, signing calls = %d, want one %v open", len(fakeRPC.Sent), operator.calls, tc.version)
+			}
+			if err := fakeRPC.Sent[0].VerifySignatures(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
