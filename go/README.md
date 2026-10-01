@@ -234,6 +234,27 @@ Pay-kit payment clients continue to build v0 and servers accept legacy/v0 wire
 transactions. V1 server acceptance requires updating the fee guards and
 instruction verifiers, so it remains a separate rollout.
 
+To verify Memory signing against a local RPC, start Surfpool 1.5 with an isolated
+offline validator. This requires no remote datasource or saved wallet:
+
+```bash
+surfpool start --offline --no-deploy --no-tui --no-studio \
+  --host 127.0.0.1 --port 18999 --ws-port 19000 --airdrop-amount 0 \
+  --airdrop-keypair-path ./unused-test-key.json
+```
+
+In another terminal, from `go/`:
+
+```bash
+PAYKIT_TEST_LOCAL_RPC=http://127.0.0.1:18999 \
+  go test ./paycore/signer -run TestMemorySignerSurfpool -v -count=1
+```
+
+The opt-in test uses ephemeral keys and local airdrops. It simulates a v0
+transfer, checks invalid-signature rejection, sends and confirms the transaction,
+reads it back, and checks recipient balance and payer debit including fees.
+The test skips when `PAYKIT_TEST_LOCAL_RPC` is unset and rejects non-loopback URLs.
+
 ### HTTP server
 
 The server example uses the umbrella SDK:
