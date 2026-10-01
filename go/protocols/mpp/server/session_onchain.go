@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"strings"
 
-	solana "github.com/gagliardetto/solana-go"
+	solana "github.com/solana-foundation/solana-go/v2"
 
 	"github.com/solana-foundation/pay-kit/go/paycore"
 	"github.com/solana-foundation/pay-kit/go/paycore/paymentchannels"
@@ -490,7 +490,7 @@ func SubmitOpenTx(ctx context.Context, expected VerifyOpenTxExpected, payload *i
 	// the open with the operator as fee payer and only partial-signs as the
 	// channel payer).
 	if payerSigner != nil && signerIsRequired(tx, payerSigner.PublicKey()) {
-		if err := solanatx.SignTransaction(tx, payerSigner); err != nil {
+		if err := solanatx.SignTransactionContext(ctx, tx, payerSigner); err != nil {
 			return SubmitOpenTxResult{}, fmt.Errorf("co-sign open transaction: %w", err)
 		}
 	}

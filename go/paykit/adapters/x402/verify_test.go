@@ -10,14 +10,14 @@ import (
 	"strings"
 	"testing"
 
-	solana "github.com/gagliardetto/solana-go"
-	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/solana-foundation/pay-kit/go/internal/testutil"
 	"github.com/solana-foundation/pay-kit/go/paycore"
 	"github.com/solana-foundation/pay-kit/go/paycore/signer"
 	"github.com/solana-foundation/pay-kit/go/paycore/solanatx"
 	"github.com/solana-foundation/pay-kit/go/paykit"
 	proto "github.com/solana-foundation/pay-kit/go/protocols/x402"
+	solana "github.com/solana-foundation/solana-go/v2"
+	"github.com/solana-foundation/solana-go/v2/rpc"
 )
 
 func errorsAs(err error, target any) bool { return errors.As(err, target) }
@@ -90,7 +90,11 @@ func newFixture(t *testing.T) fixture {
 func (f fixture) tx(extra ...solana.CompiledInstruction) *solana.Transaction {
 	ixs := append([]solana.CompiledInstruction{f.computeLimit, f.computePrice, f.transfer}, extra...)
 	tx := &solana.Transaction{
-		Message:    solana.Message{AccountKeys: f.keys, Instructions: ixs},
+		Message: solana.Message{
+			Header:       solana.MessageHeader{NumRequiredSignatures: 1},
+			AccountKeys:  f.keys,
+			Instructions: ixs,
+		},
 		Signatures: []solana.Signature{{}},
 	}
 	tx.Message.SetVersion(solana.MessageVersionV0)
@@ -335,6 +339,7 @@ func settleFixture(t *testing.T, fake *fakeRPC) (*Adapter, *paykit.Gate, string)
 	transferData[9] = 6
 	tx := &solana.Transaction{
 		Message: solana.Message{
+			Header:      solana.MessageHeader{NumRequiredSignatures: 1},
 			AccountKeys: keys,
 			Instructions: []solana.CompiledInstruction{
 				{ProgramIDIndex: 5, Data: []byte{2, 0, 0, 0, 0}},

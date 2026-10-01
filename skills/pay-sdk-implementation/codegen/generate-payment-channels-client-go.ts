@@ -6,7 +6,8 @@
  * vendor the IDL at `<repo-root>/idl/payment-channels.json` and render a client
  * into the matching SDK tree. This one targets the Go SDK via
  * `@codama/renderers-go`, which emits a flat Go package using
- * github.com/gagliardetto/{solana-go,binary} (already pay-kit Go deps).
+ * github.com/gagliardetto/{solana-go,binary}. The SDK import is rewritten
+ * below to the official solana-foundation/solana-go/v2 dependency.
  *
  * The renderer derives the Go package name from the IDL program name
  * (`paymentChannels` → `payment_channels`). We render into a directory named
@@ -19,6 +20,7 @@
 import type { AnchorIdl } from '@codama/nodes-from-anchor';
 import { renderVisitor as renderGoVisitor } from '@codama/renderers-go';
 import { createFromJson } from 'codama';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,7 +45,7 @@ const codama = createFromJson(JSON.stringify(idl));
 console.log(`[codegen] Rendering Go client from ${path.relative(repoRoot, idlPath)}`);
 console.log(`[codegen]   → ${path.relative(repoRoot, goClientDir)}/`);
 
-void codama.accept(
+await codama.accept(
     renderGoVisitor(goClientDir, {
         // Codama re-renders into the target folder on every run; pre-clearing
         // means a removed instruction in the upstream IDL also disappears here
@@ -53,5 +55,21 @@ void codama.accept(
         formatCode: true,
     }),
 );
+
+// The renderer currently hard-codes the old SDK path. Keep regeneration
+// consistent with pay-kit's official v2 SDK without forking the renderer.
+for (const file of fs.readdirSync(goClientDir)) {
+    if (!file.endsWith('.go')) continue;
+    const filePath = path.join(goClientDir, file);
+    const source = fs.readFileSync(filePath, 'utf-8');
+    fs.writeFileSync(
+        filePath,
+        source.replaceAll(
+            '"github.com/gagliardetto/solana-go',
+            '"github.com/solana-foundation/solana-go/v2',
+        ),
+    );
+}
+execFileSync('gofmt', ['-w', goClientDir]);
 
 console.log(`[codegen] Done.`);

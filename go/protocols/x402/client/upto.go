@@ -11,10 +11,10 @@ import (
 	"net/http"
 	"strconv"
 
-	solana "github.com/gagliardetto/solana-go"
 	"github.com/solana-foundation/pay-kit/go/paycore/paymentchannels"
 	"github.com/solana-foundation/pay-kit/go/paycore/solanatx"
 	x402 "github.com/solana-foundation/pay-kit/go/protocols/x402"
+	solana "github.com/solana-foundation/solana-go/v2"
 )
 
 const (
@@ -143,7 +143,7 @@ func BuildUptoPayload(
 	if err != nil {
 		return nil, fmt.Errorf("x402 client: build transaction: %w", err)
 	}
-	if err := solanatx.SignTransaction(tx, signer); err != nil {
+	if err := solanatx.SignTransactionContext(ctx, tx, signer); err != nil {
 		return nil, fmt.Errorf("x402 client: sign: %w", err)
 	}
 	txBase64, err := solanatx.EncodeTransactionBase64(tx)

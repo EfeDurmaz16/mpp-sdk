@@ -24,10 +24,10 @@ import (
 	"strconv"
 	"strings"
 
-	solana "github.com/gagliardetto/solana-go"
 	"github.com/solana-foundation/pay-kit/go/paycore"
 	"github.com/solana-foundation/pay-kit/go/paycore/solanatx"
 	x402 "github.com/solana-foundation/pay-kit/go/protocols/x402"
+	solana "github.com/solana-foundation/solana-go/v2"
 )
 
 // nonceBytes is the size of the random memo nonce the client appends when the
@@ -550,7 +550,7 @@ func buildTransaction(
 	if err != nil {
 		return "", fmt.Errorf("x402 client: build transaction: %w", err)
 	}
-	if err := solanatx.SignTransaction(tx, signer); err != nil {
+	if err := solanatx.SignTransactionContext(ctx, tx, signer); err != nil {
 		return "", fmt.Errorf("x402 client: sign: %w", err)
 	}
 	return solanatx.EncodeTransactionBase64(tx)

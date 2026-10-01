@@ -22,8 +22,8 @@ import (
 	"strconv"
 	"time"
 
-	solana "github.com/gagliardetto/solana-go"
-	"github.com/gagliardetto/solana-go/rpc"
+	solana "github.com/solana-foundation/solana-go/v2"
+	"github.com/solana-foundation/solana-go/v2/rpc"
 
 	"github.com/solana-foundation/pay-kit/go/paycore/solanatx"
 	core "github.com/solana-foundation/pay-kit/go/protocols/mpp/core"
@@ -809,7 +809,7 @@ func (s *Session) closeAndSettleChannel(ctx context.Context, channelID string) (
 	if err != nil {
 		return "", fmt.Errorf("build settlement transaction: %w", err)
 	}
-	if err := solanatx.SignTransaction(tx, s.signer); err != nil {
+	if err := solanatx.SignTransactionContext(ctx, tx, s.signer); err != nil {
 		return "", fmt.Errorf("sign settlement transaction: %w", err)
 	}
 	signature, err := solanatx.SendTransaction(ctx, s.rpc, tx)

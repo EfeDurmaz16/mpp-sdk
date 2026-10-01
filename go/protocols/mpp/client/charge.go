@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	solana "github.com/gagliardetto/solana-go"
+	solana "github.com/solana-foundation/solana-go/v2"
 
 	"github.com/solana-foundation/pay-kit/go/paycore"
 	"github.com/solana-foundation/pay-kit/go/paycore/solanatx"
@@ -239,7 +239,7 @@ func BuildChargeTransaction(
 	if err != nil {
 		return paycore.CredentialPayload{}, err
 	}
-	if err := solanatx.SignTransaction(tx, signer); err != nil {
+	if err := solanatx.SignTransactionContext(ctx, tx, signer); err != nil {
 		return paycore.CredentialPayload{}, err
 	}
 

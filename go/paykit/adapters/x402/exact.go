@@ -11,12 +11,12 @@ import (
 	"sync"
 	"time"
 
-	solana "github.com/gagliardetto/solana-go"
-	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/solana-foundation/pay-kit/go/paycore"
 	"github.com/solana-foundation/pay-kit/go/paycore/solanatx"
 	"github.com/solana-foundation/pay-kit/go/paykit"
 	proto "github.com/solana-foundation/pay-kit/go/protocols/x402"
+	solana "github.com/solana-foundation/solana-go/v2"
+	"github.com/solana-foundation/solana-go/v2/rpc"
 )
 
 type Adapter struct {
@@ -384,25 +384,10 @@ func (a *Adapter) cosign(ctx context.Context, tx *solana.Transaction, rawTx []by
 	if cosignIdx < 0 {
 		return rawTx, nil
 	}
-	msgBytes, err := tx.Message.MarshalBinary()
-	if err != nil {
-		return nil, fmt.Errorf("marshal message: %w", err)
-	}
-	signature, err := a.signer.Sign(ctx, msgBytes)
-	if err != nil {
+	if _, err := paykit.SignTransaction(ctx, tx, a.signer); err != nil {
 		return nil, fmt.Errorf("operator sign: %w", err)
 	}
-	if len(signature) != 64 {
-		return nil, fmt.Errorf("operator signature length %d, want 64", len(signature))
-	}
-	offset := 1 + cosignIdx*64
-	if offset+64 > len(rawTx) {
-		return nil, errors.New("signature slot offset out of range")
-	}
-	wire := make([]byte, len(rawTx))
-	copy(wire, rawTx)
-	copy(wire[offset:offset+64], signature)
-	return wire, nil
+	return tx.MarshalBinary()
 }
 
 func (a *Adapter) awaitConfirmation(ctx context.Context, signature solana.Signature) error {

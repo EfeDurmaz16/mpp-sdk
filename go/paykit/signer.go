@@ -1,6 +1,12 @@
 package paykit
 
-import "context"
+import (
+	"context"
+	"fmt"
+
+	"github.com/solana-foundation/solana-go/v2"
+	keychain "github.com/solana-foundation/solana-keychain/go/core/v2"
+)
 
 // Signer is the Ed25519 signer interface every signer backend
 // implements. Local signers (signer.Demo, signer.FromFile, ...) ignore
@@ -22,4 +28,39 @@ type Signer interface {
 	// paykit.New refuses to boot on solana_mainnet when this returns
 	// true.
 	IsDemo() bool
+}
+
+// TransactionSigner optionally exposes transaction-aware signing. Existing
+// message-only Signer implementations remain supported through Keychain's
+// sign-and-attach helper. Implementations must preserve the transaction message
+// and any signatures already present; modifying and sending backends do not
+// satisfy this contract.
+type TransactionSigner interface {
+	Signer
+	SignTransaction(context.Context, *solana.Transaction) (keychain.SignedTransaction, error)
+}
+
+// SignTransaction adds the operator's signature without broadcasting. A payment
+// can still need other signatures, so a partial result is valid here.
+func SignTransaction(ctx context.Context, tx *solana.Transaction, signer Signer) (keychain.SignedTransaction, error) {
+	if transactionSigner, ok := signer.(TransactionSigner); ok {
+		return transactionSigner.SignTransaction(ctx, tx)
+	}
+	pubkey, err := solana.PublicKeyFromBase58(string(signer.Pubkey()))
+	if err != nil {
+		return keychain.SignedTransaction{}, fmt.Errorf("signer pubkey: %w", err)
+	}
+	return keychain.SignTransactionWith(ctx, tx, pubkey,
+		func(ctx context.Context, message []byte) (solana.Signature, error) {
+			raw, err := signer.Sign(ctx, message)
+			if err != nil {
+				return solana.Signature{}, err
+			}
+			if len(raw) != len(solana.Signature{}) {
+				return solana.Signature{}, fmt.Errorf("signer signature length %d, want 64", len(raw))
+			}
+			var signature solana.Signature
+			copy(signature[:], raw)
+			return signature, nil
+		})
 }

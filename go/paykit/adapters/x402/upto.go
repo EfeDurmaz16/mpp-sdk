@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/solana-foundation/solana-go/v2"
+	keychain "github.com/solana-foundation/solana-keychain/go/core/v2"
+
 	"github.com/solana-foundation/pay-kit/go/paykit"
 	proto "github.com/solana-foundation/pay-kit/go/protocols/x402"
 )
@@ -157,4 +160,8 @@ func gateAmount(gate *paykit.Gate) string {
 
 func init() {
 	paykit.RegisterUsageAdapter(NewUsageAdapter)
+}
+
+func (w uptoSignerWrapper) SignTransaction(ctx context.Context, tx *solana.Transaction) (keychain.SignedTransaction, error) {
+	return paykit.SignTransaction(ctx, tx, w.signer)
 }

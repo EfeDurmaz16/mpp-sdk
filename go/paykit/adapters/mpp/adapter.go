@@ -6,12 +6,13 @@ import (
 	"strings"
 	"sync"
 
-	solana "github.com/gagliardetto/solana-go"
 	"github.com/solana-foundation/pay-kit/go/paycore"
 	"github.com/solana-foundation/pay-kit/go/paycore/solanatx"
 	"github.com/solana-foundation/pay-kit/go/paykit"
 	core "github.com/solana-foundation/pay-kit/go/protocols/mpp/core"
 	"github.com/solana-foundation/pay-kit/go/protocols/mpp/server"
+	solana "github.com/solana-foundation/solana-go/v2"
+	keychain "github.com/solana-foundation/solana-keychain/go/core/v2"
 )
 
 type signerBridge struct {
@@ -34,6 +35,14 @@ func (b *signerBridge) Sign(payload []byte) (solana.Signature, error) {
 	var sig solana.Signature
 	copy(sig[:], raw)
 	return sig, nil
+}
+
+func (b *signerBridge) SignTransaction(ctx context.Context, tx *solana.Transaction) (keychain.SignedTransaction, error) {
+	result, err := paykit.SignTransaction(ctx, tx, b.signer)
+	if err != nil {
+		return keychain.SignedTransaction{}, fmt.Errorf("signerBridge: %w", err)
+	}
+	return result, nil
 }
 
 type Adapter struct {

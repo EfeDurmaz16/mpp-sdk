@@ -1,6 +1,6 @@
 // Package solanatx holds the protocol-agnostic Solana-toolchain glue
 // shared by every protocol: a minimal Signer interface, an RPCClient
-// interface mirroring the subset of gagliardetto's solana-go RPC client
+// interface mirroring the subset of the official Solana Go RPC client
 // the SDK depends on, plus helpers to build SOL / SPL transfer /
 // associated-token-account / compute-budget / memo instructions, decode
 // transactions, split amounts, and run the simulate-broadcast-confirm
@@ -18,14 +18,15 @@ import (
 	"time"
 
 	bin "github.com/gagliardetto/binary"
-	solana "github.com/gagliardetto/solana-go"
-	computebudget "github.com/gagliardetto/solana-go/programs/compute-budget"
-	"github.com/gagliardetto/solana-go/programs/system"
-	"github.com/gagliardetto/solana-go/programs/token"
-	token2022 "github.com/gagliardetto/solana-go/programs/token-2022"
-	"github.com/gagliardetto/solana-go/rpc"
+	solana "github.com/solana-foundation/solana-go/v2"
+	computebudget "github.com/solana-foundation/solana-go/v2/programs/compute-budget"
+	"github.com/solana-foundation/solana-go/v2/programs/system"
+	"github.com/solana-foundation/solana-go/v2/programs/token"
+	token2022 "github.com/solana-foundation/solana-go/v2/programs/token-2022"
+	"github.com/solana-foundation/solana-go/v2/rpc"
 
 	"github.com/solana-foundation/pay-kit/go/paycore"
+	keychain "github.com/solana-foundation/solana-keychain/go/core/v2"
 )
 
 // Signer is the minimal signer surface shared by the client and server packages.
@@ -130,7 +131,9 @@ func NewV0Transaction(instructions []solana.Instruction, recentBlockhash solana.
 	if err != nil {
 		return nil, err
 	}
-	tx.Message.SetVersion(solana.MessageVersionV0)
+	if _, err := tx.Message.SetVersion(solana.MessageVersionV0); err != nil {
+		return nil, err
+	}
 	return tx, nil
 }
 
@@ -146,11 +149,14 @@ func EncodeTransactionBase64(tx *solana.Transaction) (string, error) {
 // DecodeTransaction decodes a wire transaction supplied by a client and
 // enforces the message-version policy every server verifier shares: version
 // 0 and legacy (unprefixed) messages are accepted, and any other version
-// (version 1 is not implemented in Go) is rejected cleanly. A legacy message
+// (version 1 is not yet enabled by pay-kit) is rejected cleanly. A legacy message
 // is policed exactly like version 0 (same size limit, ComputeBudget
 // instructions in the body, no address lookup tables) and is kept only for
 // existing clients: pay-kit clients never build one.
 func DecodeTransaction(wire []byte) (*solana.Transaction, error) {
+	if err := checkWireVersion(wire); err != nil {
+		return nil, err
+	}
 	tx := new(solana.Transaction)
 	if err := tx.UnmarshalWithDecoder(bin.NewBinDecoder(wire)); err != nil {
 		return nil, err
@@ -207,32 +213,45 @@ func CheckReportedVersion(version any) error {
 	return fmt.Errorf("unsupported transaction version %v", version)
 }
 
-// SignTransaction signs a transaction for a single signer without requiring a solana.PrivateKey getter.
+// TransactionSigner optionally exposes Keychain transaction-aware signing.
+// Message-only custom signers remain supported through SignTransactionWith.
+type TransactionSigner interface {
+	Signer
+	SignTransaction(context.Context, *solana.Transaction) (keychain.SignedTransaction, error)
+}
+
+// SignTransaction keeps the existing context-free API for custom signers.
 func SignTransaction(tx *solana.Transaction, signer Signer) error {
-	message, err := tx.Message.MarshalBinary()
-	if err != nil {
+	return SignTransactionContext(context.Background(), tx, signer)
+}
+
+// SignTransactionContext adds a signature through Keychain without broadcasting
+// or requiring all other signatures to be present.
+func SignTransactionContext(ctx context.Context, tx *solana.Transaction, signer Signer) error {
+	if transactionSigner, ok := signer.(TransactionSigner); ok {
+		_, err := transactionSigner.SignTransaction(ctx, tx)
 		return err
 	}
-	signature, err := signer.Sign(message)
-	if err != nil {
-		return err
-	}
-	signers := tx.Message.Signers()
-	if len(tx.Signatures) != len(signers) {
-		tx.Signatures = make([]solana.Signature, len(signers))
-	}
-	index := -1
-	for i, key := range signers {
-		if key.Equals(signer.PublicKey()) {
-			index = i
-			break
-		}
-	}
-	if index < 0 {
-		return fmt.Errorf("signer %s is not required by transaction", signer.PublicKey())
-	}
-	tx.Signatures[index] = signature
-	return nil
+	_, err := keychain.SignTransactionWith(ctx, tx, signer.PublicKey(),
+		func(_ context.Context, message []byte) (solana.Signature, error) {
+			return signer.Sign(message)
+		})
+	return err
+}
+
+// FromKeychain adapts a sign-only backend for protocol client and server options.
+// Message signing stays separate for off-chain vouchers.
+func FromKeychain(backend keychain.TransactionSigner) Signer {
+	return keychainSigner{TransactionSigner: backend}
+}
+
+type keychainSigner struct {
+	keychain.TransactionSigner
+}
+
+func (s keychainSigner) PublicKey() solana.PublicKey { return s.Pubkey() }
+func (s keychainSigner) Sign(message []byte) (solana.Signature, error) {
+	return s.SignMessage(context.Background(), message)
 }
 
 // ResolveTokenProgram resolves the mint owner into the token program ID.

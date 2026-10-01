@@ -14,13 +14,14 @@ import (
 	"time"
 
 	bin "github.com/gagliardetto/binary"
-	solana "github.com/gagliardetto/solana-go"
-	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/shopspring/decimal"
 	"github.com/solana-foundation/pay-kit/go/paycore"
 	"github.com/solana-foundation/pay-kit/go/paycore/paymentchannels"
 	"github.com/solana-foundation/pay-kit/go/paycore/solanatx"
 	pcgen "github.com/solana-foundation/pay-kit/go/protocols/programs/paymentchannels"
+	solana "github.com/solana-foundation/solana-go/v2"
+	"github.com/solana-foundation/solana-go/v2/rpc"
+	keychain "github.com/solana-foundation/solana-keychain/go/core/v2"
 )
 
 type uptoNetwork interface {
@@ -904,34 +905,33 @@ func transactionFeePayerIs(tx *solana.Transaction, key solana.PublicKey) bool {
 }
 
 func signPaykitTransaction(ctx context.Context, tx *solana.Transaction, signer uptoSigner) error {
-	message, err := tx.Message.MarshalBinary()
-	if err != nil {
+	if transactionSigner, ok := signer.(interface {
+		SignTransaction(context.Context, *solana.Transaction) (keychain.SignedTransaction, error)
+	}); ok {
+		_, err := transactionSigner.SignTransaction(ctx, tx)
 		return err
-	}
-	sigBytes, err := signer.Sign(ctx, message)
-	if err != nil {
-		return err
-	}
-	if len(sigBytes) != 64 {
-		return fmt.Errorf("signature length %d, want 64", len(sigBytes))
 	}
 	pubkey, err := solana.PublicKeyFromBase58(signer.Pubkey())
 	if err != nil {
 		return err
 	}
-	signers := tx.Message.Signers()
-	if len(tx.Signatures) != len(signers) {
-		tx.Signatures = make([]solana.Signature, len(signers))
+	if _, err := keychain.SigningPosition(tx, pubkey); err != nil {
+		return fmt.Errorf("signer %s is not required by transaction", pubkey)
 	}
-	for i, key := range signers {
-		if key.Equals(pubkey) {
-			var sig solana.Signature
-			copy(sig[:], sigBytes)
-			tx.Signatures[i] = sig
-			return nil
-		}
-	}
-	return fmt.Errorf("signer %s is not required by transaction", pubkey)
+	_, err = keychain.SignTransactionWith(ctx, tx, pubkey,
+		func(ctx context.Context, message []byte) (solana.Signature, error) {
+			raw, err := signer.Sign(ctx, message)
+			if err != nil {
+				return solana.Signature{}, err
+			}
+			if len(raw) != 64 {
+				return solana.Signature{}, fmt.Errorf("signature length %d, want 64", len(raw))
+			}
+			var signature solana.Signature
+			copy(signature[:], raw)
+			return signature, nil
+		})
+	return err
 }
 
 func parseDecimalUnits(amount string, decimals uint8) (string, error) {

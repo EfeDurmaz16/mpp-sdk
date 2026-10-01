@@ -1,5 +1,6 @@
-// Package signer provides local, in-process Ed25519 signer factories
-// that satisfy [paykit.Signer]. Remote-enclave (KMS) backends are future work.
+// Package signer adapts Keychain transaction signers to [paykit.Signer]. Local
+// factories use Keychain's Memory backend; FromKeychain accepts other sign-only
+// backends without taking responsibility for transaction broadcast.
 //
 // Every constructor returns a [paykit.Signer] and (for the fallible
 // ones) a non-nil [*InvalidKeyError] on parse failure. The Must*
@@ -17,8 +18,10 @@ import (
 	"os"
 	"strings"
 
-	solana "github.com/gagliardetto/solana-go"
 	"github.com/solana-foundation/pay-kit/go/paykit"
+	solana "github.com/solana-foundation/solana-go/v2"
+	keychain "github.com/solana-foundation/solana-keychain/go/core/v2"
+	"github.com/solana-foundation/solana-keychain/go/signers/memory/v2"
 )
 
 // InvalidKeyError is returned by the fallible factories when the input
@@ -37,20 +40,31 @@ func (e *InvalidKeyError) Error() string {
 
 // localSigner is the concrete value behind every local factory.
 type localSigner struct {
-	// priv is the 64-byte Ed25519 private key that produces signatures.
-	priv ed25519.PrivateKey
-	// pub is the base58 public key derived from priv, returned by Pubkey.
-	pub paykit.Address
+	backend keychain.TransactionSigner
 	// isDemo marks the package-shipped demo keypair so paykit can warn on
 	// use and reject it on mainnet.
 	isDemo bool
 }
 
-func (s *localSigner) Pubkey() paykit.Address { return s.pub }
-func (s *localSigner) Sign(_ context.Context, msg []byte) ([]byte, error) {
-	return ed25519.Sign(s.priv, msg), nil
+func (s *localSigner) Pubkey() paykit.Address { return paykit.Address(s.backend.Pubkey().String()) }
+func (s *localSigner) Sign(ctx context.Context, msg []byte) ([]byte, error) {
+	signature, err := s.backend.SignMessage(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
+	return signature[:], nil
 }
 func (s *localSigner) IsDemo() bool { return s.isDemo }
+
+func (s *localSigner) SignTransaction(ctx context.Context, tx *solana.Transaction) (keychain.SignedTransaction, error) {
+	return s.backend.SignTransaction(ctx, tx)
+}
+
+// FromKeychain adapts a sign-only Keychain backend (for example Memory, Privy,
+// or AWS KMS). A backend that rewrites or broadcasts cannot be passed here.
+func FromKeychain(backend keychain.TransactionSigner) paykit.Signer {
+	return &localSigner{backend: backend, isDemo: backend.Pubkey().String() == "ALtYSsZuYyKrNSe6GnVCzxj1T2RPMTPzXMe51xhbmXEq"}
+}
 
 // demoSecret is the 64-byte secret of the package-shipped demo
 // keypair, identical across the language SDKs.
@@ -67,8 +81,7 @@ var demoSecret = func() []byte {
 // slog.Warn whenever the demo signer is in use, and returns
 // paykit.ErrDemoSignerOnMainnet when combined with SolanaMainnet.
 func Demo() paykit.Signer {
-	priv := ed25519.PrivateKey(demoSecret)
-	return &localSigner{priv: priv, pub: pubkeyOf(priv), isDemo: true}
+	return MustFromBytes(demoSecret)
 }
 
 // Generate produces a fresh ephemeral keypair. Use it for identities that
@@ -81,7 +94,7 @@ func Generate() paykit.Signer {
 	if err != nil {
 		panic(err)
 	}
-	return &localSigner{priv: priv, pub: pubkeyOf(priv)}
+	return MustFromBytes(priv)
 }
 
 // FromBytes wraps a 64-byte raw secret key.
@@ -92,9 +105,11 @@ func FromBytes(b []byte) (paykit.Signer, error) {
 			Reason: fmt.Sprintf("expected %d bytes, got %d", ed25519.PrivateKeySize, len(b)),
 		}
 	}
-	priv := make(ed25519.PrivateKey, ed25519.PrivateKeySize)
-	copy(priv, b)
-	return &localSigner{priv: priv, pub: pubkeyOf(priv)}, nil
+	backend, err := memory.New(memory.Config{PrivateKey: b})
+	if err != nil {
+		return nil, &InvalidKeyError{Source: "bytes", Reason: "invalid Ed25519 keypair"}
+	}
+	return FromKeychain(backend), nil
 }
 
 // MustFromBytes panics on a wrong-length input.
@@ -226,13 +241,6 @@ func mustSigner(s paykit.Signer, err error) paykit.Signer {
 		panic(err)
 	}
 	return s
-}
-
-func pubkeyOf(priv ed25519.PrivateKey) paykit.Address {
-	pub := priv.Public().(ed25519.PublicKey)
-	var arr [32]byte
-	copy(arr[:], pub)
-	return paykit.Address(solana.PublicKey(arr).String())
 }
 
 func isHex(s string) bool {

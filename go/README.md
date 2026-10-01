@@ -204,7 +204,36 @@ prepare/record split is the building block callers compose instead.
 
 ## Examples
 
-One runnable example ships with this package:
+### Keychain signing
+
+Local signer factories use the Keychain v2 Memory backend. Existing
+`paykit.Signer` and `solanatx.Signer` implementations remain accepted; transaction
+signature attachment goes through Keychain in either case. Transaction-aware
+backends receive the transaction directly, while message-only custom signers
+use Keychain's sign-and-attach helper.
+
+To supply another sign-only backend, adapt its `core.TransactionSigner` with
+`signer.FromKeychain(backend)` for an operator or
+`solanatx.FromKeychain(backend)` for protocol client options. Privy and AWS KMS
+have this capability. Modifying and sending backends do not satisfy the adapter
+contract: payment co-signing must preserve the payer's message and signature,
+and the SDK controls broadcast after verification. Off-chain vouchers continue
+to use message signing.
+
+Run the Memory example from `go/`:
+
+```bash
+go run ./examples/keychain-memory
+```
+
+It creates an ephemeral signer, signs a v0 transaction, serializes and decodes
+it, and verifies the signature locally. It uses no RPC and submits no payment.
+The SDK continues to build v0 and accept legacy/v0 wire transactions; enabling
+v1 payment flows is a separate rollout from the SDK/signing migration.
+
+### HTTP server
+
+The server example uses the umbrella SDK:
 
 - [`examples/simple-server/`](examples/simple-server) - umbrella
   `net/http` server: a single `client.Require` gate that advertises
@@ -235,11 +264,13 @@ for the full walkthrough.
 
 | Dependency | Why | Version |
 |---|---|---|
-| `github.com/gagliardetto/solana-go` | transaction message encoding, ATA derivation, base58 keys | pinned in `go.mod` |
-| `github.com/gagliardetto/solana-go/programs/token` | SPL Token transfer instruction layout | bundled with `solana-go` |
-| `github.com/gagliardetto/solana-go/programs/token-2022` | Token-2022 transfer instruction layout | bundled with `solana-go` |
-| `github.com/gagliardetto/solana-go/programs/compute-budget` | compute unit limit / price instructions | bundled with `solana-go` |
-| `github.com/gagliardetto/solana-go/programs/system` | native SOL transfer instructions | bundled with `solana-go` |
+| `github.com/solana-foundation/solana-keychain/go/core/v2` | transaction-signing contracts and signature attachment | pinned in `go.mod` |
+| `github.com/solana-foundation/solana-keychain/go/signers/memory/v2` | local signing backend | pinned in `go.mod` |
+| `github.com/solana-foundation/solana-go/v2` | transaction message encoding, ATA derivation, base58 keys | pinned in `go.mod` |
+| `github.com/solana-foundation/solana-go/v2/programs/token` | SPL Token transfer instruction layout | bundled with `solana-go` |
+| `github.com/solana-foundation/solana-go/v2/programs/token-2022` | Token-2022 transfer instruction layout | bundled with `solana-go` |
+| `github.com/solana-foundation/solana-go/v2/programs/compute-budget` | compute unit limit / price instructions | bundled with `solana-go` |
+| `github.com/solana-foundation/solana-go/v2/programs/system` | native SOL transfer instructions | bundled with `solana-go` |
 | internal canonical JSON | base64url-encoded canonical JSON with `json.Number` preservation | in package |
 
 The Go SDK keeps the transitive dependency tree to the `solana-go`
