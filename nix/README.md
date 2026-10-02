@@ -90,6 +90,11 @@ rebuilt for the SDK's existing macOS 13 target, while the Swift compiler and
 SwiftPM inputs remain unchanged. The SDK's platform support and test assertions
 are not raised or disabled to accommodate the package.
 
+SwiftPM 6.2.4's CMake build also omits its Darwin Swift Testing launcher. The
+experiment compiles that small, unmodified helper from the pinned SwiftPM source
+and wraps the existing SwiftPM commands to discover it. It does not rebuild the
+Swift compiler or SwiftPM itself and does not use Xcode's test runner.
+
 pnpm's implicit dependency verification is disabled for prepared workspaces:
 version 11.13 otherwise reinstalls dependencies after a directory move and can
 overwrite Nix's native-binary patches. Explicit dependency installs still run

@@ -64,6 +64,10 @@ let
     pkgs.swift.override { swift-testing = swiftTesting13; }
   else
     pkgs.swift;
+  swiftpm = if pkgs.stdenv.hostPlatform.isDarwin then
+    import ./packages/swiftpm.nix { inherit pkgs swift; }
+  else
+    pkgs.swiftpm;
 
   # Match Nixpkgs' Playwright Chromium and headless-shell runtime dependencies.
   browserLibraries = lib.optionals pkgs.stdenv.hostPlatform.isLinux (with pkgs; [
@@ -173,6 +177,6 @@ in
     php = [ php composer ];
     lua = [ lua pkgs.luajitPackages.luarocks pkgs.libsodium pkgs.openssl ];
     kotlin = [ java gradle ];
-    swift = [ swift pkgs.swiftpm ];
+    swift = [ swift swiftpm ];
   };
 }
