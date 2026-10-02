@@ -79,9 +79,11 @@ uses a committed Rust dependency lock where native CI resolves dependencies.
 Redis currently comes from the pinned Nixpkgs revision; native CI uses Redis 7.
 Treat these differences as comparison variables, not evidence of a speedup.
 
-Swift uses macOS 15 rather than native CI's moving `macos-latest`. A scoped
-library path works around this Nixpkgs pin's missing Swift Span back-deployment
-rpath, fixed upstream in Nixpkgs PR #568774. The iOS demo invokes host Xcode in
+Swift uses explicit `macos-26`, matching the native CI image observed during
+the experiment. The initial measurements used `macos-15`; compare those runs
+separately when assessing the runner change. A scoped library path retains the
+workaround for this pin's missing Swift Span back-deployment rpath, fixed
+upstream in Nixpkgs PR #568774. The iOS demo invokes host Xcode in
 a clean environment so Nix's compiler and linker settings cannot replace
 Xcode's selected toolchain.
 
