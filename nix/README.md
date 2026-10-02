@@ -85,6 +85,11 @@ rpath, fixed upstream in Nixpkgs PR #568774. The iOS demo invokes host Xcode in
 a clean environment so Nix's compiler and linker settings cannot replace
 Xcode's selected toolchain.
 
+The same pin builds Swift Testing for macOS 14 by default. Its package is
+rebuilt for the SDK's existing macOS 13 target, while the Swift compiler and
+SwiftPM inputs remain unchanged. The SDK's platform support and test assertions
+are not raised or disabled to accommodate the package.
+
 pnpm's implicit dependency verification is disabled for prepared workspaces:
 version 11.13 otherwise reinstalls dependencies after a directory move and can
 overwrite Nix's native-binary patches. Explicit dependency installs still run

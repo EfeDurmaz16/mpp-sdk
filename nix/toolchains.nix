@@ -48,6 +48,23 @@ let
   composer = pkgs.php83Packages.composer.override { inherit php; };
   lua = pkgs.luajit;
   llvm = pkgs.llvmPackages_22.llvm;
+
+  # Swift Testing supports macOS 10.15, but this pin builds its runtime for 14.
+  # Preserve the SDK's macOS 13 target; macro plugins keep the host target.
+  # https://github.com/swiftlang/swift-testing/blob/swift-6.2.4-RELEASE/Package.swift
+  swiftTesting13 = pkgs.swiftPackages.swift-testing.overrideAttrs (old: {
+    cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+      "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"
+    ];
+    preConfigure = (old.preConfigure or "") + ''
+      appendToVar cmakeFlags -DCMAKE_Swift_COMPILER_TARGET=${pkgs.stdenv.hostPlatform.swift.arch}-apple-macosx13.0
+    '';
+  });
+  swift = if pkgs.stdenv.hostPlatform.isDarwin then
+    pkgs.swift.override { swift-testing = swiftTesting13; }
+  else
+    pkgs.swift;
+
   # Match Nixpkgs' Playwright Chromium and headless-shell runtime dependencies.
   browserLibraries = lib.optionals pkgs.stdenv.hostPlatform.isLinux (with pkgs; [
     alsa-lib
@@ -156,6 +173,6 @@ in
     php = [ php composer ];
     lua = [ lua pkgs.luajitPackages.luarocks pkgs.libsodium pkgs.openssl ];
     kotlin = [ java gradle ];
-    swift = [ pkgs.swift pkgs.swiftpm ];
+    swift = [ swift pkgs.swiftpm ];
   };
 }
