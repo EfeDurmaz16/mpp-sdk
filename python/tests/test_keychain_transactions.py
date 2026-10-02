@@ -259,6 +259,19 @@ async def test_async_builder_matches_sync_wire_and_checks_signer_before_call() -
     assert signer.calls == calls
 
 
+@pytest.mark.parametrize("length", [63, 65])
+def test_sync_builder_rejects_wrong_signature_length(length: int) -> None:
+    payer, cosigner = _key(1), _key(2)
+    with pytest.raises(ValueError, match="signature length .* want 64"):
+        build_partially_signed_v0_transaction(
+            [_instruction(payer, cosigner)],
+            payer.pubkey(),
+            Hash.default(),
+            cosigner.pubkey(),
+            lambda _message: bytes(length),
+        )
+
+
 @pytest.mark.parametrize("version", ["legacy", "v0"])
 def test_decoder_accepts_only_one_complete_supported_transaction(version: str) -> None:
     wire = bytes(_transaction(version))

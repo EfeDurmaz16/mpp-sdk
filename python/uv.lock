@@ -1599,6 +1599,19 @@ wheels = [
 ]
 
 [[package]]
+name = "solana-keychain"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "solders" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/55/29/2107931296f6407661607481cf4ba1b11cd6154420a105634e4a0526135e/solana_keychain-2.0.0.tar.gz", hash = "sha256:46dc2b1df6bf8dc669d0d53a3d2393b712fc5359b50068ba36e4eba5724882f1", size = 105018, upload-time = "2026-10-01T15:35:23.498Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/21/f3/acde71db4e8f52538eb97ab8d344a6925321d24e9c5f97afd57b3bb7e69a/solana_keychain-2.0.0-py3-none-any.whl", hash = "sha256:de8aa4f904cc50ad2870aedf9ae0b13e06b8815540bdb8c8f3f5b8bef145717b", size = 83905, upload-time = "2026-10-01T15:35:21.971Z" },
+]
+
+[[package]]
 name = "solana-pay-kit"
 version = "0.9.0"
 source = { editable = "." }
@@ -1608,6 +1621,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "solana" },
+    { name = "solana-keychain" },
     { name = "solders" },
 ]
 
@@ -1653,6 +1667,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "solana", specifier = ">=0.40.3,<0.41" },
+    { name = "solana-keychain", specifier = ">=2.0.0,<3" },
     { name = "solders", specifier = ">=0.29,<0.30" },
     { name = "uvicorn", marker = "extra == 'playground'", specifier = ">=0.30" },
     { name = "yfinance", marker = "extra == 'playground'", specifier = ">=0.2.40" },
