@@ -58,6 +58,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-nix-experiment
+      - uses: ./.github/actions/cache-rust-experiment
+        if: matrix.id == 'unit-rust'
       - name: Run the SDK gates
         env:
           TARGET: ${{ matrix.id }}
@@ -82,7 +84,14 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-nix-experiment
+      - uses: ./.github/actions/cache-nix-experiment
+        id: cache
+        with:
+          mode: restore
+          scope: shared-linux
+          runner-label: ubuntu-24.04
       - name: Build shared Linux outputs and repeat with a warm store
+        id: shared-build
         run: bash nix/scripts/build-shared.sh linux
       - name: Export the verified outputs
         id: export
@@ -96,44 +105,16 @@ jobs:
           path: .nix-artifacts/shared/
           compression-level: 1
           include-hidden-files: true
+      - uses: ./.github/actions/cache-nix-experiment
+        if: ${{ !cancelled() && steps.shared-build.outcome == 'success' && steps.cache.outputs.hit-primary-key != 'true' }}
+        with:
+          mode: save
+          scope: shared-linux
+          primary-key: ${{ steps.cache.outputs.primary-key }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
           name: nix-results-shared-linux
-          path: .nix-results/
-          include-hidden-files: true
-
-  shared-darwin:
-    needs: plan
-    runs-on: macos-26
-    timeout-minutes: 60
-    outputs:
-      artifact: ${{ steps.upload.outputs.artifact-id }}
-      manifest: ${{ steps.export.outputs.manifest_sha256 }}
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-nix-experiment
-      - name: Build shared Darwin outputs and repeat with a warm store
-        run: bash nix/scripts/build-shared.sh darwin
-      - name: Export the verified outputs
-        id: export
-        run: |
-          roots=()
-          while IFS= read -r root; do roots+=("$root"); done < .nix-results/shared-roots.txt
-          bash nix/scripts/store-artifact.sh export .nix-artifacts/shared "${roots[@]}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        id: upload
-        with:
-          name: nix-shared-darwin
-          path: .nix-artifacts/shared/
-          compression-level: 1
-          include-hidden-files: true
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: always()
-        with:
-          name: nix-results-shared-darwin
           path: .nix-results/
           include-hidden-files: true
 
@@ -209,23 +190,23 @@ jobs:
           include-hidden-files: true
 
   interop-swift:
-    needs: [shared-darwin, sbf]
+    needs: [plan, sbf]
     runs-on: macos-26
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-nix-experiment
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      - uses: ./.github/actions/cache-nix-experiment
+        id: cache
         with:
-          artifact-ids: ${{ needs.shared-darwin.outputs.artifact }}
-          path: .nix-artifacts/shared
-          merge-multiple: true
-      - name: Import shared native outputs
-        env:
-          EXPECTED_MANIFEST_SHA256: ${{ needs.shared-darwin.outputs.manifest }}
-        run: bash nix/scripts/store-artifact.sh import .nix-artifacts/shared
+          mode: restore
+          scope: interop-swift
+          runner-label: macos-26
+      - name: Build shared Darwin outputs and repeat with a warm store
+        id: shared-build
+        run: bash nix/scripts/build-shared.sh darwin
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           artifact-ids: ${{ needs.sbf.outputs.artifact }}
@@ -239,6 +220,12 @@ jobs:
           bash nix/scripts/verify-sbf.sh
           export PAYMENT_CHANNELS_PROGRAM_SO="$PWD/.nix-artifacts/sbf/payment_channels.so"
           nix run --no-update-lock-file .#interop-swift
+      - uses: ./.github/actions/cache-nix-experiment
+        if: ${{ !cancelled() && steps.shared-build.outcome == 'success' && steps.cache.outputs.hit-primary-key != 'true' }}
+        with:
+          mode: save
+          scope: interop-swift
+          primary-key: ${{ steps.cache.outputs.primary-key }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:

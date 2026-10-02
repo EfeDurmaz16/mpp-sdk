@@ -1,0 +1,62 @@
+name: Cache Nix Rust runtime builds
+description: Reuse Cargo dependencies and compiled artifacts while rerunning every test and coverage command.
+outputs:
+  cache-hit:
+    description: Whether the exact source and toolchain cache was restored.
+    value: ${{ steps.cache.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Identify the Rust build environment
+      id: contract
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$RUNNER_OS" = Linux
+        test "$RUNNER_ARCH" = X64
+        shell_drv="$(nix eval --no-update-lock-file --raw ".#devShells.x86_64-linux.ci-unit-rust.drvPath")"
+        {
+          printf 'shell=%s\n' "${shell_drv##*/}"
+          printf 'derivation=%s\n' "$shell_drv"
+        } >> "$GITHUB_OUTPUT"
+        {
+          # Keep runtime Cargo state outside the immutable Nix build outputs.
+          printf 'CARGO_HOME=%s/.nix-work/cargo-home\n' "$GITHUB_WORKSPACE"
+          printf 'CARGO_TARGET_DIR=%s/rust/target\n' "$GITHUB_WORKSPACE"
+          # Coverage instrumentation has a separate Cargo fingerprint/build tree.
+          printf 'CARGO_LLVM_COV_TARGET_DIR=%s/rust/target/llvm-cov-target\n' "$GITHUB_WORKSPACE"
+        } >> "$GITHUB_ENV"
+    - name: Restore Cargo dependencies and compiled artifacts
+      id: cache
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: |
+          .nix-work/cargo-home/registry
+          .nix-work/cargo-home/git
+          rust/target/debug
+          rust/target/llvm-cov-target/debug
+          !rust/target/**/incremental
+        key: nix-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-rust-${{ steps.contract.outputs.shell }}-${{ hashFiles('nix/locks/rust-Cargo.lock', 'rust/**/Cargo.toml', 'rust/**/.cargo/config*', 'nix/scripts/sdk.sh', 'nix/scripts/run.sh') }}-${{ hashFiles('rust/**/*.rs', 'html/src/**', 'html/build.ts') }}
+        restore-keys: nix-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-rust-${{ steps.contract.outputs.shell }}-${{ hashFiles('nix/locks/rust-Cargo.lock', 'rust/**/Cargo.toml', 'rust/**/.cargo/config*', 'nix/scripts/sdk.sh', 'nix/scripts/run.sh') }}-
+    - name: Record the runtime Rust cache state
+      shell: bash
+      env:
+        NIX_CACHE_SHELL: ${{ steps.contract.outputs.derivation }}
+        NIX_CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+      run: |
+        python3 - <<'PYTHON'
+        import json
+        import os
+        from pathlib import Path
+
+        result = {
+            "shell_derivation": os.environ["NIX_CACHE_SHELL"],
+            "cache_hit": os.environ["NIX_CACHE_HIT"],
+            "cargo_home": os.environ["CARGO_HOME"],
+            "cargo_target_dir": os.environ["CARGO_TARGET_DIR"],
+            "cargo_llvm_cov_target_dir": os.environ["CARGO_LLVM_COV_TARGET_DIR"],
+        }
+        output = Path(".nix-results/cache-unit-rust.json")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(result, indent=2) + "\n")
+        PYTHON

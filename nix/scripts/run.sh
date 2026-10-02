@@ -140,9 +140,27 @@ case "$kind" in
         (cd "harness/$adapter" && gradle installDist --no-daemon)
       done
     elif [[ "$lane" == swift ]]; then
-      for adapter in swift-client swift-x402-client swift-x402-upto-client; do
-        (cd "harness/$adapter" && swift build --quiet)
-      done
+      python3 - "$result_dir/swift-build-times.json" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+result_file = Path(sys.argv[1])
+measurements = []
+for adapter in ("swift-client", "swift-x402-client", "swift-x402-upto-client"):
+    started = time.monotonic()
+    process = subprocess.run(["swift", "build", "--quiet"], cwd=Path("harness") / adapter)
+    measurements.append({
+        "adapter": adapter,
+        "seconds": round(time.monotonic() - started, 3),
+        "exit_code": process.returncode,
+    })
+    result_file.write_text(json.dumps(measurements, indent=2) + "\n")
+    if process.returncode:
+        raise SystemExit(process.returncode if process.returncode > 0 else 128 - process.returncode)
+PY
     fi
     python3 nix/scripts/interop.py "$lane"
     ;;

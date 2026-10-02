@@ -15,10 +15,14 @@ branch. It has read-only repository permissions and does not publish packages.
 - `flake.lock` pins Nixpkgs. `toolchains.nix` selects each runtime and compiler.
 - Separate Nix packages build the HTML assets, TypeScript SDKs, harness
   dependencies, six Rust adapters, two Go adapters and localnet SBF program.
-- The shared build jobs export their runtime closures. Consumer jobs verify
+- The Linux shared build job exports its runtime closures. Consumer jobs verify
   the artifact against a digest supplied separately by the producer, then
-  import it into the disposable runner's Nix store. No external cache account
-  or paid infrastructure is needed.
+  import it into the disposable runner's Nix store. Swift builds and consumes
+  its Darwin outputs in one job, avoiding a transfer to a single consumer.
+- Two scoped GitHub Actions caches retain the shared Linux outputs and the
+  Swift job's Nix outputs and environment across runs. A separate Cargo cache
+  retains the Rust unit lane's ordinary and coverage build profiles. No
+  external cache account or paid infrastructure is needed.
 - `ci-lanes.json` defines 27 SDK, interop, browser and demo lanes. The interop
   manifest preserves 51 native workflow selections as 30 distinct cases.
   These are command selections, not counts of test assertions.
@@ -66,7 +70,7 @@ that store, not an end-to-end improvement over native CI.
 | iOS demo | Host Xcode and iOS Simulator SDK remain required |
 | Android demo | Host Android SDK 34 and build-tools 34.0.0 remain required |
 | RPC endpoint | Optional existing fork secret is forwarded to the same checks; public fallback when absent |
-| Persistent project binary cache | Not configured; sharing currently covers jobs in the same run |
+| Persistent build caches | Two scoped Nix store snapshots and the Rust unit lane's Cargo build trees |
 
 This is full test orchestration through Nix, not fully hermetic packaging of
 every ecosystem. It does not change skip policies, add missing protocol
@@ -104,6 +108,33 @@ pnpm's implicit dependency verification is disabled for prepared workspaces:
 version 11.13 otherwise reinstalls dependencies after a directory move and can
 overwrite Nix's native-binary patches. Explicit dependency installs still run
 where the lane requires them.
+
+## Cache and scheduling experiment
+
+Nix store keys include the platform, explicit runner label, Nix version,
+`flake.lock` fingerprint and exact desired package derivations. A fallback
+snapshot may supply unchanged outputs, but Nix still realizes every current
+target. Only valid, successful build outputs are rooted before unneeded store
+paths are collected and the snapshot is saved. Exact hits skip saving again.
+`.nix-results/cache-*.json` records the requested keys and restore results.
+
+Cargo keys also include the Rust lane's exact Nix environment, dependency lock,
+manifests and gate scripts. Source changes can reuse compatible dependency
+builds. Coverage and ordinary test builds remain separate because their
+compiler flags differ. Raw coverage profiles and reports are regenerated;
+every test and coverage threshold still runs after a hit. Changed Rust harness
+source still requires rebuilding its separate immutable Nix package.
+
+The first cache miss pays compression and upload costs. Linux consumers wait
+for their producer, including cache saving. The combined Swift job waits for
+the Linux SBF artifact before starting its Darwin build. Measure these costs
+in the full job window rather than subtracting transfer times in isolation.
+Swift adapter build timings are recorded separately from the interop cases.
+
+Only these three cache scopes are enabled initially. Repository cache limits
+and native cache entries are not changed; eviction may still cause a later
+miss. Logs, saved snapshot sizes and actual second-run hits are required
+evidence. The optimized graph has 30 jobs and the same 27 lane definitions.
 
 ## Refresh build inputs
 
