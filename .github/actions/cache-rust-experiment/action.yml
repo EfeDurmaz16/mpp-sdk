@@ -31,14 +31,17 @@ runs:
       id: cache
       uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
       with:
+        # Cargo 1.98 requires safety markers when cleaning restored target trees.
         path: |
           .nix-work/cargo-home/registry
           .nix-work/cargo-home/git
+          rust/target/CACHEDIR.TAG
           rust/target/debug
+          rust/target/llvm-cov-target/CACHEDIR.TAG
           rust/target/llvm-cov-target/debug
           !rust/target/**/incremental
-        key: nix-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-rust-${{ steps.contract.outputs.shell }}-${{ hashFiles('nix/locks/rust-Cargo.lock', 'rust/**/Cargo.toml', 'rust/**/.cargo/config*', 'nix/scripts/sdk.sh', 'nix/scripts/run.sh') }}-${{ hashFiles('rust/**/*.rs', 'html/src/**', 'html/build.ts') }}
-        restore-keys: nix-cargo-v1-${{ runner.os }}-${{ runner.arch }}-unit-rust-${{ steps.contract.outputs.shell }}-${{ hashFiles('nix/locks/rust-Cargo.lock', 'rust/**/Cargo.toml', 'rust/**/.cargo/config*', 'nix/scripts/sdk.sh', 'nix/scripts/run.sh') }}-
+        key: nix-cargo-v2-${{ runner.os }}-${{ runner.arch }}-unit-rust-${{ steps.contract.outputs.shell }}-${{ hashFiles('nix/locks/rust-Cargo.lock', 'rust/**/Cargo.toml', 'rust/**/.cargo/config*', 'nix/scripts/sdk.sh', 'nix/scripts/run.sh') }}-${{ hashFiles('rust/**/*.rs', 'html/src/**', 'html/build.ts') }}
+        restore-keys: nix-cargo-v2-${{ runner.os }}-${{ runner.arch }}-unit-rust-${{ steps.contract.outputs.shell }}-${{ hashFiles('nix/locks/rust-Cargo.lock', 'rust/**/Cargo.toml', 'rust/**/.cargo/config*', 'nix/scripts/sdk.sh', 'nix/scripts/run.sh') }}-
     - name: Record the runtime Rust cache state
       shell: bash
       env:
