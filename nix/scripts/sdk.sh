@@ -5,7 +5,7 @@ set -euo pipefail
 mode="${1:?Usage: bash nix/scripts/sdk.sh <typescript|rust|go|audit|html>}"
 case "$mode" in typescript|rust|go|audit|html) ;; *) echo "Unknown SDK gate: $mode" >&2; exit 2 ;; esac
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-results="$root/.nix-results/$mode"
+results="$root/.nix-results/$mode${NIX_TYPESCRIPT_GATE:+-$NIX_TYPESCRIPT_GATE}"
 mkdir -p "$results"
 redis_pid=""
 
@@ -35,11 +35,17 @@ case "$mode" in
     reports=("$root/typescript/coverage/coverage-summary.json" "$root/typescript/target/surfpool-reports")
     cd typescript
     # The shared SDK artifact already contains @solana/mpp's dist exports.
-    pnpm lint || status=1
-    pnpm format:check || status=1
-    pnpm typecheck || status=1
-    pnpm vitest run --coverage --config vitest.config.ci.ts || status=1
-    pnpm test:integration || status=1
+    gate="${NIX_TYPESCRIPT_GATE:-all}"
+    case "$gate" in all|lint|typecheck|tests|integration) ;; *) echo "Unknown TypeScript gate: $gate" >&2; exit 2 ;; esac
+    if [[ "$gate" == all || "$gate" == lint ]]; then
+      pnpm lint || status=1
+      pnpm format:check || status=1
+    fi
+    if [[ "$gate" == all || "$gate" == typecheck ]]; then pnpm typecheck || status=1; fi
+    if [[ "$gate" == all || "$gate" == tests ]]; then
+      pnpm vitest run --coverage --config vitest.config.ci.ts || status=1
+    fi
+    if [[ "$gate" == all || "$gate" == integration ]]; then pnpm test:integration || status=1; fi
     ;;
   rust)
     reports=("$root/rust/coverage.json" "$root/rust/target/surfpool-reports")

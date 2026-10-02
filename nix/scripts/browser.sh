@@ -213,9 +213,9 @@ case "$lane" in
     ;;
   playground-rust)
     check_port 3001
-    cp "$root/nix/locks/rust-Cargo.lock" "$root/rust/Cargo.lock"
-    run_in rust cargo build --locked --example payment_link_server --features axum
-    start_group server rust cargo run --locked --example payment_link_server --features axum
+    server_output="$(nix build --no-update-lock-file --no-link --print-out-paths .#rust-playground-server)"
+    printf 'server_output=%s\n' "$server_output" >>"$results/runtime.txt"
+    start_group server rust "$server_output/bin/payment_link_server"
     wait_ready server "$last_pid" http://localhost:3001/health 15
     ;;
   playground-go)

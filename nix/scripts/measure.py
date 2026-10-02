@@ -45,20 +45,42 @@ def outputs(args):
               "references": entry.get("references", [])} for path, entry in entries]
     result = {"roots": roots, "closure_path_count": len(paths),
               "closure_nar_bytes": sum(p["nar_bytes"] or 0 for p in paths), "paths": paths}
+    by_path = {entry["path"]: entry for entry in paths}
+    result["per_output"] = {}
+    for name, root in roots.items():
+        pending, closure = [root], set()
+        while pending:
+            path = pending.pop()
+            if path not in closure:
+                closure.add(path)
+                pending.extend(by_path[path]["references"])
+        result["per_output"][name] = {
+            "path": root, "closure_path_count": len(closure),
+            "closure_nar_bytes": sum(by_path[path]["nar_bytes"] or 0 for path in closure),
+        }
     if args.files:
-        counts = {"files": 0, "directories": 0, "symlinks": 0, "logical_bytes": 0}
-        for output in roots.values():
+        counts = {"files": 0, "directories": 0, "symlinks": 0, "logical_bytes": 0,
+                  "allocated_bytes": 0}
+        for output_name, output in roots.items():
+            current = dict.fromkeys(counts, 0)
             for directory, subdirs, files in os.walk(output, followlinks=False):
                 for name in [*subdirs, *files]:
                     path = Path(directory) / name
                     if path.is_symlink():
-                        counts["symlinks"] += 1
+                        current["symlinks"] += 1
                     elif path.is_dir():
-                        counts["directories"] += 1
+                        current["directories"] += 1
                     else:
-                        counts["files"] += 1
-                        counts["logical_bytes"] += path.stat().st_size
+                        current["files"] += 1
+                        current["logical_bytes"] += path.stat().st_size
+                        current["allocated_bytes"] += path.stat().st_blocks * 512
+            # Selected roots may share hard-linked files. This counts allocations
+            # per directory entry, not physical unique blocks on the device.
+            result["per_output"][output_name]["file_counts"] = current
+            for key in counts:
+                counts[key] += current[key]
         result["selected_root_file_counts"] = counts
+        result["allocation_policy"] = "st_blocks * 512 per regular file entry; shared hard links may be counted more than once"
     args.results.parent.mkdir(parents=True, exist_ok=True)
     args.results.write_text(json.dumps(result, indent=2) + "\n")
     return 0

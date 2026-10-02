@@ -22,6 +22,27 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 SELECTOR_PREFIXES = ("MPP_HARNESS_", "X402_HARNESS_", "MPP_CONFORMANCE_")
 CASE_INPUTS = ("PAYMENT_CHANNELS_PROGRAM_SO", "PAYMENT_CHANNELS_PROGRAM_ID", "SURFPOOL_DATASOURCE_RPC_URL", "HARNESS_ONCHAIN")
+SWIFT_GROUPS = {
+    "standard": {
+        "swift-run-swift-cross-sdk-conformance-vectors-d83aa553",
+        "swift-run-swift-client-harness-smoke-against-typescript-server-e2804a05",
+        "swift-run-swift-client-harness-smoke-against-rust-server-acb7f5c5",
+    },
+    "exact": {"swift-run-swift-x402-client-harness-against-rust-x402-server-36f27d15"},
+    "upto": {"swift-run-swift-x402-upto-client-harness-against-rust-x402-upto-server-13c1cdbc"},
+}
+
+
+def select_group(cases: list[dict[str, Any]], lane: str | None, group: str | None) -> list[dict[str, Any]]:
+    if group is None:
+        return cases
+    if lane != "swift" or group not in SWIFT_GROUPS:
+        raise ValueError("groups require the swift lane and standard, exact, or upto")
+    ids = [case["id"] for case in cases]
+    partition = [case_id for members in SWIFT_GROUPS.values() for case_id in members]
+    if len(partition) != len(set(partition)) or set(ids) != set(partition):
+        raise ValueError("Swift groups must partition every declared Swift case exactly once")
+    return [case for case in cases if case["id"] in SWIFT_GROUPS[group]]
 
 
 def timestamp() -> str:
@@ -130,6 +151,8 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="print case IDs and lanes without running tests")
     parser.add_argument("--results-dir", type=Path, default=ROOT / ".nix-results" / "interop")
     parser.add_argument("--timeout", type=float, help="optional per-case time limit in seconds")
+    parser.add_argument("--group", default=os.environ.get("NIX_INTEROP_GROUP") or None,
+                        help="Swift case group: standard, exact, or upto")
     args = parser.parse_args()
     if args.timeout is not None and args.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -143,6 +166,10 @@ def main() -> int:
     if not args.list and args.lane is None:
         parser.error("a lane is required unless --list is used")
     cases = [case for case in all_cases if args.lane is None or case["lane"] == args.lane]
+    try:
+        cases = select_group(cases, args.lane, args.group)
+    except ValueError as error:
+        parser.error(str(error))
     if not cases:
         parser.error("selection contains zero cases")
     if args.list:
@@ -156,6 +183,7 @@ def main() -> int:
             break
     summary = {
         "lane": args.lane,
+        "group": args.group,
         "baseline_commit": manifest["baseline_commit"],
         "selected_cases": len(cases),
         "executed_cases": len(results),
@@ -166,7 +194,8 @@ def main() -> int:
         "finished_at": timestamp(),
     }
     summary["status"] = "passed" if len(results) == len(cases) and all(result["status"] == "passed" for result in results) else "failed"
-    write_json(args.results_dir / f"{args.lane}-summary.json", summary)
+    suffix = f"-{args.group}" if args.group else ""
+    write_json(args.results_dir / f"{args.lane}{suffix}-summary.json", summary)
     print(f"\n{args.lane}: {summary['passed_cases']}/{len(cases)} cases passed; results: {args.results_dir}", flush=True)
     if summary["cancelled_cases"]:
         return 130

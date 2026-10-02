@@ -11,7 +11,7 @@ export CI=1 GOTOOLCHAIN=local GOWORK=off
 # the native addon patches supplied by Nix. Dependency builds are explicit.
 export pnpm_config_verify_deps_before_run=false
 export NIX_EXPERIMENT_ROOT="$root"
-result_dir="$root/.nix-results/$kind-$lane"
+result_dir="$root/.nix-results/$kind-$lane${NIX_TYPESCRIPT_GATE:+-$NIX_TYPESCRIPT_GATE}"
 mkdir -p "$result_dir"
 started="$(date +%s)"
 finish() {
@@ -32,7 +32,7 @@ trap finish EXIT
 build() {
   local target="$1" output before after
   before="$(date +%s)"
-  output="$(nix build --no-update-lock-file --no-link --print-out-paths ".#$target")"
+  output="$(python3 nix/scripts/measure.py command --results "$result_dir/phases.jsonl" --label "realize-$target" -- nix build --no-update-lock-file --no-link --print-out-paths ".#$target")"
   after="$(date +%s)"
   python3 - "$result_dir/builds.jsonl" "$target" "$output" "$before" "$after" <<'PY'
 import json, sys
@@ -47,32 +47,60 @@ PY
 stage() {
   local output
   output="$(build "$1")"
-  # Runtime package managers and browser tests need writable checkout copies.
-  cp -R "$output"/. "$root"/
-  for directory in html typescript harness rust go lua python; do
-    if [[ -d "$output/$directory" ]]; then
-      chmod -R u+w "$root/$directory"
-    fi
-  done
+  # chmod only the imported tree before merging it into the checkout. Never
+  # traverse all existing dependencies again for each generated-asset stage.
+  python3 nix/scripts/measure.py command --results "$result_dir/phases.jsonl" \
+    --label "stage-$1" -- python3 - "$output" "$root" <<'PYTHON'
+from pathlib import Path
+import os, shutil, stat, sys
+source, root = map(Path, sys.argv[1:])
+for directory, subdirs, files in os.walk(source, followlinks=False):
+    relative = Path(directory).relative_to(source)
+    destination = root / relative
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in [*subdirs, *files]:
+        artifact = Path(directory) / name
+        target = destination / name
+        if artifact.is_symlink():
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            elif target.exists():
+                raise RuntimeError(f"Cannot replace directory with link: {target}")
+            target.symlink_to(os.readlink(artifact))
+        elif artifact.is_file():
+            if target.is_symlink():
+                target.unlink()
+            shutil.copyfile(artifact, target)
+            target.chmod(stat.S_IMODE(artifact.stat().st_mode) | stat.S_IWUSR)
+PYTHON
 }
 
 prepare_harness() {
   stage html-assets
   stage typescript-sdk
   stage harness-deps
-  (cd harness && ./node_modules/.bin/tsc --noEmit)
+  (cd harness && python3 "$root/nix/scripts/measure.py" command --results "$result_dir/phases.jsonl" --label harness-typecheck -- ./node_modules/.bin/tsc --noEmit)
 }
 
 prepare_adapters() {
-  local rust_path go_client='' go_server=''
+  local rust_path go_client='' go_server='' swift_path=''
   rust_path="$(build rust-harness)"
   if [[ "$lane" == go ]]; then
     go_client="$(build go-client)"
     go_server="$(build go-server)"
   fi
-  PAY_KIT_HARNESS_COMMANDS="$(python3 - "$rust_path" "$go_client" "$go_server" <<'PY'
+  if [[ "$lane" == swift ]]; then
+    swift_path="$(build swift-harness)"
+    PAY_KIT_CONFORMANCE_COMMANDS="$(python3 - "$swift_path" <<'PYTHON'
 import json, sys
-rust, client, server = sys.argv[1:]
+print(json.dumps({"swift": [sys.argv[1] + "/bin/mpp-conformance"]}))
+PYTHON
+)"
+    export PAY_KIT_CONFORMANCE_COMMANDS
+  fi
+  PAY_KIT_HARNESS_COMMANDS="$(python3 - "$rust_path" "$go_client" "$go_server" "$swift_path" <<'PY'
+import json, sys
+rust, client, server, swift = sys.argv[1:]
 commands = {}
 for role in ("client", "server"):
     for adapter, binary in (("rust", "mpp_harness"),
@@ -85,6 +113,11 @@ if client:
 if server:
     for adapter in ("go", "go-x402-upto"):
         commands[f"server:{adapter}"] = [f"{server}/bin/paykit-go-server"]
+if swift:
+    for adapter, binary in (("swift", "SwiftHarnessClient"),
+                            ("swift-x402", "SwiftX402Client"),
+                            ("swift-x402-upto", "SwiftX402UptoClient")):
+        commands[f"client:{adapter}"] = [f"{swift}/bin/{binary}"]
 print(json.dumps(commands))
 PY
 )"
@@ -94,11 +127,13 @@ PY
 case "$kind" in
   unit)
     case "$lane" in
-      typescript|audit|html)
+      typescript)
         stage html-assets
-        [[ "$lane" == html ]] || stage typescript-sdk
+        stage typescript-unit
         bash nix/scripts/sdk.sh "$lane"
         ;;
+      audit) stage typescript-audit; bash nix/scripts/sdk.sh "$lane" ;;
+      html) stage html-assets; bash nix/scripts/sdk.sh "$lane" ;;
       rust)
         stage html-assets
         bash nix/scripts/sdk.sh "$lane"
@@ -129,7 +164,7 @@ case "$kind" in
         ;;
     esac
     case "$lane" in
-      python|ruby|lua|php|swift|kotlin)
+      python|ruby|lua|php|kotlin)
         # shellcheck source=nix/scripts/language-setup.sh
         source nix/scripts/language-setup.sh
         nix_setup_language "$lane" interop
@@ -139,33 +174,14 @@ case "$kind" in
       for adapter in kotlin-conformance kotlin-client kotlin-x402-client kotlin-x402-upto-client; do
         (cd "harness/$adapter" && gradle installDist --no-daemon)
       done
-    elif [[ "$lane" == swift ]]; then
-      python3 - "$result_dir/swift-build-times.json" <<'PY'
-import json
-from pathlib import Path
-import subprocess
-import sys
-import time
 
-result_file = Path(sys.argv[1])
-measurements = []
-for adapter in ("swift-client", "swift-x402-client", "swift-x402-upto-client"):
-    started = time.monotonic()
-    process = subprocess.run(["swift", "build", "--quiet"], cwd=Path("harness") / adapter)
-    measurements.append({
-        "adapter": adapter,
-        "seconds": round(time.monotonic() - started, 3),
-        "exit_code": process.returncode,
-    })
-    result_file.write_text(json.dumps(measurements, indent=2) + "\n")
-    if process.returncode:
-        raise SystemExit(process.returncode if process.returncode > 0 else 128 - process.returncode)
-PY
     fi
     python3 nix/scripts/interop.py "$lane"
     ;;
   browser)
     prepare_harness
+    stage html-browser-deps
+    stage typescript-unit
     bash nix/scripts/browser.sh "$lane"
     ;;
   demo) bash nix/scripts/demos.sh "$lane" ;;
