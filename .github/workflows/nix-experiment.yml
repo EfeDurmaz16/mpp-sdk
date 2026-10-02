@@ -29,6 +29,7 @@ permissions:
   actions: read
 
 env:
+  CARGO_INCREMENTAL: '0'
   NIX_EXPERIMENT_CACHE_MODE: ${{ inputs.cache_mode || 'packed' }}
   NIX_PROFILE_OUTPUTS: ${{ inputs.profile && 'true' || 'false' }}
 

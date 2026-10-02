@@ -48,8 +48,6 @@ case "$mode" in
     if [[ "$gate" == all || "$gate" == integration ]]; then pnpm test:integration || status=1; fi
     ;;
   rust)
-    # Keep compiler settings equal when experimental persistence is disabled.
-    export CARGO_INCREMENTAL=0
     reports=("$root/rust/coverage.json" "$root/rust/target/surfpool-reports")
     cp nix/locks/rust-Cargo.lock rust/Cargo.lock
     cd rust
