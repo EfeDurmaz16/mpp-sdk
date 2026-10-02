@@ -56,9 +56,10 @@ primary jobs**, excluding the optional Rust diagnostic:
 | Browser | 5 | Wait for shared Linux; Rust prepares its own server/dependency outputs. |
 | Mobile demos | 2 | Start after plan with explicit host SDK requirements. |
 
-The Darwin producer has three consumers, so preparation can overlap SBF and the
-three Swift test groups. Producer cache saving still belongs to the prerequisite
-job and must count toward the consumer's wait. Splitting jobs adds runner setup
+The Darwin producer can overlap SBF preparation. After both producers finish,
+the three Swift test groups can run concurrently. Producer cache saving still
+belongs to the prerequisite job and must count toward the consumer's wait.
+Splitting jobs adds runner setup
 and transfer costs; lower wall time is an outcome to measure.
 
 `interop-cases.json` preserves 51 native workflow selections as 30 distinct
