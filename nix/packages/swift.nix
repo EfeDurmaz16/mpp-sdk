@@ -35,7 +35,13 @@ let
       nativeBuildInputs = toolchains.tools.swift ++ [
         pkgs.swiftPackages.swiftpmHook
         pkgs.makeWrapper
+        # SwiftPM applies debug entitlements using an ad-hoc codesign identity.
+        # Pure Darwin builds cannot discover the runner's /usr/bin/codesign.
+        pkgs.darwin.sigtool
       ];
+      # Match the pinned Nixpkgs signingUtils recipe; sigtool needs this helper
+      # and honors its absolute path rather than relying on host tool lookup.
+      CODESIGN_ALLOCATE = "${pkgs.darwin.cctools}/bin/${pkgs.darwin.cctools.targetPrefix}codesign_allocate";
       strictDeps = true;
       dontConfigure = true;
       doCheck = false;
