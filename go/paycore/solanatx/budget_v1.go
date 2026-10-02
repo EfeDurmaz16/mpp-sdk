@@ -5,6 +5,7 @@ import (
 	"math/bits"
 
 	solana "github.com/solana-foundation/solana-go/v2"
+	computebudget "github.com/solana-foundation/solana-go/v2/programs/compute-budget"
 )
 
 // CheckV1BudgetCaps bounds v1's inline compute budget before a payment verifier
@@ -36,6 +37,9 @@ func CheckV1BudgetCaps(tx *solana.Transaction, maxUnitLimit uint32, maxUnitPrice
 	if config.PriorityFee == nil {
 		return nil
 	}
+	// The runtime clamps CU but charges the full v1 priority fee. Derive the
+	// fee ceiling from effective CU so an oversized request cannot inflate it.
+	units = min(units, computebudget.MAX_COMPUTE_UNIT_LIMIT)
 	// ceil(fee * 1_000_000 / units) <= priceCap is exactly equivalent to
 	// fee * 1_000_000 <= units * priceCap. Compare 128-bit products to avoid
 	// overflowing either side, including a malicious maximum-u64 total fee.

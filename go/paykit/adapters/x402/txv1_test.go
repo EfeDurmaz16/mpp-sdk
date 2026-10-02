@@ -98,8 +98,24 @@ func (r *capturingV1RPC) SendEncodedTransactionWithOpts(ctx context.Context, wir
 }
 
 func TestVerifyAndSettleV1CosignsAfterFeeGuard(t *testing.T) {
-	for _, fee := range []uint64{1_000_000, 1_000_001, math.MaxUint64} {
-		t.Run(fmt.Sprint(fee), func(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		units  uint32
+		fee    uint64
+		reject bool
+	}{
+		{"price boundary", 200_000, 1_000_000, false},
+		{"price excess", 200_000, 1_000_001, true},
+		{"maximum fee", 200_000, math.MaxUint64, true},
+		{"runtime boundary", 1_400_000, 7_000_000, false},
+		{"runtime fee excess", 1_400_000, 7_000_001, true},
+		{"clamped units boundary", 1_400_001, 7_000_000, false},
+		{"clamped units fee excess", 1_400_001, 7_000_001, true},
+		{"maximum units boundary", math.MaxUint32, 7_000_000, false},
+		{"maximum units fee excess", math.MaxUint32, 7_000_001, true},
+		{"inflated declared fee", math.MaxUint32, 21_474_836_475, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			op := &countedV1Operator{Signer: signer.Generate()}
 			payer := signer.Generate()
 			opKey := solana.MustPublicKeyFromBase58(string(op.Pubkey()))
@@ -114,7 +130,9 @@ func TestVerifyAndSettleV1CosignsAfterFeeGuard(t *testing.T) {
 				t.Fatal(err)
 			}
 			transfer := token.NewTransferCheckedInstruction(1_000, 6, source, mint, destination, payerKey, nil).Build()
-			tx, err := solana.NewTransaction([]solana.Instruction{transfer}, solana.Hash{}, solana.TransactionPayer(opKey), solana.TransactionV1Config(solana.TransactionConfig{}.WithComputeUnitLimit(200_000).WithPriorityFee(fee)))
+			config := solana.TransactionConfig{}.WithComputeUnitLimit(tc.units).
+				WithLoadedAccountsDataSizeLimit(64 * 1024 * 1024).WithPriorityFee(tc.fee)
+			tx, err := solana.NewTransaction([]solana.Instruction{transfer}, solana.Hash{}, solana.TransactionPayer(opKey), solana.TransactionV1Config(config))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -137,7 +155,7 @@ func TestVerifyAndSettleV1CosignsAfterFeeGuard(t *testing.T) {
 				t.Fatal(err)
 			}
 			payment, err := a.VerifyAndSettle(&paykit.AdapterRequest{Gate: &paykit.Gate{Amount: paykit.MustParseUSD("0.001")}, PaymentSig: base64.StdEncoding.EncodeToString(credential)})
-			if fee > 1_000_000 {
+			if tc.reject {
 				var paymentErr *paykit.PaymentError
 				if !errorsAs(err, &paymentErr) || paymentErr.Code != "invalid_exact_svm_payload_transaction_instructions_compute_price_instruction_too_high" || op.calls != 0 || remote.sends != 0 {
 					t.Fatalf("rejected before signing/send: calls=%d sends=%d err=%v", op.calls, remote.sends, err)

@@ -20,6 +20,13 @@ func TestCheckV1BudgetCaps(t *testing.T) {
 		{"sponsored excess", solana.TransactionConfig{}.WithComputeUnitLimit(200_000).WithPriorityFee(2_001), 200_000, 10_000, "priority fee"},
 		{"general boundary", solana.TransactionConfig{}.WithComputeUnitLimit(200_000).WithPriorityFee(1_000_000), 200_000, 5_000_000, ""},
 		{"general excess", solana.TransactionConfig{}.WithComputeUnitLimit(200_000).WithPriorityFee(1_000_001), 200_000, 5_000_000, "priority fee"},
+		{"runtime boundary", solana.TransactionConfig{}.WithComputeUnitLimit(1_400_000).WithPriorityFee(7_000_000), math.MaxUint32, 5_000_000, ""},
+		{"runtime fee excess", solana.TransactionConfig{}.WithComputeUnitLimit(1_400_000).WithPriorityFee(7_000_001), math.MaxUint32, 5_000_000, "priority fee"},
+		{"clamped units boundary", solana.TransactionConfig{}.WithComputeUnitLimit(1_400_001).WithPriorityFee(7_000_000), math.MaxUint32, 5_000_000, ""},
+		{"clamped units fee excess", solana.TransactionConfig{}.WithComputeUnitLimit(1_400_001).WithPriorityFee(7_000_001), math.MaxUint32, 5_000_000, "priority fee"},
+		{"maximum units boundary", solana.TransactionConfig{}.WithComputeUnitLimit(math.MaxUint32).WithPriorityFee(7_000_000), math.MaxUint32, 5_000_000, ""},
+		{"maximum units fee excess", solana.TransactionConfig{}.WithComputeUnitLimit(math.MaxUint32).WithPriorityFee(7_000_001), math.MaxUint32, 5_000_000, "priority fee"},
+		{"inflated declared fee", solana.TransactionConfig{}.WithComputeUnitLimit(math.MaxUint32).WithPriorityFee(21_474_836_475), math.MaxUint32, 5_000_000, "priority fee"},
 		{"units excess", solana.TransactionConfig{}.WithComputeUnitLimit(200_001), 200_000, 10_000, "compute unit limit"},
 		{"missing units", solana.TransactionConfig{}.WithPriorityFee(1), 200_000, 10_000, "must set computeUnitLimit"},
 		{"zero units", solana.TransactionConfig{}.WithComputeUnitLimit(0), 200_000, 10_000, "greater than zero"},
@@ -58,6 +65,14 @@ func TestCheckV1BudgetCapsRejectsIgnoredComputeInstructions(t *testing.T) {
 	})
 	if err := CheckV1BudgetCaps(tx, 200_000, 10_000); err == nil || !strings.Contains(err.Error(), "must not contain ComputeBudget") {
 		t.Fatalf("err = %v, want ignored-instruction rejection", err)
+	}
+}
+
+func TestCheckV1BudgetCapsRejectsInvalidProgramIndex(t *testing.T) {
+	tx := signedV1Transaction(t)
+	tx.Message.Instructions[0].ProgramIDIndex = uint16(len(tx.Message.AccountKeys))
+	if err := CheckV1BudgetCaps(tx, 200_000, 10_000); err == nil || !strings.Contains(err.Error(), "invalid program index") {
+		t.Fatalf("err = %v, want invalid program index rejection", err)
 	}
 }
 
