@@ -17,7 +17,7 @@ WORK = ROOT / ".nix-work/rust-diagnostic"
 VERSION = "1.98.1"
 BUILD = [
     "cargo", "build", "--locked", "--offline", "--profile", "dev", "--jobs", "4",
-    "--package", "solana-pay-kit", "--example", "payment_link_server",
+    "--example", "payment_link_server",
     "--features", "axum", "--timings",
 ]
 # These explicit values match the playground package's dev build. Native

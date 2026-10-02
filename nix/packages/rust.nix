@@ -70,8 +70,11 @@ let
     cargoBuildExtraArgs = "--timings";
   };
   harnessArgs = targetArgs "paykit-rust-harness" "--package paykit-harness-bins --bins";
+  # Match the native command's virtual-workspace selection. Other default
+  # members enable the kit's client feature, which the example needs for its
+  # reqwest calls. Narrowing this to --package changes feature unification.
   playgroundArgs = targetArgs "paykit-rust-playground-server"
-    "--package solana-pay-kit --example payment_link_server --features axum";
+    "--example payment_link_server --features axum";
   dependencies = args: craneLib.buildDepsOnly (args // {
     # Compile just the matching targets, without an additional cargo check or
     # test compilation. Crane stubs workspace sources for this derivation, so
