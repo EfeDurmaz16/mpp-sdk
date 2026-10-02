@@ -90,9 +90,8 @@ payment-channels-generate-go: codegen-install
 payment-channels-generate-ts: codegen-install
     cd {{codegen_dir}} && pnpm run payment-channels:ts
 
-# Render the Python client from the vendored IDL. Wipes
-# `python/src/solana_pay_kit/protocols/programs/paymentchannels/` and rewrites
-# it in place — see {{codegen_dir}}/generate-payment-channels-client-py.ts.
+# Render the native Python client from the vendored IDL. Validate the full
+# output before replacing the generated package; see the matching codegen script.
 payment-channels-generate-py: codegen-install
     cd {{codegen_dir}} && pnpm run payment-channels:python
 

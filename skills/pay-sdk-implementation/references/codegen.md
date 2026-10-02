@@ -67,15 +67,19 @@ whatever `main` happens to be the day someone runs the recipe.
 re-rendering, so a removed instruction in the upstream IDL disappears
 on the next run.
 
-## Native Python preview
+## Native Python generation
 
 The PaymentChannels Python renderer supports the node families in the vendored
 IDL and rejects unsupported nodes instead of emitting incomplete code. Models
 use strict Pydantic validation and published PyBorsh serialization. No binary
 codec is maintained in this repository.
 
-Before activating the native client, render a separate package for contract
-tests from the codegen directory:
+Run `just payment-channels-generate-py` to regenerate the active SDK package.
+From the codegen directory, `pnpm exec tsx generate-payment-channels-client-py.ts --check` verifies
+the checked-in output without writing. Unsupported IDL changes fail before the
+package is replaced.
+
+For a separate preview package:
 
 ```sh
 pnpm exec tsx generate-payment-channels-native-py.ts --output /tmp/paymentchannels_native
@@ -85,7 +89,8 @@ pnpm exec tsx generate-payment-channels-native-py.ts --output /tmp/paymentchanne
 Run `python/tests/test_paymentchannels_native.py` with
 `PAYMENTCHANNELS_PACKAGE=paymentchannels_native` and `/tmp` on `PYTHONPATH`.
 The tests compare independent program vectors and instruction account metadata;
-the preview does not change the SDK's active generated package.
+the preview does not change the SDK's active generated package. The same tests
+run against the active package by default.
 
 ## Adding a second language (template)
 

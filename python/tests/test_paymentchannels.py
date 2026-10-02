@@ -92,6 +92,22 @@ def test_voucher_message_rejects_non_32_byte_channel_id() -> None:
         voucher_message_bytes(FakeKey(), 1, 1)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "cumulative,expires_at",
+    [
+        (True, 1),
+        (1, True),
+        (-1, 1),
+        (2**64, 1),
+        (1, -(2**63) - 1),
+        (1, 2**63),
+    ],
+)
+def test_voucher_message_rejects_invalid_numeric_fields(cumulative: int, expires_at: int) -> None:
+    with pytest.raises(ValueError):
+        voucher_message_bytes(pk(3), cumulative, expires_at)
+
+
 def test_find_channel_pda_is_deterministic_and_off_curve() -> None:
     addr1, bump1 = find_channel_pda(pk(1), pk(2), pk(3), pk(4), 99, 777)
     addr2, bump2 = find_channel_pda(pk(1), pk(2), pk(3), pk(4), 99, 777)

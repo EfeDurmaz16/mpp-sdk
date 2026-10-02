@@ -26,6 +26,31 @@ challenge, the on-chain verification, the broadcast, and the settlement.
 
 ## Quick start
 
+### Generated PaymentChannels client migration
+
+The generated client uses strict Pydantic models and PyBorsh. It is generated
+from the vendored Codama IDL by `just payment-channels-generate-py`. No dependency
+checkout or patched wheel is needed to install the SDK. AnchorPy and
+`borsh-construct` are no longer dependencies; Solana's own Construct dependency
+remains transitive.
+
+Consumers importing the generated package directly must update these APIs:
+
+| Previous generated API | Native generated API |
+|---|---|
+| `Type.layout.build(value)` | `Type.model_validate(value).to_borsh()` |
+| `Type.layout.parse(data)` | `Type.from_borsh(data)` |
+| `Type.from_decoded(value)` / `to_encodable()` | `model_validate(value)` / `model_dump()` |
+| Public key fields contain `Pubkey` | Pass `bytes(pubkey)`; fields contain exactly 32 bytes |
+| Enum variant wrapper classes | Explicit `IntEnum` values; JSON uses numeric tags |
+
+`to_json()` and `from_json()` retain base58 public keys. Python construction
+rejects string keys and coercion of bools, floats or strings into integers.
+`Channel.decode()` checks the complete account, including its tag, and rejects
+trailing or truncated bytes. RPC fetch helpers check ownership before decoding.
+The supported Solana/Solders dependency ranges are pinned to the tested release
+families. Ordinary wheel and source-distribution installations are checked in CI.
+
 Three progressively-realistic snippets. Each one runs as-is, copy, paste,
 hit the URL. Flask is the framework here; the same surface works in FastAPI
 and Django (see [Examples](#examples)).

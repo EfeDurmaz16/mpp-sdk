@@ -45,6 +45,7 @@ jobs:
         run: |
           pnpm run typecheck:python-generator
           pnpm run test:python-generator
+          pnpm exec tsx generate-payment-channels-client-py.ts --check
           pnpm exec tsx generate-payment-channels-native-py.ts --output "$RUNNER_TEMP/paymentchannels_native"
           pnpm exec tsx generate-payment-channels-native-py.ts --output "$RUNNER_TEMP/paymentchannels_native" --check
       - name: Verify native Python wire contracts
@@ -53,6 +54,17 @@ jobs:
           PAYMENTCHANNELS_PACKAGE: paymentchannels_native
         run: |
           PYTHONPATH="$RUNNER_TEMP:$PWD/src" pytest tests/test_paymentchannels_native.py
+      - uses: astral-sh/setup-uv@v5
+      - name: Verify installed wheel and source distribution
+        working-directory: python
+        run: |
+          uv build --out-dir "$RUNNER_TEMP/python-dist"
+          uv venv "$RUNNER_TEMP/wheel-consumer" --python 3.11
+          uv pip install --python "$RUNNER_TEMP/wheel-consumer/bin/python" "$RUNNER_TEMP"/python-dist/*.whl
+          "$RUNNER_TEMP/wheel-consumer/bin/python" tests/distribution_smoke.py
+          uv venv "$RUNNER_TEMP/sdist-consumer" --python 3.11
+          uv pip install --python "$RUNNER_TEMP/sdist-consumer/bin/python" "$RUNNER_TEMP"/python-dist/*.tar.gz
+          "$RUNNER_TEMP/sdist-consumer/bin/python" tests/distribution_smoke.py
       - name: Run tests with coverage
         working-directory: python
         # Gate global lines at 90% and each native client file at 90% lines/branches.

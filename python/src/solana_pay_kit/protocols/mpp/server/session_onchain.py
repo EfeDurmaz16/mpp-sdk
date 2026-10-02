@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from pyborsh import BorshDeserializationError
 from solders.hash import Hash  # type: ignore[import-untyped]
 from solders.keypair import Keypair  # type: ignore[import-untyped]
 from solders.pubkey import Pubkey  # type: ignore[import-untyped]
@@ -635,16 +636,19 @@ async def _verify_channel_account(
         raise PaymentError("confirmed channel account was not found", code="transaction-not-found")
     if str(info.owner) != str(program_id):
         raise PaymentError("channel account is owned by the wrong program", code="invalid-payload")
-    channel = Channel.decode(bytes(info.data))
+    try:
+        channel = Channel.decode(bytes(info.data))
+    except BorshDeserializationError as exc:
+        raise PaymentError("channel account data is malformed", code="invalid-payload") from exc
     actual = {
-        "authorized_signer": str(channel.authorizedSigner),
+        "authorized_signer": str(Pubkey.from_bytes(channel.authorizedSigner)),
         "deposit": channel.deposit,
         "grace_period": channel.gracePeriod,
-        "mint": str(channel.mint),
+        "mint": str(Pubkey.from_bytes(channel.mint)),
         "open_slot": channel.openSlot,
-        "payee": str(channel.payee),
-        "payer": str(channel.payer),
-        "rent_payer": str(channel.rentPayer),
+        "payee": str(Pubkey.from_bytes(channel.payee)),
+        "payer": str(Pubkey.from_bytes(channel.payer)),
+        "rent_payer": str(Pubkey.from_bytes(channel.rentPayer)),
         "salt": channel.salt,
     }
     if channel.status != 0:

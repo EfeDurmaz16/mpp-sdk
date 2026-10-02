@@ -12,24 +12,35 @@ from collections.abc import Callable
 from enum import IntEnum
 from importlib import import_module
 from pathlib import Path
+from unittest.mock import create_autospec
 
 import pytest
+from pyborsh import BorshDeserializationError
+from pydantic import ValidationError, create_model
+from solana.rpc.async_api import AsyncClient
+from solana.rpc.commitment import Confirmed
+from solana.rpc.core import RPCException
+from solders.account import Account
 from solders.instruction import AccountMeta, Instruction
 from solders.pubkey import Pubkey
+from solders.rpc.errors import SendTransactionPreflightFailureMessage
+from solders.rpc.responses import (
+    GetAccountInfoResp,
+    GetMultipleAccountsResp,
+    RpcResponseContext,
+    RpcSimulateTransactionResult,
+)
+from solders.transaction_status import InstructionErrorCustom, TransactionErrorInstructionError
+
+from solana_pay_kit._paycore.program_client import WireModel
 
 PACKAGE = os.environ.get("PAYMENTCHANNELS_PACKAGE", "solana_pay_kit.protocols.programs.paymentchannels")
-_voucher = import_module(f"{PACKAGE}.types.voucherArgs").VoucherArgs
-if PACKAGE == "solana_pay_kit.protocols.programs.paymentchannels" and not hasattr(_voucher, "to_borsh"):
-    pytest.skip(
-        "Native renderer contracts run against PAYMENTCHANNELS_PACKAGE until activation", allow_module_level=True
-    )
-
-from pyborsh import BorshDeserializationError  # noqa: E402
-from pydantic import ValidationError, create_model  # noqa: E402
-
-from solana_pay_kit._paycore.program_client import WireModel  # noqa: E402
-
 FIXTURES = json.loads((Path(__file__).parent / "fixtures" / "paymentchannels_native.json").read_text())
+ERROR_SPECS = json.loads((Path(__file__).resolve().parents[2] / "idl/payment-channels.json").read_text())["program"][
+    "errors"
+]
+ERRORS = import_module(f"{PACKAGE}.errors")
+ERROR_CLASSES = import_module(f"{PACKAGE}.errors.paymentChannels")
 MODEL_NAMES = (
     "distributeArgs",
     "distributionEntry",
@@ -379,3 +390,101 @@ def test_in_place_array_and_nested_model_mutations_are_revalidated() -> None:
     object.__setattr__(opened.recipients[0], "bps", True)
     with pytest.raises(ValidationError):
         opened.to_borsh()
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+async def test_generated_channel_fetch_forwards_commitment_and_custom_owner(multiple: bool) -> None:
+    cls = MODELS["channel"]
+    custom = Pubkey.from_string(FIXTURES["defaults"]["customProgramId"])
+    address = Pubkey.from_bytes(bytes([33]) * 32)
+    data = bytes.fromhex(example("channel")["hex"])
+    info = Account(1, data, custom)
+    context = RpcResponseContext(42)
+    client = create_autospec(AsyncClient, instance=True)
+    if multiple:
+        addresses = [Pubkey.default(), address, custom]
+        client.get_multiple_accounts.return_value = GetMultipleAccountsResp([None, info, None], context)
+        result = await cls.fetch_multiple(client, addresses, commitment=Confirmed, program_id=custom)
+        assert result == [None, cls.decode(data), None]
+        client.get_multiple_accounts.assert_awaited_once_with(addresses, commitment=Confirmed)
+        client.get_account_info.assert_not_awaited()
+    else:
+        client.get_account_info.return_value = GetAccountInfoResp(info, context)
+        assert await cls.fetch(client, address, commitment=Confirmed, program_id=custom) == cls.decode(data)
+        client.get_account_info.assert_awaited_once_with(address, commitment=Confirmed)
+        client.get_multiple_accounts.assert_not_awaited()
+
+
+def preflight_error(code: int, program: Pubkey, *, logs: bool = True) -> tuple[RPCException, list[str] | None]:
+    messages = [f"Program {program} invoke [1]", f"Program {program} failed: custom program error: {code:#x}"]
+    log_lines = messages if logs else None
+    error = RPCException(
+        SendTransactionPreflightFailureMessage(
+            "simulation failed",
+            RpcSimulateTransactionResult(
+                err=TransactionErrorInstructionError(0, InstructionErrorCustom(code)),
+                logs=log_lines,
+            ),
+        )
+    )
+    return error, log_lines
+
+
+@pytest.mark.parametrize("spec", ERROR_SPECS, ids=lambda spec: spec["name"])
+def test_all_generated_error_factories_match_idl_and_return_fresh_instances(spec) -> None:
+    assert len(ERROR_SPECS) == len(ERROR_CLASSES.CUSTOM_ERROR_MAP) == 65
+    program = Pubkey.from_string(FIXTURES["defaults"]["programId"])
+    name = spec["name"][0].upper() + spec["name"][1:]
+    expected_class = getattr(ERROR_CLASSES, name)
+    rpc_error, logs = preflight_error(spec["code"], program)
+    direct = ERRORS.from_code(spec["code"], logs)
+    parsed = ERRORS.from_tx_error(rpc_error)
+    for error in (direct, parsed):
+        assert type(error) is expected_class
+        assert (error.code, error.name, error.msg, error.logs) == (spec["code"], name, spec["message"], logs)
+    assert direct is not parsed
+    assert ERRORS.from_code(spec["code"], logs) is not direct
+    assert ERRORS.from_tx_error(rpc_error) is not parsed
+    assert ERRORS.from_code(spec["code"]).logs is None
+
+
+def test_generated_error_factories_reject_unknown_codes_and_respect_program_override() -> None:
+    program = Pubkey.from_string(FIXTURES["defaults"]["programId"])
+    custom = Pubkey.from_string(FIXTURES["defaults"]["customProgramId"])
+    assert ERRORS.from_code(-1) is None
+    for code in (11, 49, 2415, 2**32 - 1):
+        assert ERRORS.from_code(code) is None
+        assert ERRORS.from_tx_error(preflight_error(code, program)[0]) is None
+    assert ERRORS.from_tx_error(preflight_error(2, program, logs=False)[0]) is None
+    assert ERRORS.from_tx_error(RPCException("unavailable")) is None
+    custom_error, logs = preflight_error(2, custom)
+    assert ERRORS.from_tx_error(custom_error) is None
+    result = ERRORS.from_tx_error(custom_error, program_id=custom)
+    assert type(result) is ERROR_CLASSES.InvalidChannelStatus
+    assert result.logs == logs
+
+
+@pytest.mark.parametrize("name", ["open", "distribute", "topUp", "settleAndSeal"])
+def test_actual_instruction_builders_reject_mutated_native_arguments(name: str) -> None:
+    case = next(case for case in INSTRUCTIONS if case["name"] == name)
+    ((argument, value),) = case["args"].items()
+    model = MODELS[argument].model_validate(native_input(value))
+    builder = getattr(import_module(f"{PACKAGE}.instructions.{name}"), name[0].upper() + name[1:])
+    accounts = explicit_accounts(case)
+    assert builder({argument: model}, accounts).data.hex() == case["hex"]
+    if name in ("open", "distribute"):
+        object.__setattr__(model.recipients[0], "bps", True)
+    else:
+        object.__setattr__(model, "amount" if name == "topUp" else "hasVoucher", True)
+    with pytest.raises(ValidationError):
+        builder({argument: model}, accounts)
+
+
+@pytest.mark.parametrize("custom,bump", [(False, 249), (True, 253)])
+def test_generated_event_authority_pda_address_and_bump_match_rust(custom: bool, bump: int) -> None:
+    defaults = FIXTURES["defaults"]
+    find_pda = import_module(f"{PACKAGE}.pdas.index").find_event_authority_pda
+    result = find_pda(Pubkey.from_string(defaults["customProgramId"])) if custom else find_pda()
+    address_key = "customEventAuthority" if custom else "eventAuthority"
+    assert defaults[address_key + "Bump"] == bump
+    assert result == (Pubkey.from_string(defaults[address_key]), bump)

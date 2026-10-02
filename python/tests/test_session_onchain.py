@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 from solders.hash import Hash  # type: ignore[import-untyped]
@@ -398,13 +399,11 @@ def _open_config(fixture: _Fixture) -> SessionConfig:
     )
 
 
-def _channel_account(fixture: _Fixture) -> object:
+def _channel_account(fixture: _Fixture) -> SimpleNamespace:
     """The confirmed on-chain channel account the fixture's open creates."""
-    from types import SimpleNamespace
-
     from solana_pay_kit.protocols.programs.paymentchannels.accounts.channel import Channel
 
-    body = Channel.layout.build(
+    body = Channel.model_validate(
         {
             "version": 1,
             "bump": 255,
@@ -416,15 +415,15 @@ def _channel_account(fixture: _Fixture) -> object:
             "payerWithdrawnAt": 0,
             "gracePeriod": fixture.payload.grace_period_seconds,
             "distributionHash": [0] * 32,
-            "payer": Pubkey.from_string(fixture.payload.payer),
-            "payee": Pubkey.from_string(fixture.payload.payee),
-            "authorizedSigner": Pubkey.from_string(fixture.payload.authorized_signer),
-            "mint": Pubkey.from_string(fixture.payload.mint),
-            "rentPayer": Pubkey.from_string(fixture.payload.payer),
+            "payer": bytes(Pubkey.from_string(fixture.payload.payer)),
+            "payee": bytes(Pubkey.from_string(fixture.payload.payee)),
+            "authorizedSigner": bytes(Pubkey.from_string(fixture.payload.authorized_signer)),
+            "mint": bytes(Pubkey.from_string(fixture.payload.mint)),
+            "rentPayer": bytes(Pubkey.from_string(fixture.payload.payer)),
             "openSlot": fixture.payload.open_slot,
         }
-    )
-    return SimpleNamespace(owner=PROGRAM_ID, data=bytes([7]) + bytes(body))
+    ).to_borsh()
+    return SimpleNamespace(owner=PROGRAM_ID, data=body)
 
 
 async def test_open_verifier_rescues_landed_open_on_duplicate_preflight_rejection() -> None:
@@ -461,9 +460,33 @@ async def test_open_verifier_still_fails_on_account_mismatch_after_clean_broadca
         await verifier(fixture.payload, _context())
 
 
-def _top_up_scenario(*, deposit_after: int) -> tuple[TopUpPayload, ChannelState, object]:
-    from types import SimpleNamespace
+@pytest.mark.parametrize("corruption", ["wrong_tag", "truncated", "trailing", "empty"])
+async def test_open_verifier_sanitizes_malformed_confirmed_account(corruption: str) -> None:
+    fixture = _fixture()
+    account = _channel_account(fixture)
+    data = account.data
+    account.data = {"wrong_tag": b"\x07" + data[1:], "truncated": data[:-1], "trailing": data + b"\x00", "empty": b""}[
+        corruption
+    ]
+    rpc = _MainnetLikeRpc(account=account, status=_LANDED_CLEAN)
+    verifier = new_open_tx_verifier(_open_config(fixture), rpc)
+    with pytest.raises(PaymentError, match="^channel account data is malformed$") as caught:
+        await verifier(fixture.payload, _context())
+    assert caught.value.code == "invalid-payload"
 
+
+async def test_malformed_confirmed_account_cannot_rescue_failed_open_broadcast() -> None:
+    fixture = _fixture()
+    account = _channel_account(fixture)
+    account.data = b"\x07" + account.data[1:]
+    rpc = _MainnetLikeRpc(account=account, status=_LANDED_CLEAN)
+    rpc.sent.append(base64.b64decode(fixture.payload.transaction))
+    verifier = new_open_tx_verifier(_open_config(fixture), rpc)
+    with pytest.raises(RuntimeError, match="already been processed"):
+        await verifier(fixture.payload, _context())
+
+
+def _top_up_scenario(*, deposit_after: int) -> tuple[TopUpPayload, ChannelState, SimpleNamespace]:
     from solana_pay_kit._paycore.solana import resolve_mint
     from solana_pay_kit.protocols.mpp._paymentchannels import TopUpParams, build_top_up_instruction
     from solana_pay_kit.protocols.programs.paymentchannels.accounts.channel import Channel
@@ -492,7 +515,7 @@ def _top_up_scenario(*, deposit_after: int) -> tuple[TopUpPayload, ChannelState,
         MessageV0.try_compile(payer.pubkey(), [instruction], [], Hash.default()), [payer]
     )
     payload = TopUpPayload(str(channel), "250", base64.b64encode(bytes(transaction)).decode())
-    body = Channel.layout.build(
+    body = Channel.model_validate(
         {
             "version": 1,
             "bump": 255,
@@ -504,15 +527,15 @@ def _top_up_scenario(*, deposit_after: int) -> tuple[TopUpPayload, ChannelState,
             "payerWithdrawnAt": 0,
             "gracePeriod": 900,
             "distributionHash": [0] * 32,
-            "payer": payer.pubkey(),
-            "payee": Keypair.from_seed(bytes([14] * 32)).pubkey(),
-            "authorizedSigner": Pubkey.from_string(state.authorized_signer),
-            "mint": mint,
-            "rentPayer": payer.pubkey(),
+            "payer": bytes(payer.pubkey()),
+            "payee": bytes(Keypair.from_seed(bytes([14] * 32)).pubkey()),
+            "authorizedSigner": bytes(Pubkey.from_string(state.authorized_signer)),
+            "mint": bytes(mint),
+            "rentPayer": bytes(payer.pubkey()),
             "openSlot": 0,
         }
-    )
-    account = SimpleNamespace(owner=PROGRAM_ID, data=bytes([7]) + bytes(body))
+    ).to_borsh()
+    account = SimpleNamespace(owner=PROGRAM_ID, data=body)
     return payload, state, account
 
 
@@ -533,6 +556,16 @@ async def test_top_up_verifier_rescues_landed_top_up_on_duplicate_preflight_reje
     await verifier(payload)
     await verifier(payload)
     assert len(rpc.sent) == 1
+
+
+async def test_top_up_verifier_sanitizes_malformed_confirmed_account() -> None:
+    payload, state, account = _top_up_scenario(deposit_after=1_250)
+    account.data = b"\x07" + account.data[1:]
+    rpc = _MainnetLikeRpc(account=account, status=_LANDED_CLEAN)
+    verifier = await _seeded_top_up_verifier(rpc, state)
+    with pytest.raises(PaymentError, match="^channel account data is malformed$") as caught:
+        await verifier(payload)
+    assert caught.value.code == "invalid-payload"
 
 
 async def test_top_up_verifier_keeps_broadcast_error_when_transaction_failed_on_chain() -> None:

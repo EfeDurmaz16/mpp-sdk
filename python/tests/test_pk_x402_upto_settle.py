@@ -140,7 +140,7 @@ def _fake_channel(
     distribution_hash: list[int] | None = None,
 ) -> tuple[bytes, str]:
     """Build a Borsh-encoded channel account (1-byte discriminator + struct)."""
-    body = Channel.layout.build(
+    body = Channel.model_validate(
         {
             "version": 1,
             "bump": 255,
@@ -152,15 +152,15 @@ def _fake_channel(
             "payerWithdrawnAt": 0,
             "gracePeriod": 900,
             "distributionHash": distribution_hash if distribution_hash is not None else [0] * 32,
-            "payer": Pubkey.from_string(payer),
-            "payee": Pubkey.from_string(payee),
-            "authorizedSigner": Pubkey.from_string(operator),
-            "mint": Pubkey.from_string(mint),
-            "rentPayer": Pubkey.from_string(operator),
+            "payer": bytes(Pubkey.from_string(payer)),
+            "payee": bytes(Pubkey.from_string(payee)),
+            "authorizedSigner": bytes(Pubkey.from_string(operator)),
+            "mint": bytes(Pubkey.from_string(mint)),
+            "rentPayer": bytes(Pubkey.from_string(operator)),
             "openSlot": RECENT_SLOT,
         }
-    )
-    return bytes([7]) + bytes(body), upto_mod.PAYMENT_CHANNELS_PROGRAM_ID
+    ).to_borsh()
+    return body, upto_mod.PAYMENT_CHANNELS_PROGRAM_ID
 
 
 def _client_header(eng: X402Upto, cfg: Config) -> tuple[str, str, UptoRequirements]:
@@ -265,9 +265,7 @@ def test_distribution_always_explicit_single_split(monkeypatch) -> None:
     the payee seat with a zero implicit remainder."""
     eng, cfg, _ = _engine(monkeypatch)
     operator = _op_pubkey(cfg)
-    gate = Gate.build(
-        name="usage", amount=Price.usd("0.10", Stablecoin.USDC), pay_to=operator, accept=(Protocol.X402,)
-    )
+    gate = Gate.build(name="usage", amount=Price.usd("0.10", Stablecoin.USDC), pay_to=operator, accept=(Protocol.X402,))
     req = eng.accepts_entry(gate, {"path": "/usage"})
     assert req["payTo"] == operator == req["extra"]["receiverAuthorizer"]
     distribution = eng._distribution(req)  # noqa: SLF001
@@ -528,6 +526,30 @@ async def test_verify_open_owner_mismatch(monkeypatch) -> None:
     holder["account"] = (data, str(Keypair().pubkey()))  # wrong owner
     with pytest.raises(InvalidProofError, match="not owned by"):
         await eng.verify_open(_gate(cfg), _Req(header))
+
+
+@pytest.mark.parametrize("corruption", ["wrong_tag", "truncated", "trailing"])
+async def test_verify_open_sanitizes_malformed_account_and_releases_reservation(monkeypatch, corruption: str) -> None:
+    eng, cfg, holder = _engine(monkeypatch)
+    header, client_pk, req = _client_header(eng, cfg)
+    operator = _op_pubkey(cfg)
+    data, owner = _fake_channel(
+        payer=client_pk,
+        payee=operator,
+        mint=req["asset"],
+        operator=operator,
+        deposit=100000,
+        distribution_hash=_expected_distribution_hash(cfg.effective_recipient(), operator),
+    )
+    malformed = {"wrong_tag": b"\x07" + data[1:], "truncated": data[:-1], "trailing": data + b"\x00"}[corruption]
+    holder["account"] = (malformed, owner)
+    with pytest.raises(InvalidProofError, match="^channel account data is malformed$") as caught:
+        await eng.verify_open(_gate(cfg), _Req(header))
+    assert caught.value.code == "payment_invalid"
+    assert not eng._in_flight  # noqa: SLF001
+    holder["account"] = (data, owner)
+    verified = await eng.verify_open(_gate(cfg), _Req(header))
+    verified.release()
 
 
 def test_reserve_channel_concurrent(monkeypatch) -> None:

@@ -33,6 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
+from pyborsh import BorshDeserializationError
 from solders.hash import Hash  # type: ignore[import-untyped]
 from solders.instruction import Instruction  # type: ignore[import-untyped]
 from solders.pubkey import Pubkey  # type: ignore[import-untyped]
@@ -350,7 +351,7 @@ class X402Upto:
                 channel_id=channel_id,
                 payer=payer,
                 payee=payee,
-                rent_payer=Pubkey.from_string(str(channel.rentPayer)),
+                rent_payer=Pubkey.from_bytes(channel.rentPayer),
                 mint=mint,
                 token_program=token_program,
                 program_id=program_id,
@@ -518,7 +519,7 @@ class X402Upto:
         beneficiary = Pubkey.from_string(requirements["payTo"])
         return [Distribution(recipient=beneficiary, bps=10_000)]
 
-    async def _fetch_channel(self, rpc: SolanaRpc, channel_id: Pubkey, program_id: Pubkey) -> Any:
+    async def _fetch_channel(self, rpc: SolanaRpc, channel_id: Pubkey, program_id: Pubkey) -> Channel:
         account = await rpc.get_account_info(str(channel_id))
         if account is None:
             raise InvalidProofError("channel account fetch failed: missing account data", code="payment_invalid")
@@ -527,16 +528,16 @@ class X402Upto:
             raise InvalidProofError(
                 "channel account is not owned by the payment-channels program", code="payment_invalid"
             )
-        # The on-chain account carries a 1-byte account discriminator ahead of
-        # the struct (Go's `Channel.Discriminator uint8`); the generated
-        # `Channel.decode` strips that leading byte before parsing the layout.
         if len(data) < 1:
             raise InvalidProofError("channel account fetch failed: empty account data", code="payment_invalid")
-        return Channel.decode(data)
+        try:
+            return Channel.decode(data)
+        except BorshDeserializationError as exc:
+            raise InvalidProofError("channel account data is malformed", code="payment_invalid") from exc
 
     def _validate_channel_state(
         self,
-        channel: Any,
+        channel: Channel,
         fee_payer: Pubkey,
         receiver_authorizer: Pubkey,
         payer: Pubkey,
@@ -548,11 +549,13 @@ class X402Upto:
     ) -> None:
         if int(channel.status) != _CHANNEL_STATUS_OPEN:
             raise InvalidProofError("channel is not open after broadcast", code="payment_invalid")
-        if str(channel.mint) != str(mint):
-            raise InvalidProofError(f"token mint mismatch: expected {mint}, got {channel.mint}", code="payment_invalid")
-        if str(channel.payee) != str(payee):
+        channel_mint = Pubkey.from_bytes(channel.mint)
+        if channel_mint != mint:
+            raise InvalidProofError(f"token mint mismatch: expected {mint}, got {channel_mint}", code="payment_invalid")
+        channel_payee = Pubkey.from_bytes(channel.payee)
+        if channel_payee != payee:
             raise InvalidProofError(
-                f"channel payee mismatch: expected the fee payer {payee}, got {channel.payee}",
+                f"channel payee mismatch: expected the fee payer {payee}, got {channel_payee}",
                 code="payment_invalid",
             )
         expected_hash = list(_distribution_hash(distribution))
@@ -560,9 +563,9 @@ class X402Upto:
             raise InvalidProofError(
                 "channel distribution does not match the expected recipient split", code="payment_invalid"
             )
-        if str(channel.authorizedSigner) != str(receiver_authorizer):
+        if Pubkey.from_bytes(channel.authorizedSigner) != receiver_authorizer:
             raise InvalidProofError("channel authorized_signer is not the receiver authorizer", code="payment_invalid")
-        if str(channel.rentPayer) != str(fee_payer):
+        if Pubkey.from_bytes(channel.rentPayer) != fee_payer:
             raise InvalidProofError("channel rent_payer is not the fee payer", code="payment_invalid")
         if int(channel.gracePeriod) != withdraw_delay:
             raise InvalidProofError(
@@ -574,9 +577,10 @@ class X402Upto:
                 f"on-chain deposit {channel.deposit} must equal authorized maximum {max_amount}",
                 code="payment_invalid",
             )
-        if str(channel.payer) != str(payer):
+        channel_payer = Pubkey.from_bytes(channel.payer)
+        if channel_payer != payer:
             raise InvalidProofError(
-                f"channel payer {channel.payer} does not match payload.from {payer}", code="payment_invalid"
+                f"channel payer {channel_payer} does not match payload.from {payer}", code="payment_invalid"
             )
 
 

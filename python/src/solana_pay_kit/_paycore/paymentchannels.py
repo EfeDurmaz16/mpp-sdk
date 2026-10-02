@@ -8,7 +8,7 @@ scheme; it
 lives in :mod:`solana_pay_kit._paycore` so neither protocol package depends on the
 other, mirroring the Go ``paycore/paymentchannels`` layout.
 
-Instruction data and account metas are produced by the codama-py generated
+Instruction data and account metas are produced by the native generated
 client under :mod:`solana_pay_kit.protocols.programs.paymentchannels` (rendered from
 ``idl/payment-channels.json`` by ``skills/pay-sdk-implementation/codegen``).
 This module only adds what the IDL cannot express:
@@ -243,7 +243,7 @@ def voucher_message_bytes(channel_id: Pubkey, cumulative: int, expires_at: int) 
     Layout: ``magic`` :data:`VOUCHER_MAGIC` (2) || ``channelId`` (32, offset 2)
     || ``cumulativeAmount`` as little-endian u64 (offset 34) || ``expiresAt``
     as little-endian i64 (offset 42). Encoded by the generated ``VoucherArgs``
-    Borsh layout; the program rejects a missing/mismatched magic with
+    Borsh model; the program rejects a missing/mismatched magic with
     ``voucherBadMagic``.
 
     Args:
@@ -259,16 +259,12 @@ def voucher_message_bytes(channel_id: Pubkey, cumulative: int, expires_at: int) 
     channel_bytes = bytes(channel_id)
     if len(channel_bytes) != 32:
         raise ValueError(f"channel id must be exactly 32 bytes, got {len(channel_bytes)}")
-    return bytes(
-        VoucherArgs.layout.build(
-            {
-                "magic": list(VOUCHER_MAGIC),
-                "channelId": channel_id,
-                "cumulativeAmount": cumulative,
-                "expiresAt": expires_at,
-            }
-        )
-    )
+    return VoucherArgs(
+        magic=list(VOUCHER_MAGIC),
+        channelId=channel_bytes,
+        cumulativeAmount=cumulative,
+        expiresAt=expires_at,
+    ).to_borsh()
 
 
 def find_channel_pda(
@@ -412,7 +408,7 @@ def build_open_instruction(params: OpenChannelParams) -> Instruction:
         deposit=params.deposit,
         gracePeriod=params.grace_period,
         openSlot=params.open_slot,
-        recipients=[DistributionEntry(recipient=entry.recipient, bps=entry.bps) for entry in params.recipients],
+        recipients=[DistributionEntry(recipient=bytes(entry.recipient), bps=entry.bps) for entry in params.recipients],
     )
     # rentPayer is the operator / fee payer that funds the channel rent. It is
     # required: server-side verify_open_tx rejects an open whose rentPayer is
@@ -601,7 +597,7 @@ def build_distribute_instruction(
     for entry in recipients:
         recipient_token, _ = find_associated_token_address(entry.recipient, mint, token_program)
         remaining.append(AccountMeta(pubkey=recipient_token, is_signer=False, is_writable=True))
-        entries.append(DistributionEntry(recipient=entry.recipient, bps=entry.bps))
+        entries.append(DistributionEntry(recipient=bytes(entry.recipient), bps=entry.bps))
 
     return Distribute(
         {"distributeArgs": DistributeArgs(recipients=entries)},
