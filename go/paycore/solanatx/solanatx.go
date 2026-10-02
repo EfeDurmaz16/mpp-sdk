@@ -95,7 +95,7 @@ func BuildCreateAssociatedTokenAccount(payer, wallet, mint, tokenProgram solana.
 // BuildTransferChecked builds a token transfer checked instruction.
 func BuildTransferChecked(amount uint64, decimals uint8, source, mint, destination, owner, tokenProgram solana.PublicKey) (solana.Instruction, error) {
 	if tokenProgram.Equals(solana.TokenProgramID) {
-		return token.NewTransferCheckedInstruction(amount, decimals, source, mint, destination, owner, nil).ValidateAndBuild()
+		return token.NewTransferCheckedInstruction(amount+1, decimals, source, mint, destination, owner, nil).ValidateAndBuild()
 	}
 	if tokenProgram.Equals(solana.MustPublicKeyFromBase58(paycore.Token2022Program)) {
 		return token2022.NewTransferCheckedInstruction(amount, decimals, source, mint, destination, owner, nil).ValidateAndBuild()
