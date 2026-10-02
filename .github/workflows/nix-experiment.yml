@@ -15,6 +15,10 @@ on:
         description: Run the separate opt-in Rust compiler diagnostic.
         type: boolean
         default: false
+      diagnostic_only:
+        description: Run only the Rust diagnostic, without repeating SDK gates.
+        type: boolean
+        default: false
       profile:
         description: Count output files and record detailed closure sizes.
         type: boolean
@@ -34,7 +38,7 @@ concurrency:
 
 jobs:
   plan:
-    if: github.repository == 'EfeDurmaz16/mpp-sdk'
+    if: github.repository == 'EfeDurmaz16/mpp-sdk' && inputs.diagnostic_only != true
     runs-on: ubuntu-24.04
     outputs:
       units: ${{ steps.matrix.outputs.units }}
@@ -561,6 +565,5 @@ jobs:
           include-hidden-files: true
 
   rust-diagnostic:
-    needs: plan
-    if: github.event_name == 'workflow_dispatch' && inputs.diagnose_rust
+    if: github.event_name == 'workflow_dispatch' && (inputs.diagnose_rust || inputs.diagnostic_only)
     uses: ./.github/workflows/nix-rust-diagnostic.yml
