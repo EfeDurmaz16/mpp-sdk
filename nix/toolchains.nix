@@ -3,13 +3,32 @@ let
   inherit (pkgs) lib;
 
   nodejs = pkgs.nodejs_22;
-  pnpm = pkgs.pnpm_11.override {
+  pnpm = (pkgs.pnpm_11.override {
     version = "11.13.0";
     hash = "sha256-hlx2vZERpFykH27u1AZ/8Ozf7p6sg6rSQXnIP/6+dZk=";
     nodejs-slim = pkgs.nodejs-slim_22;
+  }).overrideAttrs {
+    # pnpm 11.13 stores optional native modules under node_modules; newer releases
+    # moved them into dist. Keep the Nixpkgs policy of removing bundled binaries.
+    postUnpack = ''
+      rm -rf package/dist/node_modules/@reflink/reflink-* package/dist/vendor
+    '';
   };
 
   go = pkgs.go_1_26;
+  # Preserve the native CI lint policy while using the current compiler packages.
+  golangciLint = (pkgs.golangci-lint.override {
+    buildGo127Module = pkgs.buildGo126Module;
+  }).overrideAttrs (finalAttrs: {
+    version = "2.12.2";
+    src = pkgs.fetchFromGitHub {
+      owner = "golangci";
+      repo = "golangci-lint";
+      tag = "v${finalAttrs.version}";
+      hash = "sha256-qR7fp1x2S+EwEAcplRHTvA3jWwLr/XSiYKSZtAwkrNU=";
+    };
+    vendorHash = "sha256-AG5wtLwWLz55bdp1oi3cW+9O3yj1W1P7MV9zxym7Pb4=";
+  });
   rust = pkgs.rustc;
   cargo = pkgs.cargo;
   java = pkgs.jdk17;
@@ -30,7 +49,7 @@ let
   lua = pkgs.luajit;
 in
 {
-  inherit nodejs pnpm go rust cargo java gradle python ruby bundler php composer lua;
+  inherit nodejs pnpm go golangciLint rust cargo java gradle python ruby bundler php composer lua;
 
   # Runtime rock builds need both outputs; Nix separates headers from libraries.
   luaIncludeDir = "${lua}/include/luajit-2.1";
@@ -71,7 +90,7 @@ in
       openssl
       protobuf
     ];
-    go = [ go pkgs.golangci-lint ];
+    go = [ go golangciLint ];
     python = [ python pkgs.uv ];
     ruby = [ ruby bundler pkgs.openssl pkgs.libyaml ];
     php = [ php composer ];

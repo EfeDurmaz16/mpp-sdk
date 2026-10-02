@@ -17,7 +17,9 @@
         let c = context system;
         in (import ./nix/packages/rust.nix c)
           // (import ./nix/packages/go.nix c)
-          // (import ./nix/packages/typescript.nix c));
+          // (import ./nix/packages/typescript.nix c)
+          // c.pkgs.lib.optionalAttrs c.pkgs.stdenv.isLinux
+            (import ./nix/packages/payment-channels.nix c));
 
       devShells = forAllSystems (system:
         let
