@@ -212,7 +212,10 @@ func mountMPP(mux *http.ServeMux, resourcePath, settlementHeader string) {
 	feePayerJSON := requireEnv("MPP_HARNESS_FEE_PAYER_SECRET_KEY")
 	splitsJSON := optionalEnv("MPP_HARNESS_SPLITS", "[]")
 
-	feePayer := privateKeyFromJSON(feePayerJSON)
+	feePayer, err := privateKeyFromJSON(feePayerJSON)
+	if err != nil {
+		log.Fatalf("MPP_HARNESS_FEE_PAYER_SECRET_KEY decode: %v", err)
+	}
 	rpcClient := rpc.New(rpcURL)
 
 	srv, err := server.New(server.Config{
@@ -307,17 +310,11 @@ func mountMPP(mux *http.ServeMux, resourcePath, settlementHeader string) {
 	}
 }
 
-func privateKeyFromJSON(raw string) solana.PrivateKey {
-	var ints []int
-	if err := json.Unmarshal([]byte(raw), &ints); err != nil {
-		log.Fatalf("MPP_HARNESS_FEE_PAYER_SECRET_KEY decode: %v", err)
+func privateKeyFromJSON(raw string) (solana.PrivateKey, error) {
+	if !strings.HasPrefix(strings.TrimSpace(raw), "[") {
+		return nil, fmt.Errorf("private key must contain a JSON byte array")
 	}
-	b := make([]byte, len(ints))
-	for i, v := range ints {
-		b[i] = byte(v)
-	}
-	pk := solana.PrivateKey(b)
-	return pk
+	return solana.PrivateKeyFromSolanaKeygenFileBytes([]byte(raw))
 }
 
 // walletSignerFor adapts a solana.PrivateKey into the utils.Signer
