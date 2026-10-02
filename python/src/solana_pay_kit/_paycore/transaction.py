@@ -9,7 +9,25 @@ each other.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from solders.hash import Hash
+    from solders.instruction import Instruction
+    from solders.pubkey import Pubkey
+    from solders.transaction import VersionedTransaction
+
+
+def decode_supported_transaction(raw: bytes) -> VersionedTransaction:
+    """Decode one complete, canonical legacy/v0 transaction; reject other versions."""
+    from solders.transaction import Legacy, VersionedTransaction
+
+    transaction = VersionedTransaction.from_bytes(raw)
+    if transaction.version() not in (Legacy.Legacy, 0):
+        raise ValueError("solana_pay_kit: unsupported transaction version; accepted versions: legacy, v0")
+    if bytes(transaction) != raw:
+        raise ValueError("solana_pay_kit: transaction contains trailing or non-canonical bytes")
+    return transaction
 
 
 def _message_offset(raw: bytes) -> int | None:
@@ -109,3 +127,28 @@ def build_partially_signed_v0_transaction(
     signatures = [Signature.default() for _ in range(num_required)]
     signatures[signer_index] = Signature.from_bytes(sig)
     return bytes(VersionedTransaction.populate(message, signatures))
+
+
+async def build_partially_signed_v0_transaction_async(
+    instructions: Sequence[Instruction],
+    fee_payer: Pubkey,
+    blockhash: Hash,
+    signer_pubkey: Pubkey,
+    signer: object,
+) -> bytes:
+    """Compile v0 and sign one slot with Keychain or an existing message signer."""
+    from solders.message import MessageV0
+    from solders.signature import Signature
+    from solders.transaction import VersionedTransaction
+
+    from solana_pay_kit.signer import _signer_pubkey, sign_transaction
+
+    message = MessageV0.try_compile(fee_payer, list(instructions), [], blockhash)
+    required = message.header.num_required_signatures
+    if signer_pubkey not in message.account_keys[:required]:
+        raise ValueError("solana_pay_kit: signer is not a required signer of the transaction")
+    if _signer_pubkey(signer) != signer_pubkey:
+        raise ValueError("solana_pay_kit: signer does not match the requested public key")
+    transaction = VersionedTransaction.populate(message, [Signature.default()] * required)
+    result = await sign_transaction(signer, transaction)
+    return bytes(result.transaction)

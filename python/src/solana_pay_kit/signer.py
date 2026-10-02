@@ -18,20 +18,26 @@ Remote enclave signers (GCP/AWS KMS, HashiCorp Vault) are reserved under
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 import warnings
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
+from solana_keychain import MemorySigner, ModifyingSigner, SendingSigner, SignedTransaction, TransactionSigner
 from solders.keypair import Keypair
+from solders.message import to_bytes_versioned
+from solders.pubkey import Pubkey
+from solders.signature import Signature
+from solders.transaction import Transaction, VersionedTransaction
 
 from .errors import InvalidKeyError
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-__all__ = ["DEMO_PUBKEY", "InvalidKeyError", "LocalSigner", "Signer"]
+__all__ = ["DEMO_PUBKEY", "InvalidKeyError", "LocalSigner", "Signer", "sign_transaction"]
 
 logger = logging.getLogger("solana_pay_kit")
 
@@ -119,7 +125,7 @@ _demo_warned = False
 class LocalSigner:
     """In-process Ed25519 signer over a solders ``Keypair``; no I/O on sign()."""
 
-    __slots__ = ("_is_demo", "_is_fee_payer", "_keypair")
+    __slots__ = ("_is_demo", "_is_fee_payer", "_keypair", "_transaction_signer")
 
     def __init__(
         self,
@@ -130,6 +136,7 @@ class LocalSigner:
     ) -> None:
         """Wrap a solders ``Keypair`` with demo / fee-payer flags."""
         self._keypair = keypair
+        self._transaction_signer = MemorySigner(keypair)
         self._is_demo = is_demo
         self._is_fee_payer = is_fee_payer
 
@@ -145,6 +152,10 @@ class LocalSigner:
     def sign(self, message: bytes) -> bytes:
         """Return the 64-byte Ed25519 signature over ``message``."""
         return bytes(self._keypair.sign_message(message))
+
+    async def sign_transaction(self, transaction: Transaction | VersionedTransaction) -> SignedTransaction:
+        """Sign a legacy/v0 transaction through Keychain, leaving the input unchanged."""
+        return await sign_transaction(self._transaction_signer, transaction)
 
     def is_fee_payer(self) -> bool:
         """Whether this signer acts as the transaction fee payer."""
@@ -209,6 +220,91 @@ class LocalSigner:
     def generate(cls) -> LocalSigner:
         """Generate a fresh ephemeral keypair (test-only utility)."""
         return cls.from_keypair(Keypair())
+
+
+class _MessageSigner(Protocol):
+    def pubkey(self) -> str | Pubkey: ...
+
+    def sign(self, message: bytes) -> bytes: ...
+
+
+def _resolve_transaction_signer(signer: object) -> TransactionSigner | _MessageSigner:
+    if isinstance(signer, ModifyingSigner | SendingSigner):
+        raise ValueError("solana_pay_kit: modifying and sending signers are not supported")
+    if isinstance(signer, Keypair):
+        return MemorySigner(signer)
+    if isinstance(signer, TransactionSigner):
+        return signer
+    if not callable(getattr(signer, "pubkey", None)) or not callable(getattr(signer, "sign", None)):
+        raise ValueError("solana_pay_kit: signer must support transaction signing or synchronous message signing")
+    return cast("_MessageSigner", signer)
+
+
+def _signer_pubkey(signer: object) -> Pubkey:
+    backend = _resolve_transaction_signer(signer)
+    public_key = backend.pubkey if isinstance(backend, TransactionSigner) else backend.pubkey()
+    return public_key if isinstance(public_key, Pubkey) else Pubkey.from_string(public_key)
+
+
+async def sign_transaction(signer: object, transaction: Transaction | VersionedTransaction) -> SignedTransaction:
+    """Sign one required legacy/v0 slot without mutating the caller's transaction.
+
+    Keychain transaction signers receive a private copy. Legacy custom signers
+    retain their synchronous ``pubkey()`` and ``sign(message)`` contract. Every
+    existing signature and the returned signature are verified; messages and
+    other signers' slots must remain unchanged.
+    """
+    from ._paycore.transaction import decode_supported_transaction
+
+    if isinstance(signer, LocalSigner) and not isinstance(signer, ModifyingSigner | SendingSigner):
+        return await LocalSigner.sign_transaction(signer, transaction)
+    working = decode_supported_transaction(bytes(transaction))
+    try:
+        working.sanitize()
+    except Exception:
+        raise ValueError("solana_pay_kit: invalid transaction") from None
+    message = bytes(to_bytes_versioned(working.message))
+    required = working.message.header.num_required_signatures
+    keys = list(working.message.account_keys[:required])
+    original = list(working.signatures)
+    for key, signature in zip(keys, original, strict=True):
+        if signature != Signature.default() and not signature.verify(key, message):
+            raise ValueError("solana_pay_kit: transaction has an invalid existing signature")
+    backend = _resolve_transaction_signer(signer)
+    public_key = _signer_pubkey(backend)
+    try:
+        position = keys.index(public_key)
+    except ValueError:
+        raise ValueError("solana_pay_kit: signer is not a required signer of the transaction") from None
+
+    if isinstance(backend, TransactionSigner):
+        result = await backend.sign_transaction(working)
+    else:
+        raw_signature = bytes(backend.sign(message))
+        if len(raw_signature) != 64:
+            raise ValueError(f"solana_pay_kit: signature length {len(raw_signature)}, want 64")
+        signature = Signature.from_bytes(raw_signature)
+        signatures = list(original)
+        signatures[position] = signature
+        working.signatures = signatures
+        result = SignedTransaction(base64.b64encode(bytes(working)).decode(), signature, False, working)
+
+    signed = decode_supported_transaction(bytes(result.transaction))
+    if bytes(to_bytes_versioned(signed.message)) != message:
+        raise ValueError("solana_pay_kit: signer changed the transaction message")
+    signatures = list(signed.signatures)
+    if len(signatures) != required:
+        raise ValueError("solana_pay_kit: signer changed the transaction signature count")
+    if any(value != original[index] for index, value in enumerate(signatures) if index != position):
+        raise ValueError("solana_pay_kit: signer changed another signature slot")
+    signature = signatures[position]
+    if signature != result.signature or not signature.verify(public_key, message):
+        raise ValueError("solana_pay_kit: signer returned an invalid signature")
+    encoded = base64.b64encode(bytes(signed)).decode()
+    if result.encoded_transaction != encoded:
+        raise ValueError("solana_pay_kit: signer returned inconsistent transaction bytes")
+    complete = all(value != Signature.default() for value in signatures)
+    return SignedTransaction(encoded, signature, complete, signed)
 
 
 class Signer:
