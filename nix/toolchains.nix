@@ -61,7 +61,15 @@ let
     '';
   });
   swift = if pkgs.stdenv.hostPlatform.isDarwin then
-    pkgs.swift.override { swift-testing = swiftTesting13; }
+    (pkgs.swift.override { swift-testing = swiftTesting13; }).overrideAttrs (old: {
+      # SwiftPM discovers coverage tools beside swiftc, not through PATH.
+      buildCommand = old.buildCommand + ''
+        chmod u+w "$out/bin"
+        ln -s ${lib.getExe' pkgs.swiftPackages.llvmPackages.llvm "llvm-cov"} "$out/bin/llvm-cov"
+        ln -s ${lib.getExe' pkgs.swiftPackages.llvmPackages.llvm "llvm-profdata"} "$out/bin/llvm-profdata"
+        chmod u-w "$out/bin"
+      '';
+    })
   else
     pkgs.swift;
   swiftpm = if pkgs.stdenv.hostPlatform.isDarwin then

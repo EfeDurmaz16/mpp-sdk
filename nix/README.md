@@ -94,6 +94,9 @@ SwiftPM 6.2.4's CMake build also omits its Darwin Swift Testing launcher. The
 experiment compiles that small, unmodified helper from the pinned SwiftPM source
 and wraps the existing SwiftPM commands to discover it. It does not rebuild the
 Swift compiler or SwiftPM itself and does not use Xcode's test runner.
+SwiftPM also searches for coverage tools beside the compiler. The assembled
+toolchain includes `llvm-cov` and `llvm-profdata` from the same pinned Swift LLVM
+fork so `swift test --enable-code-coverage` can export its existing report.
 
 pnpm's implicit dependency verification is disabled for prepared workspaces:
 version 11.13 otherwise reinstalls dependencies after a directory move and can
