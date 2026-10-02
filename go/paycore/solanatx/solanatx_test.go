@@ -362,8 +362,8 @@ func TestDecodeTransactionAcceptsLegacy(t *testing.T) {
 
 func TestDecodeTransactionRejectsUnsupportedVersionCleanly(t *testing.T) {
 	// One signature: the message starts at byte 65 with the 0x80 v0 prefix.
-	// Flip it to the 0x81 (version 1) prefix, which the Go decoder does not
-	// implement: the result must be an error, never a panic or an accept.
+	// Flip it to 0x81: v1 messages cannot appear inside the old signatures-first
+	// envelope, so this remains malformed even though proper v1 is accepted.
 	wire := signedV0Wire(t)
 	if wire[65] != 0x80 {
 		t.Fatalf("message prefix = %#x, want 0x80", wire[65])

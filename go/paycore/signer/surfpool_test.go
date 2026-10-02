@@ -31,6 +31,16 @@ func TestMemorySignerSurfpool(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client := rpc.New(endpoint)
+	for _, tc := range []struct {
+		name    string
+		version solana.MessageVersion
+	}{{"v0", solana.MessageVersionV0}, {"v1", solana.MessageVersionV1}} {
+		t.Run(tc.name, func(t *testing.T) { testMemorySignerRPC(t, ctx, client, tc.version) })
+	}
+}
+
+func testMemorySignerRPC(t *testing.T, ctx context.Context, client *rpc.Client, version solana.MessageVersion) {
+	t.Helper()
 	payer := signer.Generate()
 	payerKey := solana.MustPublicKeyFromBase58(string(payer.Pubkey()))
 	recipient := solana.MustPublicKeyFromBase58(string(signer.Generate().Pubkey()))
@@ -55,6 +65,10 @@ func TestMemorySignerSurfpool(t *testing.T) {
 		blockhash, solana.TransactionPayer(payerKey))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if version == solana.MessageVersionV1 {
+		tx.Message.SetVersion(version)
+		tx.Message.TransactionConfig = solana.TransactionConfig{}.WithComputeUnitLimit(200_000).WithLoadedAccountsDataSizeLimit(64 * 1024 * 1024)
 	}
 	result, err := paykit.SignTransaction(ctx, tx, payer)
 	if err != nil || !result.IsComplete() {
@@ -85,8 +99,8 @@ func TestMemorySignerSurfpool(t *testing.T) {
 	if err != nil || meta == nil || meta.Err != nil {
 		t.Fatalf("fetch transaction: meta=%+v err=%v", meta, err)
 	}
-	if landed.Signatures[0] != tx.Signatures[0] {
-		t.Fatal("RPC returned a different transaction signature")
+	if landed.Signatures[0] != tx.Signatures[0] || landed.Message.GetVersion() != version {
+		t.Fatal("RPC returned a different transaction signature or version")
 	}
 	after, err := client.GetBalance(ctx, payerKey, rpc.CommitmentConfirmed)
 	if err != nil {
@@ -99,5 +113,5 @@ func TestMemorySignerSurfpool(t *testing.T) {
 	if paid.Value != amount || before.Value-after.Value != amount+meta.Fee {
 		t.Fatalf("unexpected settlement balances: recipient=%d debit=%d fee=%d", paid.Value, before.Value-after.Value, meta.Fee)
 	}
-	t.Logf("confirmed v0 transfer: recipient=%d lamports fee=%d signature=%s", paid.Value, meta.Fee, signature)
+	t.Logf("confirmed message version %v transfer: recipient=%d lamports fee=%d signature=%s", version, paid.Value, meta.Fee, signature)
 }

@@ -759,6 +759,10 @@ func (u *X402Upto) recentLifetime() (string, uint64, error) {
 // slot fails before the fee payer co-signs.
 const openSlotWindow = 1500
 
+// Matches the Rust payment-channel open policy. At this CU limit, the shared
+// x402 price ceiling allows at most 2,000,000 lamports of v1 priority fee.
+const openMaxComputeUnitLimit = 400_000
+
 func validateUptoOpenInstruction(
 	tx *solana.Transaction,
 	programID, rentPayer, authorizedSigner, payer, payee, mint, tokenProgram, channelID solana.PublicKey,
@@ -768,6 +772,9 @@ func validateUptoOpenInstruction(
 	payloadOpenSlot string,
 	recentSlot *uint64,
 ) error {
+	if err := solanatx.CheckV1BudgetCaps(tx, openMaxComputeUnitLimit, MaxComputeUnitPriceMicroLamports); err != nil {
+		return fmt.Errorf("open transaction compute budget: %w", err)
+	}
 	keys := tx.Message.AccountKeys
 	instructions := tx.Message.Instructions
 	if len(instructions) != 1 {

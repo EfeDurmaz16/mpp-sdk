@@ -230,9 +230,13 @@ It creates ephemeral signers, signs v0 and v1 transactions, serializes and decod
 them with the official SDK, and verifies their signatures locally. The v1
 transaction sets its compute budget in `TransactionConfig`; `PriorityFee` is
 total lamports, not a price per compute unit. It uses no RPC and submits no payment.
-Pay-kit payment clients continue to build v0 and servers accept legacy/v0 wire
-transactions. V1 server acceptance requires updating the fee guards and
-instruction verifiers, so it remains a separate rollout.
+Payment clients continue to build v0 by default. Go servers also accept v1:
+the decoder checks its 4096-byte wire limit and SDK structural rules, and payment
+verifiers bound its inline budget before co-signing or sending. V1 transactions
+must declare a positive compute-unit limit and omit ComputeBudget instructions.
+MPP preserves its sponsored and client-paid price ceilings; x402 exact starts
+with the transfer instead of a ComputeBudget prefix. Channel opens use their
+protocol's budget ceilings. This does not negotiate v1 support with a remote RPC.
 
 To verify Memory signing against a local RPC, start Surfpool 1.5 with an isolated
 offline validator. This requires no remote datasource or saved wallet:
@@ -247,13 +251,18 @@ In another terminal, from `go/`:
 
 ```bash
 PAYKIT_TEST_LOCAL_RPC=http://127.0.0.1:18999 \
-  go test ./paycore/signer -run TestMemorySignerSurfpool -v -count=1
+  go test ./paycore/signer ./protocols/mpp/server \
+  -run 'TestMemorySignerSurfpool|TestV1SponsoredChargeSurfpool' -v -count=1
 ```
 
-The opt-in test uses ephemeral keys and local airdrops. It simulates a v0
+The opt-in test uses ephemeral keys and local airdrops. It simulates v0 and v1
 transfer, checks invalid-signature rejection, sends and confirms the transaction,
 reads it back, and checks recipient balance and payer debit including fees.
 The test skips when `PAYKIT_TEST_LOCAL_RPC` is unset and rejects non-loopback URLs.
+The MPP test also submits a payer-signed v1 credential through the public server
+verification method, checks the sponsor's co-signature and confirmed receipt,
+and verifies that the payer pays the amount while the operator pays the fee.
+The local runtime must support v1; these tests do not prove remote cluster support.
 
 ### HTTP server
 

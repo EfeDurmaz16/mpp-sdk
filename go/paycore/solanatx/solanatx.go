@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"time"
 
-	bin "github.com/gagliardetto/binary"
 	solana "github.com/solana-foundation/solana-go/v2"
 	computebudget "github.com/solana-foundation/solana-go/v2/programs/compute-budget"
 	"github.com/solana-foundation/solana-go/v2/programs/system"
@@ -147,22 +146,27 @@ func EncodeTransactionBase64(tx *solana.Transaction) (string, error) {
 }
 
 // DecodeTransaction decodes a wire transaction supplied by a client and
-// enforces the message-version policy every server verifier shares: version
-// 0 and legacy (unprefixed) messages are accepted, and any other version
-// (version 1 is not yet enabled by pay-kit) is rejected cleanly. A legacy message
-// is policed exactly like version 0 (same size limit, ComputeBudget
-// instructions in the body, no address lookup tables) and is kept only for
-// existing clients: pay-kit clients never build one.
+// accepts legacy, v0, and v1 messages. V1 uses strict full-slice decoding,
+// structural sanitization, and a 4096-byte wire limit. Payment verifiers must
+// additionally apply CheckV1BudgetCaps before signing or broadcasting.
 func DecodeTransaction(wire []byte) (*solana.Transaction, error) {
 	if err := checkWireVersion(wire); err != nil {
 		return nil, err
 	}
-	tx := new(solana.Transaction)
-	if err := tx.UnmarshalWithDecoder(bin.NewBinDecoder(wire)); err != nil {
+	if wire[0] == 0x81 && len(wire) > solana.MaxTransactionSizeV1 {
+		return nil, fmt.Errorf("v1 transaction size %d exceeds maximum %d", len(wire), solana.MaxTransactionSizeV1)
+	}
+	tx, err := solana.TransactionFromBytes(wire)
+	if err != nil {
 		return nil, err
 	}
 	switch version := tx.Message.GetVersion(); version {
 	case solana.MessageVersionLegacy, solana.MessageVersionV0:
+		return tx, nil
+	case solana.MessageVersionV1:
+		if err := tx.Sanitize(); err != nil {
+			return nil, err
+		}
 		return tx, nil
 	default:
 		// solana-go stores the prefix byte minus 0x7f, so v0 is 1 and v1 is 2.

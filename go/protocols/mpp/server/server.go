@@ -577,7 +577,7 @@ func (m *Mpp) verifyTransaction(
 	if err != nil {
 		return core.Receipt{}, err
 	}
-	// Accept legacy and v0 transactions with only static account keys, but
+	// Accept legacy, v0 and v1 transactions with only static account keys, but
 	// reject a v0 message carrying address lookup tables: the verifier
 	// cannot resolve ALT-referenced accounts locally, so a transfer hidden
 	// behind a lookup table could not be checked. Mirrors rust
@@ -1273,9 +1273,9 @@ func resolveProgramID(tx *solana.Transaction, programIDIndex uint16) (solana.Pub
 	return tx.Message.AccountKeys[idx], nil
 }
 
-// validateComputeBudgetInstructions inspects every ComputeBudget program
-// instruction in the credential transaction and rejects ones that exceed
-// the unit-limit or microlamport-price caps. The wire format follows the
+// validateComputeBudgetInstructions checks the v1 inline budget and every
+// ComputeBudget instruction against the unit-limit and fee/price caps.
+// The legacy/v0 wire format follows the
 // on-chain ComputeBudget program:
 //
 //   - discriminator 2 + u32 LE => SetComputeUnitLimit
@@ -1286,6 +1286,9 @@ func validateComputeBudgetInstructions(tx *solana.Transaction, feeSponsored bool
 	priceCap := maxComputeUnitPriceMicroLamports
 	if feeSponsored {
 		priceCap = maxComputeUnitPriceMicroLamportsFeeSponsored
+	}
+	if err := solanatx.CheckV1BudgetCaps(tx, maxComputeUnitLimit, priceCap); err != nil {
+		return core.WrapError(core.ErrCodeComputeBudgetExceeded, "invalid v1 compute budget", err)
 	}
 	for _, ix := range tx.Message.Instructions {
 		programID, err := resolveProgramID(tx, ix.ProgramIDIndex)

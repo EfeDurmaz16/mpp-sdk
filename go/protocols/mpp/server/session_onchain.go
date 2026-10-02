@@ -96,8 +96,7 @@ type VerifyOpenTxResult struct {
 // VerifyOpenTx decodes and validates a client-submitted payment-channel open
 // transaction against the session challenge.
 //
-// Both legacy and v0 transaction encodings are accepted (clients never build
-// legacy any more, but existing ones still may), while a v0 transaction that
+// Legacy, v0 and v1 transaction encodings are accepted, while a v0 transaction that
 // uses address lookup tables is rejected because the account checks below
 // read the static account keys, so an ALT could hide the real accounts
 // behind the fee-payer co-sign guard.
@@ -230,6 +229,15 @@ func VerifyOpenTx(ctx context.Context, expected VerifyOpenTxExpected, payload *i
 	// expected operator is rejected above).
 	if rentPayer.String() != expected.Operator {
 		return VerifyOpenTxResult{}, fmt.Errorf("open rentPayer %s != expected operator %s", rentPayer, expected.Operator)
+	}
+	// A distinct operator funds the sponsored open. Self-paid opens keep the
+	// general cap, after the rent payer has been pinned to the expected key.
+	priceCap := maxComputeUnitPriceMicroLamports
+	if !rentPayer.Equals(payer) {
+		priceCap = maxComputeUnitPriceMicroLamportsFeeSponsored
+	}
+	if err := solanatx.CheckV1BudgetCaps(tx, maxComputeUnitLimit, priceCap); err != nil {
+		return VerifyOpenTxResult{}, fmt.Errorf("open transaction compute budget: %w", err)
 	}
 
 	// Instruction data:

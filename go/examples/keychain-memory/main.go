@@ -1,6 +1,6 @@
 // This offline example signs v0 and v1 transactions with the Keychain-backed
 // factory the Go SDK uses. It does not connect to an RPC or broadcast anything.
-// The v1 example uses the official SDK codec; pay-kit servers still reject v1.
+// V1 budgets live in TransactionConfig and are checked by server verifiers.
 package main
 
 import (
