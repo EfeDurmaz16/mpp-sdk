@@ -121,11 +121,13 @@ jobs:
           CACHE_SCOPE: ${{ matrix.cache_scope }}
         run: |
           python3 - <<'PYTHON'
-          import json, os, subprocess
+          import json, os, subprocess, sys
           from pathlib import Path
+          sys.path.insert(0, 'nix/scripts')
+          from outputs import selected_installables
           expected = Path('.nix-results') / f"expected-{os.environ['CACHE_SCOPE']}.json"
           contract = json.loads(expected.read_text())
-          targets = [f'.#{name}' for name in contract['roots']]
+          targets = selected_installables(contract)
           subprocess.run(['nix', 'build', '--no-update-lock-file', '--no-link', *targets], check=True)
           subprocess.run(['nix-store', '--check-validity', *contract['roots'].values()], check=True)
           command = ['python3', 'nix/scripts/measure.py', 'outputs', '--expected', str(expected),
@@ -496,7 +498,15 @@ jobs:
         id: prepare-rust
         if: matrix.id == 'playground-rust'
         run: |
-          nix build --no-update-lock-file --no-link .#rust-playground-server .#rust-playground-deps
+          python3 - <<'PYTHON'
+          import json, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, 'nix/scripts')
+          from outputs import selected_installables
+          contract = json.loads(Path('.nix-results/expected-playground-rust.json').read_text())
+          subprocess.run(['nix', 'build', '--no-update-lock-file', '--no-link',
+                          *selected_installables(contract)], check=True)
+          PYTHON
           profile_args=()
           if [[ "$NIX_PROFILE_OUTPUTS" == true ]]; then profile_args+=(--files); fi
           python3 nix/scripts/measure.py outputs \

@@ -9,7 +9,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path("nix/scripts").resolve()))
-from outputs import INTEROP_LINUX, RUNTIME
+from outputs import INTEROP_LINUX, RUNTIME, selected_installables
 
 platform = sys.argv[1]
 if platform not in RUNTIME:
@@ -19,9 +19,9 @@ runner = "ubuntu-24.04" if platform == "linux" else "macos-26"
 subprocess.run(["python3", "nix/scripts/outputs.py", scope, runner], check=True)
 expected = Path(f".nix-results/expected-{scope}.json")
 contract = json.loads(expected.read_text())
-targets = list(contract["roots"])
+targets = selected_installables(contract)
 command = ["nix", "build", "--no-update-lock-file", "--no-link", "--json"]
-command += [f".#{target}" for target in targets]
+command += targets
 results = Path(".nix-results")
 measurements = []
 for label in ("initial-store", "warm-store"):
