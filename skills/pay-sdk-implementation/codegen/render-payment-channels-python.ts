@@ -189,9 +189,11 @@ class PythonModule {
   }
 
   finish(): string {
-    const groups = [[], [], []] as string[][];
+    const groups = [[], [], [], []] as string[][];
     for (const [module, names] of [...this.imports].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
-      const group = module.startsWith('.') ? 2 : ['typing', 'enum', 'collections.abc'].includes(module) ? 0 : 1;
+      const group = module.startsWith('.') ? 3
+        : module.startsWith('solana_pay_kit.') ? 2
+        : ['typing', 'enum', 'collections.abc'].includes(module) ? 0 : 1;
       const rank = (name: string): number => /^[A-Z][A-Z0-9_]*$/.test(name) ? 0 : /^[A-Z]/.test(name) ? 1 : 2;
       const sorted = [...names].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b, 'en', { numeric: true }));
       const aliases = sorted.filter((name) => name.includes(' as '));

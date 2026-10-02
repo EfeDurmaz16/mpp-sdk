@@ -51,6 +51,12 @@ test('preserves explicit enum tags, full account discriminator and event prefixe
   assert.match(files.get('types/voucherArgs.py')!, /Array\(U8, 2\), Field\(min_length=2, max_length=2\)/);
 });
 
+test('separates SDK runtime imports from third-party and relative modules', () => {
+  const open = files.get('instructions/open.py')!;
+  assert.match(open, /from solders.pubkey import Pubkey\n\nfrom solana_pay_kit\._paycore\.program_client import WireModel\n\nfrom \.\./);
+  assert.match(files.get('types/voucherArgs.py')!, /from pydantic import Field\n\nfrom solana_pay_kit\._paycore\.program_client import/);
+});
+
 test('instruction arguments use native models and IDL account defaults', () => {
   const open = files.get('instructions/open.py')!;
   assert.match(open, /from \.\.types.openArgs import OpenArgs as OpenArgsValue/);

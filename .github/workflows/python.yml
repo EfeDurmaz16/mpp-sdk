@@ -55,17 +55,17 @@ jobs:
           PYTHONPATH="$RUNNER_TEMP:$PWD/src" pytest tests/test_paymentchannels_native.py
       - name: Run tests with coverage
         working-directory: python
-        # Coverage gate: line coverage at 90% over solana_pay_kit (the MPP wire layer
-        # now lives under solana_pay_kit/protocols/mpp). preflight.py is omitted in
-        # pyproject (live-RPC paths). Branch coverage gate is follow-up work,
-        # tracked in #108.
+        # Gate global lines at 90% and each native client file at 90% lines/branches.
+        # Existing SDK branch coverage is reported; its global gate is tracked in #108.
         run: |
           pytest \
-            --cov=solana_pay_kit \
+            --cov=src/solana_pay_kit \
+            --cov-branch \
             --cov-report=term-missing \
             --cov-report=json:coverage.json \
-            --cov-fail-under=90 \
+            --cov-fail-under=0 \
             --ignore=tests/test_server_html.py
+          python tests/check_native_coverage.py coverage.json
       - name: Upload Python coverage
         if: always()
         uses: actions/upload-artifact@v7
