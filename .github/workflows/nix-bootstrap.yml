@@ -1,0 +1,63 @@
+name: Nix experiment bootstrap
+
+on:
+  push:
+    branches: [experiment/nix-ci]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-bootstrap-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evaluate:
+    if: github.repository == 'EfeDurmaz16/mpp-sdk'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
+          set_as_trusted_user: false
+          enable_kvm: false
+      - name: Generate or validate the experimental lock
+        run: nix flake lock
+      - name: Evaluate Linux packages and tool versions
+        run: |
+          nix flake check --no-build --no-update-lock-file
+          nix eval --json .#lib.toolVersions > nix-tool-versions.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-bootstrap-inputs
+          path: |
+            flake.lock
+            nix-tool-versions.json
+          if-no-files-found: error
+  inputs:
+    if: github.repository == 'EfeDurmaz16/mpp-sdk'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [html-npm-deps, typescript-pnpm-deps, go-client, go-server, rust-harness]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.35.2/install
+          set_as_trusted_user: false
+          enable_kvm: false
+      - name: Discover fixed input hashes and build shared outputs
+        env:
+          TARGET: ${{ matrix.target }}
+        run: nix build --no-link --print-build-logs ".#$TARGET"
