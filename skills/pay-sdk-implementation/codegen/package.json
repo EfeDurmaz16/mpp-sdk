@@ -8,7 +8,9 @@
     "payment-channels:rust": "tsx ./generate-payment-channels-client-rs.ts",
     "payment-channels:go": "tsx ./generate-payment-channels-client-go.ts",
     "payment-channels:ts": "tsx ./generate-payment-channels-client-ts.ts",
-    "payment-channels:python": "tsx ./generate-payment-channels-client-py.ts"
+    "payment-channels:python": "tsx ./generate-payment-channels-client-py.ts",
+    "test:python-generator": "node --import tsx --test render-payment-channels-python.test.ts generate-payment-channels-native-py.test.ts",
+    "typecheck:python-generator": "tsc --noEmit -p tsconfig.python.json"
   },
   "dependencies": {
     "@codama/nodes-from-anchor": "^1.5.5",
@@ -18,6 +20,7 @@
     "codama": "^1.10.2"
   },
   "devDependencies": {
+    "@types/node": "^22.20.4",
     "tsx": "^4.20.6",
     "typescript": "^5.6.3"
   }

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "./render-payment-channels-python.ts",
+    "./render-payment-channels-python.test.ts",
+    "./generate-payment-channels-native-py.ts",
+    "./generate-payment-channels-native-py.test.ts",
+    "./generate-payment-channels-client-py.ts"
+  ]
+}

@@ -31,6 +31,28 @@ jobs:
         # Point pyright at the interpreter the extras were installed into; it
         # does not reliably auto-detect the active env on the runner.
         run: pyright --pythonpath "$(python -c 'import sys; print(sys.executable)')"
+      - uses: pnpm/action-setup@v5
+        with:
+          package_json_file: package.json
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+      - name: Install Python generator tooling
+        working-directory: skills/pay-sdk-implementation/codegen
+        run: pnpm install --frozen-lockfile
+      - name: Check native Python generation
+        working-directory: skills/pay-sdk-implementation/codegen
+        run: |
+          pnpm run typecheck:python-generator
+          pnpm run test:python-generator
+          pnpm exec tsx generate-payment-channels-native-py.ts --output "$RUNNER_TEMP/paymentchannels_native"
+          pnpm exec tsx generate-payment-channels-native-py.ts --output "$RUNNER_TEMP/paymentchannels_native" --check
+      - name: Verify native Python wire contracts
+        working-directory: python
+        env:
+          PAYMENTCHANNELS_PACKAGE: paymentchannels_native
+        run: |
+          PYTHONPATH="$RUNNER_TEMP:$PWD/src" pytest tests/test_paymentchannels_native.py
       - name: Run tests with coverage
         working-directory: python
         # Coverage gate: line coverage at 90% over solana_pay_kit (the MPP wire layer

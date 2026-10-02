@@ -607,9 +607,9 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "asgiref", marker = "python_full_version < '3.12'" },
-    { name = "sqlparse", marker = "python_full_version < '3.12'" },
-    { name = "tzdata", marker = "python_full_version < '3.12' and sys_platform == 'win32'" },
+    { name = "asgiref" },
+    { name = "sqlparse" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d5/d8/43e9d000519adceb189620b6869ff88031e046df91c2e9da72f8f6918399/django-5.2.17.tar.gz", hash = "sha256:9d4d93be539a18ab80d058eb515900e10951e04c537c5a6b394fc49528d3251f", size = 10889740, upload-time = "2026-08-04T15:04:03.173Z" }
 wheels = [
@@ -629,9 +629,9 @@ resolution-markers = [
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "asgiref", marker = "python_full_version >= '3.12'" },
-    { name = "sqlparse", marker = "python_full_version >= '3.12'" },
-    { name = "tzdata", marker = "python_full_version >= '3.12' and sys_platform == 'win32'" },
+    { name = "asgiref" },
+    { name = "sqlparse" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f8/d4/8314b5bdef20832f0ac6ae3b3e4d4924e4759fa3b4af27609dd747e7a6be/django-6.1.1.tar.gz", hash = "sha256:7ab93536d8e677aa14554c56426290c69480bf2ee68d7513d4a22f57d6bfeb84", size = 11284905, upload-time = "2026-09-02T17:20:45.621Z" }
 wheels = [
@@ -1143,6 +1143,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pyborsh"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8f/55/81f1970567f0a0884a8969d8babf88cb0f378252b53de6550342e1adb25a/pyborsh-1.1.0.tar.gz", hash = "sha256:e9788d728cab2b7302c4ddef19f0e135e71f0a9569ea17d5554784a15f497c49", size = 89819, upload-time = "2026-07-21T06:36:18.905Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/19/1e956486b3f0eb19e6b5516dab4a4e122144aa79f5e25a289fe78773298c/pyborsh-1.1.0-py3-none-any.whl", hash = "sha256:2adc4841352167e04bab01b1c9fac631db998fbdd66e8531486f32b8c5333b57", size = 17989, upload-time = "2026-07-21T06:36:17.641Z" },
+]
+
+[[package]]
 name = "pycparser"
 version = "3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1600,6 +1612,7 @@ dependencies = [
     { name = "anchorpy" },
     { name = "borsh-construct" },
     { name = "httpx" },
+    { name = "pyborsh" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "solana" },
@@ -1640,6 +1653,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'playground'", specifier = ">=0.110" },
     { name = "flask", marker = "extra == 'flask'", specifier = ">=3" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "pyborsh", specifier = ">=1.1.0,<2" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pydantic-settings", specifier = ">=2" },
     { name = "pydoc-markdown", marker = "extra == 'dev'", specifier = ">=4.8" },
