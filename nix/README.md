@@ -1,39 +1,79 @@
 # Experimental Nix CI
 
-This fork experiment runs the existing TypeScript, Rust, Go, Python, Ruby, Lua,
-PHP, Kotlin and Swift checks through pinned Nix environments. The existing
-GitHub Actions workflows remain the comparison. This is a draft experiment,
-not a recommendation to replace required checks or a claim of faster CI.
+This fork runs the existing TypeScript, Rust, Go, Python, Ruby, Lua, PHP,
+Kotlin and Swift checks through pinned Nix environments. Native workflows remain
+available for comparison. This is an optional draft experiment, not a claim
+that replacing the current CI is faster or cheaper.
 
 The baseline is upstream commit `c294f8903f18efc746584e3cc2961d6033b8365c`.
 The fork PR targets `experiment/nix-ci-baseline`; the fork's `main` is unchanged.
-The optional workflow runs only on `EfeDurmaz16/mpp-sdk`'s `experiment/nix-ci`
-branch. It has read-only repository permissions and does not publish packages.
+The workflow is restricted to `EfeDurmaz16/mpp-sdk`, normally runs on pushes to
+`experiment/nix-ci`, and can be dispatched for controlled measurements. It has
+read-only repository and Actions permissions and publishes no packages.
 
-## What changes
+## Build outputs and fresh checks
 
-- `flake.lock` pins Nixpkgs. `toolchains.nix` selects each runtime and compiler.
-- Separate Nix packages build the HTML assets, TypeScript SDKs, harness
-  dependencies, six Rust adapters, two Go adapters and localnet SBF program.
-- The Linux shared build job exports its runtime closures. Consumer jobs verify
-  the artifact against a digest supplied separately by the producer, then
-  import it into the disposable runner's Nix store. Swift builds and consumes
-  its Darwin outputs in one job, avoiding a transfer to a single consumer.
-- Two scoped GitHub Actions caches retain the shared Linux outputs and the
-  Swift job's shared project outputs across runs. A separate Cargo cache
-  retains the Rust unit lane's ordinary and coverage build profiles. No
-  external cache account or paid infrastructure is needed.
-- `ci-lanes.json` defines 27 SDK, interop, browser and demo lanes. The interop
-  manifest preserves 51 native workflow selections as 30 distinct cases.
-  These are command selections, not counts of test assertions.
-- The TS harness accepts an optional `PAY_KIT_HARNESS_COMMANDS` JSON map to run
-  already-built adapters. Normal commands are unchanged when it is absent.
+`flake.lock` pins Nixpkgs and Crane. `toolchains.nix` selects tools, while
+`packages/` defines reusable preparation. Existing SDK tests, live interop and
+coverage commands execute outside package builds on every selected app
+invocation. Reusing a binary does not reuse its previous test result.
 
-Tests execute on every app invocation. Their success is not cached. Shared
-build outputs are cacheable; live RPC state, service startup and test outcomes
-are runtime inputs and observations.
+| Output family | Responsibility |
+| --- | --- |
+| HTML and TypeScript | Generated assets and SDK runtime exports are separate from browser/unit dependency trees. Audit prepares dependency metadata without compiling SDKs. |
+| Rust | Immutable harness binaries and the Rust playground server consume separate compiled dependency outputs through Crane. |
+| Swift | Immutable standard, exact and upto adapters plus the release conformance executable; customized compiler/SwiftPM outputs are retained separately. |
+| Go | Immutable client and server adapters. |
+| SBF | One Linux build supplies the same verified program artifact to Linux and macOS consumers. |
 
-## Run a lane
+`rust-harness-deps` and `rust-playground-deps` are explicit cache roots because
+compiled dependencies need not appear in a binary's runtime closure. They use
+the corresponding package/features and dev profile, with incremental compilation
+disabled. Ordinary SDK and generated HTML source edits can reuse these dependency
+artifacts; final binaries still rebuild when their inputs change. Coverage uses
+its own instrumented runtime Cargo target tree and does not consume them.
+
+The harness accepts optional `PAY_KIT_HARNESS_COMMANDS` adapter commands and
+`PAY_KIT_CONFORMANCE_COMMANDS` conformance commands for the prepared executables.
+Default native commands remain available when these maps are absent. Swift
+interop consumers run the immutable executables without installing the Swift
+compiler in their runtime shell. Swift unit tests still use SwiftPM with fresh
+coverage instrumentation.
+
+## Scheduling and case preservation
+
+`ci-lanes.json` defines 27 logical lanes. The workflow expands these to **36
+primary jobs**, excluding the optional Rust diagnostic:
+
+| Job family | Count | Dependencies and split |
+| --- | ---: | --- |
+| Plan | 1 | Evaluate definitions and matrices. |
+| Units | 14 | TypeScript splits into lint/format, typecheck, tests/coverage and integration; the other unit lanes stay separate. |
+| Shared producers | 2 | Linux and Darwin start after plan, concurrently with SBF. |
+| SBF | 1 | Build the shared Linux program artifact. |
+| Linux interop | 8 | Wait for shared Linux and SBF. |
+| Swift interop | 3 | Standard, exact and upto groups wait for shared Darwin and SBF. |
+| Browser | 5 | Wait for shared Linux; Rust prepares its own server/dependency outputs. |
+| Mobile demos | 2 | Start after plan with explicit host SDK requirements. |
+
+The Darwin producer has three consumers, so preparation can overlap SBF and the
+three Swift test groups. Producer cache saving still belongs to the prerequisite
+job and must count toward the consumer's wait. Splitting jobs adds runner setup
+and transfer costs; lower wall time is an outcome to measure.
+
+`interop-cases.json` preserves 51 native workflow selections as 30 distinct
+command cases. Swift partitions its existing five cases as three standard,
+one exact and one upto case. These are command counts, not assertion counts.
+Assertions, selectors, coverage floors and existing skip policies are preserved.
+
+Linux interop and browser consumers receive separately selected runtime
+archives. Darwin consumers receive the shared Darwin runtime archive. Consumers
+verify repository/run/attempt/commit identity and a manifest digest supplied
+separately by the producer before importing. The SBF digest is also verified
+before execution. Intermediate Rust compilation artifacts and custom Swift
+build tools stay in producer caches, outside these runtime transfer selections.
+
+## Run a lane or comparison
 
 With Nix and the `nix-command` and `flakes` features enabled, run from the repo:
 
@@ -42,137 +82,163 @@ nix flake check --no-build --all-systems --no-update-lock-file
 nix run .#unit-go
 nix run .#unit-python
 nix run .#interop-go
-nix run .#playground-typescript
+nix run .#playground-rust
 nix run .#unit-swift # macOS
+NIX_TYPESCRIPT_GATE=typecheck nix run .#unit-typescript
+NIX_INTEROP_GROUP=exact nix run .#interop-swift # macOS
 ```
 
-`nix flake check --no-build` validates definitions; it does not execute the SDK
-tests. Use the named apps for those checks. Supported CI systems are
-`x86_64-linux` and `aarch64-darwin`.
+Without a gate/group selector, the named TypeScript or Swift app runs all its
+existing gates/cases. `nix flake check --no-build` validates definitions and does
+not execute SDK tests. Supported CI systems are `x86_64-linux` and
+`aarch64-darwin`. Local macOS program-backed interop requires a verified
+Linux-built artifact in `PAYMENT_CHANNELS_PROGRAM_SO`.
 
-Linux builds the SBF program once. The same verified `.so` is supplied to the
-Linux and macOS interop jobs. For local macOS program-backed interop, supply a
-verified Linux-built artifact through `PAYMENT_CHANNELS_PROGRAM_SO`.
+Manual workflow inputs are `cache_mode` (`packed`, `tar`, or `none`), `profile`
+for file-count detail, and `diagnose_rust` for a separate compiler diagnostic.
+Push runs use `packed`. Changing mode does not change test selections.
 
-Each invocation writes `.nix-results/` with timings, exit status and the existing
-coverage reports. Build jobs also record an initial-store build and a repeat
-using the same store. Equal output paths and a fast repeat establish reuse in
-that store, not an end-to-end improvement over native CI.
+The optional `nix-rust-diagnostic.yml` workflow compares native and Nix-provided
+Rust 1.98.1 on one Ubuntu runner, native first. It verifies identical source,
+lockfile and generated HTML inputs, uses separate empty target directories,
+fixes the dev profile and four Cargo jobs, and records compiler/linker/library
+settings, Cargo timings and resource use. Fetch and tool setup are outside the
+compile sample. Native libraries and linker environments remain measured
+differences. This is one sample per compiler environment, not a sandboxed Nix
+package comparison, a full-CI benchmark or a performance guarantee.
 
-## Explicit boundaries
+## Cache transports and scopes
 
-| Area | Current experiment |
+Both transports use the current checkout's evaluated output contracts from
+`scripts/outputs.py`. Keys include scope, platform, runner label, Nix version,
+locked inputs and output/derivation identity.
+
+| Mode | Behavior |
 | --- | --- |
-| Shared HTML, TS, Rust, Go and SBF outputs | Nix derivations with fixed dependency inputs |
-| Python, Ruby, PHP, Lua, Gradle dependencies | Downloaded by their existing package managers inside Nix environments |
-| Tests and browser downloads | Fresh runtime commands; not sandboxed Nix checks |
-| Swift SDK and harness | Darwin lane using Nix Swift and SwiftPM |
-| iOS demo | Host Xcode and iOS Simulator SDK remain required |
-| Android demo | Host Android SDK 34 and build-tools 34.0.0 remain required |
-| RPC endpoint | Optional existing fork secret is forwarded to the same checks; public fallback when absent |
-| Persistent build caches | Two scoped Nix store snapshots and the Rust unit lane's Cargo build trees |
+| `packed` | Default. Store compressed per-path NARs in GitHub Actions cache, omitting available public payloads. A compatible prefix hit imports only cached roots that match current evaluated roots. |
+| `tar` | Comparison transport. Root the same selected outputs, garbage-collect unneeded store paths, then save the store/database snapshot. Only the exact v3 key is restored; old v1/v2 and prefix fallbacks are disabled. |
+| `none` | Disable experimental Nix, Cargo and language persistence. Public Nix substitution and same-run artifact sharing still operate. |
 
-This is full test orchestration through Nix, not fully hermetic packaging of
-every ecosystem. It does not change skip policies, add missing protocol
-vectors, enforce repository merge rules or repair SDK behavior.
+| Output-cache scope | Selected roots |
+| --- | --- |
+| `shared-linux` | Eight runtime outputs plus `rust-harness-deps`. |
+| `shared-darwin` | Five runtime outputs plus `rust-harness-deps`, `swift-compiler` and `swift-package-manager`. |
+| `swift-tools` | Customized compiler and SwiftPM used by Swift unit tests. |
+| `playground-rust` | Server executable and its compiled dependencies. |
+| `unit-typescript` | HTML assets and full TypeScript unit preparation. |
+| `unit-audit` | TypeScript audit dependency metadata/tree. |
+| `unit-html` | Generated HTML assets. |
 
-Some compiler patch versions differ from native CI. The workflow records the
-exact versions. pnpm 11.13.0, Gradle 9.5.1 and golangci-lint 2.12.2 preserve the
-existing selections. Nixpkgs supplies Node 22.23.3 and Go 1.26.8. The experiment
-uses a committed Rust dependency lock where native CI resolves dependencies.
-Redis currently comes from the pinned Nixpkgs revision; native CI uses Redis 7.
-Treat these differences as comparison variables, not evidence of a speedup.
+The customized Swift roots preserve the macOS 13 Swift Testing build, the
+SwiftPM testing helper and coverage-tool links. Available public compiler/SDK
+payloads can be obtained from the upstream cache instead of copied into every
+packed snapshot. A public-cache lookup failure retains the payload locally.
+NAR import still creates files; replacing tar does not guarantee lower I/O or
+shorter job time.
 
-Swift uses explicit `macos-26`, matching the native CI image observed during
-the experiment. The initial measurements used `macos-15`; compare those runs
-separately when assessing the runner change. A scoped library path retains the
-workaround for this pin's missing Swift Span back-deployment rpath, fixed
-upstream in Nixpkgs PR #568774. The iOS demo invokes host Xcode in
-a clean environment so Nix's compiler and linker settings cannot replace
-Xcode's selected toolchain.
+Separate mutable caches retain the Rust unit lane's ordinary and instrumented
+build trees, and compatible Python downloads/wheels, Ruby gems, Lua rocks, PHP
+archives, Gradle dependencies and Go modules. These are keyed to lane/toolchain
+and dependency inputs. Lua reuse is additionally bounded to a UTC week because
+its dependencies lack a lockfile. Virtualenvs, test results and coverage reports
+are not restored. Gradle task-output caching remains disabled. Tests and coverage
+commands run again after hits.
 
-The same pin builds Swift Testing for macOS 14 by default. Its package is
-rebuilt for the SDK's existing macOS 13 target, while the Swift compiler and
-SwiftPM inputs remain unchanged. The SDK's platform support and test assertions
-are not raised or disabled to accommodate the package.
+All caches share the repository's existing storage allowance with native CI.
+More scopes can increase misses or eviction pressure. The experiment does not
+raise the budget or delete native caches; cache availability must be recorded
+for each comparison rather than assumed from a previous successful save.
 
-SwiftPM 6.2.4's CMake build also omits its Darwin Swift Testing launcher. The
-experiment compiles that small, unmodified helper from the pinned SwiftPM source
-and wraps the existing SwiftPM commands to discover it. It does not rebuild the
-Swift compiler or SwiftPM itself and does not use Xcode's test runner.
-SwiftPM also searches for coverage tools beside the compiler. The assembled
-toolchain includes `llvm-cov` and `llvm-profdata` from the same pinned Swift LLVM
-fork so `swift test --enable-code-coverage` can export its existing report.
+## Packed-cache trust boundary
 
-pnpm's implicit dependency verification is disabled for prepared workspaces:
-version 11.13 otherwise reinstalls dependencies after a directory move and can
-overwrite Nix's native-binary patches. Explicit dependency installs still run
-where the lane requires them.
+Packed restore is restricted to disposable GitHub-hosted runners, the exact
+fork and `refs/heads/experiment/nix-ci`, and `push` or `workflow_dispatch` events.
+It rejects PR merge refs and self-hosted runners. It authenticates the restored
+key/ref through GitHub's API and checks the recorded producer workflow,
+run/attempt and head identity. The authorized branch cache is the trust boundary;
+a manifest stored beside a payload is not an independent signature.
 
-## Cache and scheduling experiment
+Current roots are checked against current derivation outputs. File hashes,
+regular-file restrictions, NAR metadata/references and the selected closure are
+validated before import, and the imported closure is checked afterward. Public
+substitution uses normal Nix signature checks. Branch-trusted packed payloads
+use a narrowly scoped privileged import from the validated local cache with
+`--no-check-sigs`; persistent daemon trust, users and keys are unchanged. The
+tar comparator has the snapshot action's restore behavior, not the packed
+importer's per-payload validation. Neither transport is intended for an
+untrusted cache writer or arbitrary external binary cache.
 
-Nix store keys include the platform, explicit runner label, Nix version,
-`flake.lock` fingerprint and exact desired package derivations. A fallback
-snapshot may supply unchanged outputs, but Nix still realizes every current
-target. Only valid, successful build outputs are rooted before unneeded store
-paths are collected and the snapshot is saved. Exact hits skip saving again.
-`.nix-results/cache-*.json` records the requested keys and restore results.
-The Swift shell remains part of the compatibility key, but its full environment
-is not rooted for the snapshot. Rooting it retained both Apple SDK/compiler
-ecosystems and made snapshot restoration expensive. Public tools are fetched
-from Nix's binary cache instead. The Darwin cache prefers its narrowed format
-and can restore the earlier broad snapshot once to populate the new format without rebuilding
-unchanged project outputs.
+## Platform and runtime boundaries
 
-Cargo keys also include the Rust lane's exact Nix environment, dependency lock,
-manifests and gate scripts. Source changes can reuse compatible dependency
-builds. Coverage and ordinary test builds remain separate because their
-compiler flags differ. Raw coverage profiles and reports are regenerated;
-every test and coverage threshold still runs after a hit. Changed Rust harness
-source still requires rebuilding its separate immutable Nix package.
+| Area | Boundary |
+| --- | --- |
+| Python, Ruby, PHP, Lua and Gradle dependencies | Existing package managers still install inside pinned Nix environments. |
+| Tests, browser downloads, Redis and validator/RPC state | Fresh runtime work, not hermetic Nix checks or cached success. |
+| Swift SDK and harness | Nix Swift/SwiftPM on explicit `macos-26`. |
+| iOS demo | Host Xcode and iOS Simulator SDK remain required. |
+| Android demo | Host Android SDK 34 and build-tools 34.0.0 remain required. |
+| RPC endpoint | Existing optional fork secret, with the same public fallback when absent. |
 
-The first cache miss pays compression and upload costs. Linux consumers wait
-for their producer, including cache saving. The combined Swift job waits for
-the Linux SBF artifact before starting its Darwin build. Measure these costs
-in the full job window rather than subtracting transfer times in isolation.
-Swift adapter build timings are recorded separately from the interop cases.
+Compiler patch versions, dependency locking and Redis versions can differ from
+native CI. Recorded tools, actual runner images and cache states are comparison
+variables. This migration does not add missing protocol vectors, change merge
+enforcement or fix SDK/network failures.
 
-Only these three cache scopes are enabled initially. Repository cache limits
-and native cache entries are not changed; eviction may still cause a later
-miss. Logs, saved snapshot sizes and actual second-run hits are required
-evidence. The optimized graph has 30 jobs and the same 27 lane definitions.
+The pinned Swift tooling retains its scoped Span back-deployment library-path
+workaround. Swift Testing is rebuilt for the SDK's existing macOS 13 target.
+The missing SwiftPM 6.2.4 Darwin testing helper is compiled from its pinned source,
+and the assembled toolchain includes matching `llvm-cov` and `llvm-profdata`.
+The iOS demo invokes host Xcode in a clean environment. These adaptations do not
+raise SDK platform requirements or disable assertions.
+
+Prepared pnpm workspaces disable implicit dependency verification, which would
+otherwise reinstall after staging and replace Nix's native-binary patches.
+Explicit installs still run where required. Staging copies only selected trees
+and changes permissions only on copied files, rather than traversing the entire
+checkout repeatedly.
+
+## Measurement and adoption
+
+`.nix-results/` records command durations, exit status, output identities,
+closure paths/bytes and existing coverage reports. `profile=true` also counts
+files/directories/symlinks in selected roots. Command timing records include
+child CPU/RSS metadata without dumping the process environment. Producer
+initial-store and same-store repeats demonstrate local reuse, not complete CI
+performance.
+
+The earlier tar-based graph at `43fab772` took **17m05s** on its final three-cache-hit
+run, versus **8m45s** for the same-tree native workflow family with mixed caches:
+[historical Nix attempt](https://github.com/EfeDurmaz16/mpp-sdk/actions/runs/37044570679/attempts/3),
+[native CI](https://github.com/EfeDurmaz16/mpp-sdk/actions/runs/37044578021) and
+[native Harness](https://github.com/EfeDurmaz16/mpp-sdk/actions/runs/37044578056).
+Those observations motivated this design. They do not measure the current
+packed transport, split outputs or 36-job graph.
+
+Compare full job windows and summed job durations, including producer builds,
+cache save/restore and artifact transfer. Summed elapsed job seconds are not CPU
+seconds or a billing estimate. Measure cold, exact-head warm, source-change,
+lock/toolchain-change and cache-unavailable behavior. Verify fresh coverage,
+all expected command records and actual failure causes. Neither a faster cache
+phase nor a green definition check alone justifies adoption.
+
+Rollback is to stop the optional workflow. Native CI and default harness
+commands remain available throughout.
 
 ## Refresh build inputs
 
-Fixed fetcher hashes live next to the package expressions. When changing a
-lockfile, use the corresponding fetcher target, inspect the fetched input and
-update its hash. Rebuild the package and its consuming test lane afterward:
+Fixed fetcher hashes live beside package expressions. After lockfile changes,
+inspect fetched inputs, update corresponding hashes, rebuild affected outputs
+and rerun their consuming lanes:
 
 ```sh
-nix build .#html-npm-deps
-nix build .#typescript-pnpm-deps
-nix build .#harness-pnpm-deps
-nix build .#rust-harness
+nix build .#html-npm-deps .#typescript-pnpm-deps .#harness-pnpm-deps
+nix build .#rust-harness-deps .#rust-harness
+nix build .#rust-playground-deps .#rust-playground-server
+nix build .#swift-harness .#swift-compiler .#swift-package-manager # macOS
 nix build .#go-client .#go-server
 nix build .#payment-channels # Linux
 ```
 
 The SBF recipe fixes the source revision, treasury patch, Agave driver, SDK,
-platform-tools v1.52 and `--arch v1`. It excludes generated deployment keypairs
-from the reusable output.
-
-## Evaluation
-
-Before considering adoption, compare the same source revision and runner class:
-
-1. Check which native and Nix test cases actually ran, including skipped cases.
-2. Separate packaging failures from failures inside SDK assertions.
-3. Compare total job minutes and critical-path duration, including artifact
-   export, download and import overhead.
-4. Measure cold and warm builds separately. Repeat enough times to distinguish
-   cache behavior from RPC and runner variation.
-5. Keep or remove the experiment based on the measured benefit and maintenance
-   work. A green Nix definition check alone is not an adoption criterion.
-
-Rollback is to stop running this optional branch workflow. The native CI
-definitions and default harness commands remain available throughout.
+platform-tools v1.52 and `--arch v1`. Generated deployment keypairs are excluded
+from its reusable output.
