@@ -61,6 +61,7 @@ jobs:
       - name: Run the SDK gates
         env:
           TARGET: ${{ matrix.id }}
+          SURFPOOL_DATASOURCE_RPC_URL: ${{ secrets.SURFPOOL_DATASOURCE_RPC_URL }}
         run: nix run --no-update-lock-file ".#$TARGET"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
@@ -93,7 +94,7 @@ jobs:
         with:
           name: nix-shared-linux
           path: .nix-artifacts/shared/
-          compression-level: 0
+          compression-level: 1
           include-hidden-files: true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
@@ -127,7 +128,7 @@ jobs:
         with:
           name: nix-shared-darwin
           path: .nix-artifacts/shared/
-          compression-level: 0
+          compression-level: 1
           include-hidden-files: true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
@@ -195,6 +196,7 @@ jobs:
         env:
           EXPECTED_SBF_SHA256: ${{ needs.sbf.outputs.sha256 }}
           TARGET: ${{ matrix.id }}
+          SURFPOOL_DATASOURCE_RPC_URL: ${{ secrets.SURFPOOL_DATASOURCE_RPC_URL }}
         run: |
           bash nix/scripts/verify-sbf.sh
           export PAYMENT_CHANNELS_PROGRAM_SO="$PWD/.nix-artifacts/sbf/payment_channels.so"
@@ -232,6 +234,7 @@ jobs:
       - name: Verify the program and run Swift interop
         env:
           EXPECTED_SBF_SHA256: ${{ needs.sbf.outputs.sha256 }}
+          SURFPOOL_DATASOURCE_RPC_URL: ${{ secrets.SURFPOOL_DATASOURCE_RPC_URL }}
         run: |
           bash nix/scripts/verify-sbf.sh
           export PAYMENT_CHANNELS_PROGRAM_SO="$PWD/.nix-artifacts/sbf/payment_channels.so"

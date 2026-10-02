@@ -110,6 +110,10 @@ case "$kind" in
     ;;
   interop)
     prepare_harness
+    if [[ "$lane" == typescript ]]; then
+      (cd harness && ./node_modules/.bin/vitest run \
+        test/adapter-command.test.ts test/process.test.ts test/adapter-identity.test.ts)
+    fi
     if [[ "$lane" != onchain ]]; then prepare_adapters; fi
     case "$lane" in
       go|python|swift|kotlin)

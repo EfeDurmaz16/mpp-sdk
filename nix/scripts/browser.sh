@@ -12,6 +12,21 @@ esac
 results="$root/.nix-results/$lane"
 mkdir -p "$results"
 export PLAYWRIGHT_BROWSERS_PATH="$root/.nix-runtime/playwright/$lane"
+export pnpm_config_verify_deps_before_run=false
+# run.sh stages these Nix outputs. Reinstallation can replace patched addons,
+# so a missing output is a preparation error, never a reason to rebuild here.
+for prepared in \
+  html/dist/template.html \
+  html/node_modules/.bin/playwright \
+  harness/node_modules/@solana/surfpool/package.json \
+  typescript/node_modules/.bin/tsc \
+  typescript/packages/mpp/dist/index.js \
+  typescript/packages/pay-kit/dist/index.js; do
+  if [[ ! -f "$root/$prepared" ]]; then
+    printf 'Missing prepared Nix output: %s; run the browser lane through nix/scripts/run.sh.\n' "$prepared" >&2
+    exit 1
+  fi
+done
 groups=()
 last_pid=''
 cleanup() {
@@ -163,28 +178,31 @@ if [[ "$lane" == playground-smoke ]]; then
   run_in playground pnpm install --frozen-lockfile
   run_in playground pnpm exec playwright install chromium
   patch_browsers
-  playwright playground pnpm exec playwright test --config playwright.smoke.config.ts
+  # The app predev hook only reinstalls/rebuilds the already staged SDK.
+  playwright playground env pnpm_config_enable_pre_post_scripts=false \
+    pnpm exec playwright test --config playwright.smoke.config.ts
   exit
 fi
 
 check_port 8899
 check_port 8900
-run_in harness pnpm install --frozen-lockfile
 start_group surfnet . node harness/start-surfnet-proxy.mjs
 wait_ready surfnet "$last_pid" http://localhost:8899 50 rpc
 
 case "$lane" in
   playground-e2e|playground-typescript)
-    run_in typescript pnpm install --frozen-lockfile
-    run_in typescript pnpm build
     if [[ "$lane" == playground-e2e ]]; then
       check_port 3000
       check_port 5173
       run_in playground pnpm install --frozen-lockfile
+      # Preserve the other predev work explicitly; only prepare:sdk is supplied
+      # by Nix. The API has its own workspace and lockfile.
+      run_in typescript/examples/playground-api pnpm install --frozen-lockfile
+      run_in playground node scripts/gen-snippets.mjs
       run_in playground pnpm exec playwright install chromium
       patch_browsers
       printf 'rpc=https://402.surfnet.dev:8899 (hosted state, not pinned)\n' >>"$results/runtime.txt"
-      playwright playground env PLAYGROUND_DISABLE_SIDECAR=1 \
+      playwright playground env pnpm_config_enable_pre_post_scripts=false PLAYGROUND_DISABLE_SIDECAR=1 \
         RPC_URL=https://402.surfnet.dev:8899 VITE_RPC_URL=https://402.surfnet.dev:8899 pnpm test:e2e
       exit
     fi
@@ -195,8 +213,9 @@ case "$lane" in
     ;;
   playground-rust)
     check_port 3001
-    run_in rust cargo build --example payment_link_server --features axum
-    start_group server rust cargo run --example payment_link_server --features axum
+    cp "$root/nix/locks/rust-Cargo.lock" "$root/rust/Cargo.lock"
+    run_in rust cargo build --locked --example payment_link_server --features axum
+    start_group server rust cargo run --locked --example payment_link_server --features axum
     wait_ready server "$last_pid" http://localhost:3001/health 15
     ;;
   playground-go)
@@ -208,7 +227,6 @@ case "$lane" in
     wait_ready server "$last_pid" http://localhost:3002/api/v1/health 30
     ;;
 esac
-run_in html npm install
 run_in html npx playwright install chromium
 patch_browsers
 case "$lane" in

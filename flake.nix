@@ -35,6 +35,7 @@
               envNames = [ "GOTOOLCHAIN" "GOWORK" ]
                 ++ lib.optionals (lane.language == "kotlin") [ "JAVA_HOME" ]
                 ++ lib.optionals (lane.language == "rust") [ "LLVM_COV" "LLVM_PROFDATA" ]
+                ++ lib.optionals (lane.language == "swift" && lane.kind != "demo") [ "DYLD_LIBRARY_PATH" ]
                 ++ lib.optionals (lane.language == "lua") [
                   "LUA_INCDIR" "LIBSODIUM_INCDIR" "LIBSODIUM_LIBDIR"
                   "OPENSSL_INCDIR" "OPENSSL_LIBDIR"
@@ -44,9 +45,12 @@
                 ];
               environment = builtins.intersectAttrs
                 (lib.genAttrs envNames (_: true)) toolchains.environment;
+              languageTools = if lane.language == "go"
+                && builtins.elem lane.kind [ "interop" "browser" ]
+                then [ toolchains.go ] else toolchains.tools.${lane.language};
             in pkgs.mkShell (environment // {
               packages = lib.unique (toolchains.tools.common
-                ++ toolchains.tools.typescript ++ toolchains.tools.${lane.language}
+                ++ toolchains.tools.typescript ++ languageTools
                 ++ lib.optionals (lane.kind == "browser") toolchains.tools.browser);
               CI = "1";
               UV_PYTHON_DOWNLOADS = "never";
@@ -55,12 +59,14 @@
                 export PATH="$PWD/.nix-work/bin:$PATH"
               '';
             });
-        in (builtins.mapAttrs (_: tools: pkgs.mkShell {
+        in (builtins.mapAttrs (language: tools: pkgs.mkShell ({
           packages = toolchains.tools.common ++ tools;
           GOTOOLCHAIN = "local";
           GOWORK = "off";
           UV_PYTHON_DOWNLOADS = "never";
-        }) languages) // builtins.listToAttrs (map (lane: {
+        } // lib.optionalAttrs (language == "swift") {
+          inherit (toolchains.environment) DYLD_LIBRARY_PATH;
+        })) languages) // builtins.listToAttrs (map (lane: {
           name = "ci-${lane.id}";
           value = laneShell lane;
         }) supported));

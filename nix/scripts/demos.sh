@@ -10,6 +10,25 @@ case "$lane" in
 esac
 results="$root/.nix-results/$lane"
 mkdir -p "$results"
+host_xcodebuild() {
+  # Xcode treats exported compiler variables as build settings. Nix exports
+  # LD=ld, but Xcode's link commands need its clang driver to consume -Xlinker.
+  # Run the declared host-SDK exception with only its user and system context.
+  python3 - "$@" <<'PY'
+import os
+import subprocess
+import sys
+
+environment = {name: os.environ[name] for name in (
+    "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "CI"
+) if name in os.environ}
+environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+environment["DEVELOPER_DIR"] = subprocess.check_output(
+    ["/usr/bin/xcode-select", "--print-path"], env=environment, text=True
+).strip()
+os.execve("/usr/bin/xcodebuild", ["xcodebuild", *sys.argv[1:]], environment)
+PY
+}
 case "$lane" in
   android-demo)
     sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
@@ -32,11 +51,11 @@ case "$lane" in
     [[ "$(uname -s)" == Darwin ]] || { printf 'iOS demo requires a macOS Xcode runner.\n' >&2; exit 1; }
     {
       printf 'lane=%s\nmode=networked-runtime\nexception=host Xcode and iOS Simulator SDK\n' "$lane"
-      xcodebuild -version
-      xcodebuild -showsdks
+      host_xcodebuild -version
+      host_xcodebuild -showsdks
     } >"$results/runtime.txt"
     cd "$root/swift/Examples/PayKitDemo"
-    xcodebuild -scheme PayKitDemo -project PayKitDemo.xcodeproj \
+    host_xcodebuild -scheme PayKitDemo -project PayKitDemo.xcodeproj \
       -destination 'generic/platform=iOS Simulator' -configuration Debug CODE_SIGNING_ALLOWED=NO build
     ;;
 esac

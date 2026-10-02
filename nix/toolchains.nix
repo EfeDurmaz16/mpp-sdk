@@ -104,6 +104,10 @@ in
     LIBSODIUM_LIBDIR = "${lib.getLib pkgs.libsodium}/lib";
     OPENSSL_INCDIR = "${lib.getDev pkgs.openssl}/include";
     OPENSSL_LIBDIR = "${lib.getLib pkgs.openssl}/lib";
+  } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+    # This pin's swift-collections omits the Span back-deployment rpath on macOS15.
+    # Remove after adopting https://github.com/NixOS/nixpkgs/pull/568774.
+    DYLD_LIBRARY_PATH = "${lib.getLib pkgs.swiftPackages.stdlib}/lib/swift-6.2/macosx";
   } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
     # The experimental Linux target is x86_64. Patch only its private Playwright
     # downloads, rather than making host executables load Nix libraries globally.
