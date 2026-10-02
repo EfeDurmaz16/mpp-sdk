@@ -79,6 +79,17 @@ const pascal = (name: string): string => identifier(name[0].toUpperCase() + name
 // JSON string syntax is also valid Python string syntax; non-ASCII is escaped for safe source emission.
 const literal = (value: string): string => JSON.stringify(value).replace(/[\u007f-\uffff]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
+function isPublicKey(value: string): boolean {
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value)) return false;
+  const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  let integer = 0n;
+  for (const character of value) integer = integer * 58n + BigInt(alphabet.indexOf(character));
+  // Leading base58 ones encode zero bytes; other bytes come from the integer.
+  let length = value.match(/^1*/)?.[0].length ?? 0;
+  for (; integer > 0n; integer >>= 8n) length += 1;
+  return length === 32;
+}
+
 function checkMetadata(value: unknown, location = 'root'): void {
   if (Array.isArray(value)) {
     value.forEach((item: unknown, index) => checkMetadata(item, `${location}[${index}]`));
@@ -277,7 +288,7 @@ function instruction(node: InstructionNode, definitions: ReadonlyMap<string, Def
       module.use('typing', 'NotRequired');
       let fallback: string;
       if (value.kind === 'publicKeyValueNode') {
-        requireCondition(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value.publicKey), 'invalid public key default');
+        requireCondition(isPublicKey(value.publicKey), 'invalid public key default: expected 32 decoded bytes');
         fallback = `Pubkey.from_string(${literal(value.publicKey)})`;
       } else {
         requireCondition(value.kind === 'pdaValueNode' && typeof value.pda !== 'string' && value.pda.kind === 'pdaLinkNode' && value.pda.name === 'eventAuthority' && (value.seeds ?? []).length === 0, `${node.name}.${account.name}: unsupported account default`);
@@ -307,7 +318,7 @@ export function renderPaymentChannelsPython(root: RootNode): Map<string, string>
   checkMetadata(root);
   requireCondition(root.standard === 'codama' && String(root.version) === '1.6.0' && (root.additionalPrograms ?? []).length === 0, 'unsupported Codama version or additional programs');
   const program = root.program;
-  requireCondition(program.name === 'paymentChannels' && program.version === '0.1.0' && program.publicKey === 'CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX', 'unsupported program identity');
+  requireCondition(program.name === 'paymentChannels' && program.version === '0.1.0' && isPublicKey(program.publicKey) && program.publicKey === 'CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX', 'unsupported program identity');
   const definedTypes = program.definedTypes ?? [];
   const instructions = program.instructions ?? [];
   const accounts = program.accounts ?? [];
@@ -390,6 +401,7 @@ export function renderPaymentChannelsPython(root: RootNode): Map<string, string>
 
   for (const event of events) {
     requireCondition(event.data.kind === 'hiddenPrefixTypeNode' && event.data.prefix?.length === 1 && event.data.type.kind === 'structTypeNode', `${event.name}: unsupported event shape`);
+    requireCondition(!(event.data.type.fields ?? []).some((field) => field.name === 'discriminator'), `${event.name}: field discriminator collides with the generated event prefix`);
     const prefix = event.data.prefix[0];
     requireCondition(prefix.type.kind === 'fixedSizeTypeNode' && prefix.type.size === 8 && prefix.type.type.kind === 'bytesTypeNode' && prefix.value.kind === 'bytesValueNode' && prefix.value.encoding === 'base16' && /^[a-fA-F0-9]{16}$/.test(prefix.value.data), `${event.name}: unsupported event prefix`);
     const marker = event.discriminators?.[0];
@@ -416,6 +428,7 @@ export function renderPaymentChannelsPython(root: RootNode): Map<string, string>
   for (const error of errors) {
     requireCondition(Number.isSafeInteger(error.code) && error.code >= 0 && error.code <= 0xffffffff && typeof error.message === 'string', `invalid error ${error.name}`);
     const name = pascal(error.name);
+    requireCondition(!['Callable', 'CustomError', 'ProgramError'].includes(name), `${error.name}: error class ${name} collides with a generated module symbol`);
     errorModule.lines.push(`class ${name}(CustomError):`, `    """IDL error ${error.code}: ${name}."""`, '', `    code = ${error.code}`, `    name = ${literal(name)}`, `    msg = ${literal(error.message)}`, '', '    def __init__(self, logs: list[str] | None = None) -> None:', '        super().__init__(self.code, self.msg, logs)', '', '');
   }
   errorModule.lines.push('CUSTOM_ERROR_MAP: dict[int, Callable[[list[str] | None], CustomError]] = {', ...errors.map((error) => `    ${error.code}: ${pascal(error.name)},`), '}', '', '', 'def from_code(code: int, logs: list[str] | None = None) -> CustomError | None:', '    """Create an independent exception for a recognized program code."""', '    error_type = CUSTOM_ERROR_MAP.get(code)', '    return None if error_type is None else error_type(logs)');

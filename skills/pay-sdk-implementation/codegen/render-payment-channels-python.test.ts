@@ -71,6 +71,27 @@ test('retains all IDL error messages and fresh error construction', () => {
   assert.match(files.get('errors/__init__.py')!, /program_error_code\(error, program_id\)/);
 });
 
+for (const name of ['customError', 'programError', 'callable']) {
+  test(`rejects the valid IDL error name ${name} that shadows a generated symbol`, () => {
+    const input = createFromJson(JSON.stringify(changed('program.errors.0.name', name))).getRoot();
+    assert.throws(() => renderPaymentChannelsPython(input), /error class .* collides with a generated module symbol/);
+  });
+}
+
+for (const index of [0, 1]) {
+  test(`rejects a payload field that shadows event ${index}'s generated prefix`, () => {
+    const input = createFromJson(JSON.stringify(changed(`program.events.${index}.data.type.fields.0.name`, 'discriminator'))).getRoot();
+    assert.throws(() => renderPaymentChannelsPython(input), /field discriminator collides with the generated event prefix/);
+  });
+}
+
+for (const publicKey of ['1'.repeat(33), 'z'.repeat(44)]) {
+  test(`rejects a base58 account default whose decoded width exceeds 32 bytes: ${publicKey}`, () => {
+    const input = createFromJson(JSON.stringify(changed('program.instructions.0.accounts.9.defaultValue.publicKey', publicKey))).getRoot();
+    assert.throws(() => renderPaymentChannelsPython(input), /invalid public key default: expected 32 decoded bytes/);
+  });
+}
+
 const rejected: readonly [string, string, unknown][] = [
   ['unknown metadata', 'program.instructions.0.optionalAccountStrategy', 'programId'],
   ['unknown root metadata', 'extensions', []],
