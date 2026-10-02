@@ -79,6 +79,7 @@ let
   htmlAssets = pkgs.buildNpmPackage {
     pname = "pay-kit-html-assets";
     version = "0.0.0-experiment";
+    outputs = [ "out" "dev" ];
     src = htmlSource;
     inherit nodejs;
     npmDeps = htmlDeps;
@@ -89,10 +90,18 @@ let
     installPhase = ''
       runHook preInstall
       mkdir -p "$out/html"
-      cp -a . "$out/html/"
+      # Generated assets and their source metadata do not require the HTML
+      # generator's dependency tree on every interop runner.
+      for path in package.json package-lock.json build.ts tsconfig.json src tests dist; do
+        cp -a "$path" "$out/html/"
+      done
       for language in rust go lua python typescript; do
         cp -a "../$language" "$out/$language"
       done
+      # Browser jobs execute Playwright from this dependency tree. Keep it
+      # separately selectable instead of adding it to the runtime closure.
+      mkdir -p "$dev/html"
+      cp -a node_modules "$dev/html/"
       runHook postInstall
     '';
   };
@@ -100,6 +109,7 @@ let
   typescriptSdk = pkgs.stdenv.mkDerivation {
     pname = "pay-kit-typescript-sdk";
     version = "0.0.0-experiment";
+    outputs = [ "out" "dev" ];
     src = typescriptSource;
     pnpmDeps = typescriptDeps;
     nativeBuildInputs = nativeInputs;
@@ -117,6 +127,44 @@ let
     '';
     installPhase = ''
       runHook preInstall
+      for package in mpp pay-kit; do
+        destination="$out/typescript/packages/$package"
+        mkdir -p "$destination"
+        # Match the SDK's exported package content. Source and source maps
+        # remain available, but local workspace dependency links and historic
+        # npm archives are not required by file: harness installations.
+        cp -a "packages/$package/package.json" "packages/$package/src" \
+          "packages/$package/dist" "$destination/"
+        for metadata in README.md LICENSE LICENSE.md; do
+          if [[ -f "packages/$package/$metadata" ]]; then
+            cp -a "packages/$package/$metadata" "$destination/"
+          fi
+        done
+      done
+      # Unit gates need the full source/configuration tree, workspace links,
+      # native addons and tooling. Keeping this output separate preserves
+      # lint/typecheck/test behavior without shipping it to every harness.
+      mkdir -p "$dev/typescript"
+      cp -a . "$dev/typescript/"
+      runHook postInstall
+    '';
+    dontStrip = true;
+  };
+
+  typescriptAudit = pkgs.stdenv.mkDerivation {
+    pname = "pay-kit-typescript-audit-dependencies";
+    version = "0.0.0-experiment";
+    src = typescriptManifests;
+    pnpmDeps = typescriptDeps;
+    nativeBuildInputs = nativeInputs;
+    buildInputs = nativeLibraries;
+    strictDeps = true;
+    # Audit consumes package metadata and installed dependency graphs. It
+    # neither embeds generated HTML nor imports compiled SDK exports.
+    dontBuild = true;
+    installPhase = ''
+      runHook preInstall
+      ${pruneNonHostPrebuilds "node_modules"}
       mkdir -p "$out/typescript"
       cp -a . "$out/typescript/"
       runHook postInstall
@@ -152,7 +200,10 @@ let
 in
 {
   html-assets = htmlAssets;
+  html-browser-deps = htmlAssets.dev;
   typescript-sdk = typescriptSdk;
+  typescript-unit = typescriptSdk.dev;
+  typescript-audit = typescriptAudit;
   harness-deps = harnessDependencies;
   # Separate fetcher targets allow dependency hashes to be refreshed without
   # compiling the SDKs or running any network-dependent interop tests.
