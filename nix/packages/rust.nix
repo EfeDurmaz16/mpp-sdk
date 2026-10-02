@@ -73,8 +73,12 @@ let
   # Match the native command's virtual-workspace selection. Other default
   # members enable the kit's client feature, which the example needs for its
   # reqwest calls. Narrowing this to --package changes feature unification.
-  playgroundArgs = targetArgs "paykit-rust-playground-server"
-    "--example payment_link_server --features axum";
+  playgroundArgs = (targetArgs "paykit-rust-playground-server"
+    "--example payment_link_server --features axum") // {
+      # Native workspace features enable openssl-src's vendored build. Its
+      # Configure script requires Perl in both matching compilation stages.
+      nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ pkgs.perl ];
+    };
   dependencies = args: craneLib.buildDepsOnly (args // {
     # Compile just the matching targets, without an additional cargo check or
     # test compilation. Crane stubs workspace sources for this derivation, so
