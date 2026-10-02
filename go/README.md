@@ -231,6 +231,27 @@ it, and verifies the signature locally. It uses no RPC and submits no payment.
 The SDK continues to build v0 and accept legacy/v0 wire transactions; enabling
 v1 payment flows is a separate rollout from the SDK/signing migration.
 
+To verify Memory signing against a local RPC, start Surfpool 1.5 with an isolated
+offline validator. This requires no remote datasource or saved wallet:
+
+```bash
+surfpool start --offline --no-deploy --no-tui --no-studio \
+  --host 127.0.0.1 --port 18999 --ws-port 19000 --airdrop-amount 0 \
+  --airdrop-keypair-path ./unused-test-key.json
+```
+
+In another terminal, from `go/`:
+
+```bash
+PAYKIT_TEST_LOCAL_RPC=http://127.0.0.1:18999 \
+  go test ./paycore/signer -run TestMemorySignerSurfpool -v -count=1
+```
+
+The opt-in test uses ephemeral keys and local airdrops. It simulates a v0
+transfer, checks invalid-signature rejection, sends and confirms the transaction,
+reads it back, and checks recipient balance and payer debit including fees.
+The test skips when `PAYKIT_TEST_LOCAL_RPC` is unset and rejects non-loopback URLs.
+
 ### HTTP server
 
 The server example uses the umbrella SDK:
@@ -273,8 +294,8 @@ for the full walkthrough.
 | `github.com/solana-foundation/solana-go/v2/programs/system` | native SOL transfer instructions | bundled with `solana-go` |
 | internal canonical JSON | base64url-encoded canonical JSON with `json.Number` preservation | in package |
 
-The Go SDK keeps the transitive dependency tree to the `solana-go`
-toolkit and the Go standard library. Canonical JSON encoding routes
+The Go SDK uses the official `solana-go` toolkit and Keychain Memory for
+transaction encoding and signing. Canonical JSON encoding routes
 through a `json.Number`-preserving decoder so large amounts beyond IEEE
 754 safe integer range stay byte-stable across TypeScript, Rust, and Go.
 
