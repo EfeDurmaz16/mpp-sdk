@@ -25,6 +25,7 @@ from solana_pay_kit._paycore.solana import (
     is_native_sol,
     resolve_mint,
 )
+from solana_pay_kit._paycore.transaction import decode_supported_transaction
 from solana_pay_kit.protocols.mpp.intents.charge import ChargeRequest
 from solana_pay_kit.protocols.mpp.server._tx_decode import (
     _COMPUTE_BUDGET_PROGRAM,
@@ -41,6 +42,7 @@ from solana_pay_kit.protocols.mpp.server._tx_decode import (
     _verify_parsed_sol_transfers,
     _verify_parsed_spl_transfers,
 )
+from solana_pay_kit.signer import sign_transaction
 
 
 def _co_sign_with_fee_payer(transaction_b64: str, fee_payer: Any) -> str:
@@ -55,13 +57,11 @@ def _co_sign_with_fee_payer(transaction_b64: str, fee_payer: Any) -> str:
     Mirrors the cosign step in rust/src/server/charge.rs verify_pull.
     """
     from solders.message import to_bytes_versioned
-    from solders.transaction import VersionedTransaction
-
     raw = base64.b64decode(transaction_b64)
     fee_payer_pubkey = fee_payer.pubkey()
 
     try:
-        vtx = VersionedTransaction.from_bytes(raw)
+        vtx = decode_supported_transaction(raw)
     except Exception as exc:
         raise PaymentError(
             f"could not decode transaction for fee payer co-sign: {exc}",
@@ -86,6 +86,28 @@ def _co_sign_with_fee_payer(transaction_b64: str, fee_payer: Any) -> str:
     sig_start = 1 + idx * 64
     serialized[sig_start : sig_start + 64] = sig_bytes
     return base64.b64encode(bytes(serialized)).decode("ascii")
+
+
+async def _co_sign_with_fee_payer_async(transaction_b64: str, fee_payer: Any) -> str:
+    """Co-sign through Keychain after enforcing the fee payer's slot."""
+    try:
+        vtx = decode_supported_transaction(base64.b64decode(transaction_b64, validate=True))
+    except Exception as exc:
+        raise PaymentError(
+            "could not decode transaction for fee payer co-sign",
+            code="invalid-payload-type",
+        ) from exc
+    pubkey = fee_payer.pubkey()
+    try:
+        index = list(vtx.message.account_keys).index(pubkey)
+    except ValueError as exc:
+        raise PaymentError("fee payer pubkey not present in transaction accounts", code="invalid-payload") from exc
+    _assert_signature_slot(index, int(vtx.message.header.num_required_signatures))
+    try:
+        result = await sign_transaction(fee_payer, vtx)
+    except ValueError as exc:
+        raise PaymentError("fee payer co-sign rejected the transaction", code="invalid-payload") from exc
+    return result.encoded_transaction
 
 
 def _assert_signature_slot(idx: int, num_required: int) -> None:
@@ -299,11 +321,9 @@ def _validate_instruction_allowlist(
     burn, BPF program calls, sysvar reads, etc.) is rejected before
     broadcast with a ``payment-invalid`` canonical code.
     """
-    from solders.transaction import VersionedTransaction
-
     raw = base64.b64decode(transaction_b64)
     try:
-        vtx = VersionedTransaction.from_bytes(raw)
+        vtx = decode_supported_transaction(raw)
     except Exception as exc:
         raise PaymentError(
             "unsupported transaction shape for instruction allowlist",

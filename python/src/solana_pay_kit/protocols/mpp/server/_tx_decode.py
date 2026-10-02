@@ -26,6 +26,7 @@ from solana_pay_kit._paycore.solana import (
     default_token_program_for_currency,
     resolve_mint,
 )
+from solana_pay_kit._paycore.transaction import decode_supported_transaction
 from solana_pay_kit.protocols.mpp.intents.charge import ChargeRequest
 
 _SYSTEM_PROGRAM = "11111111111111111111111111111111"
@@ -330,10 +331,8 @@ def _extract_recent_blockhash(transaction_b64: str) -> str:
     check can be exercised by tests without a full verification pipeline in
     place.
     """
-    from solders.transaction import VersionedTransaction
-
     raw = base64.b64decode(transaction_b64)
-    return str(VersionedTransaction.from_bytes(raw).message.recent_blockhash)
+    return str(decode_supported_transaction(raw).message.recent_blockhash)
 
 
 def _validate_compute_budget_instruction(data: bytes, account_count: int, fee_sponsored: bool = False) -> None:
@@ -402,11 +401,9 @@ def _decode_legacy_payment_instructions(transaction_b64: str) -> list[dict[str, 
     see). Mirrors the Rust spine's ``verify_versioned_transaction_pre_broadcast``
     policy.
     """
-    from solders.transaction import VersionedTransaction
-
     raw = base64.b64decode(transaction_b64)
     try:
-        vtx = VersionedTransaction.from_bytes(raw)
+        vtx = decode_supported_transaction(raw)
     except Exception as exc:
         raise PaymentError(
             "unsupported transaction shape for pre-broadcast verification",

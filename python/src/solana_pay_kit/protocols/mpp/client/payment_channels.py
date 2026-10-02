@@ -20,13 +20,17 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from solders.hash import Hash  # type: ignore[import-untyped]
+from solders.instruction import Instruction  # type: ignore[import-untyped]
 from solders.keypair import Keypair  # type: ignore[import-untyped]
 from solders.pubkey import Pubkey  # type: ignore[import-untyped]
 from solders.signature import Signature  # type: ignore[import-untyped]
 
 from solana_pay_kit._paycore.mints import resolve_stablecoin_mint
 from solana_pay_kit._paycore.solana import default_token_program_for_currency
-from solana_pay_kit._paycore.transaction import build_partially_signed_v0_transaction
+from solana_pay_kit._paycore.transaction import (
+    build_partially_signed_v0_transaction,
+    build_partially_signed_v0_transaction_async,
+)
 from solana_pay_kit.protocols.mpp._paymentchannels import (
     Distribution,
     OpenChannelParams,
@@ -52,7 +56,9 @@ __all__ = [
     "PaymentChannelSessionOpen",
     "PaymentChannelSessionOpenOptions",
     "build_open_payment_channel_transaction",
+    "build_open_payment_channel_transaction_async",
     "create_payment_channel_session_opener",
+    "create_payment_channel_session_opener_async",
     "derive_payment_channel_open",
     "generate_authorized_signer",
     "unique_salt",
@@ -365,6 +371,41 @@ def build_open_payment_channel_transaction(
     ``feePayerKey`` and leaves that signature slot empty for the server.
     Otherwise the payer is also the fee payer.
     """
+    open_, fee_payer, blockhash = _prepare_open_payment_channel_transaction(
+        request, signer, authorized_signer, recent_blockhash, fee_payer, options
+    )
+    return _build_open_payment_channel_tx(signer, open_, fee_payer, blockhash)
+
+
+async def build_open_payment_channel_transaction_async(
+    request: SessionRequest,
+    signer: VoucherSigner | Any,
+    authorized_signer: Pubkey,
+    recent_blockhash: Hash | str | None = None,
+    fee_payer: Pubkey | None = None,
+    options: PaymentChannelOpenOptions | None = None,
+) -> PaymentChannelOpenTransaction:
+    """Build the payer-signed open transaction using async transaction signing.
+
+    Uses the same challenge, override, and fee-sponsorship policy as
+    :func:`build_open_payment_channel_transaction`. Local signers and solders
+    keypairs sign through Keychain; synchronous message signers remain supported.
+    """
+    open_, fee_payer, blockhash = _prepare_open_payment_channel_transaction(
+        request, signer, authorized_signer, recent_blockhash, fee_payer, options
+    )
+    return await _build_open_payment_channel_tx_async(signer, open_, fee_payer, blockhash)
+
+
+def _prepare_open_payment_channel_transaction(
+    request: SessionRequest,
+    signer: VoucherSigner | Any,
+    authorized_signer: Pubkey,
+    recent_blockhash: Hash | str | None,
+    fee_payer: Pubkey | None,
+    options: PaymentChannelOpenOptions | None,
+) -> tuple[PaymentChannelOpen, Pubkey, Hash]:
+    """Resolve the challenged open and transaction context before signing."""
     payer = _signer_pubkey(signer)
     details = request.method_details
     advertised_fee_payer = (
@@ -382,7 +423,7 @@ def build_open_payment_channel_transaction(
         authorized_signer,
         options,
     )
-    return _build_open_payment_channel_tx(signer, open_, fee_payer, _resolve_open_blockhash(recent_blockhash, request))
+    return open_, fee_payer, _resolve_open_blockhash(recent_blockhash, request)
 
 
 def create_payment_channel_session_opener(
@@ -399,6 +440,41 @@ def create_payment_channel_session_opener(
     defaults to the challenged ``recentSlot`` (see
     :class:`PaymentChannelOpenOptions`).
     """
+    open_, fee_payer, blockhash, options = _prepare_payment_channel_session_open(
+        request, payer_signer, session_signer, recent_blockhash, options
+    )
+    tx = _build_open_payment_channel_tx(payer_signer, open_, fee_payer, blockhash)
+    return _payment_channel_session_open(open_, tx, session_signer, options)
+
+
+async def create_payment_channel_session_opener_async(
+    request: SessionRequest,
+    payer_signer: VoucherSigner | Any,
+    session_signer: VoucherSigner | Any,
+    recent_blockhash: Hash | str | None = None,
+    options: PaymentChannelSessionOpenOptions | None = None,
+) -> PaymentChannelSessionOpen:
+    """Build a strict session open action using async transaction signing.
+
+    Applies the same authentication, timeout, and challenge policy as
+    :func:`create_payment_channel_session_opener` before signing the transaction.
+    The returned session continues to sign vouchers synchronously.
+    """
+    open_, fee_payer, blockhash, options = _prepare_payment_channel_session_open(
+        request, payer_signer, session_signer, recent_blockhash, options
+    )
+    tx = await _build_open_payment_channel_tx_async(payer_signer, open_, fee_payer, blockhash)
+    return _payment_channel_session_open(open_, tx, session_signer, options)
+
+
+def _prepare_payment_channel_session_open(
+    request: SessionRequest,
+    payer_signer: VoucherSigner | Any,
+    session_signer: VoucherSigner | Any,
+    recent_blockhash: Hash | str | None,
+    options: PaymentChannelSessionOpenOptions | None,
+) -> tuple[PaymentChannelOpen, Pubkey, Hash, PaymentChannelSessionOpenOptions]:
+    """Validate session policy and resolve the open before either signing path."""
     options = options if options is not None else PaymentChannelSessionOpenOptions()
     if request.method_details.voucher_signer == "operator" and options.authentication is None:
         raise ValueError("operator voucher signing requires authentication")
@@ -415,21 +491,19 @@ def create_payment_channel_session_opener(
         if request.method_details.voucher_signer == "operator"
         else _signer_pubkey(session_signer)
     )
-    payer = _signer_pubkey(payer_signer)
-    details = request.method_details
-    fee_payer = (
-        _parse_pubkey(_require_string(details.fee_payer_key, "feePayerKey"), "feePayerKey")
-        if details.fee_payer
-        else payer
+    open_, fee_payer, blockhash = _prepare_open_payment_channel_transaction(
+        request, payer_signer, authorized_signer, recent_blockhash, None, options.open
     )
-    open_ = derive_payment_channel_open(
-        request,
-        _signer_pubkey(payer_signer),
-        authorized_signer,
-        options.open,
-    )
-    blockhash = _resolve_open_blockhash(recent_blockhash, request)
-    tx = _build_open_payment_channel_tx(payer_signer, open_, fee_payer, blockhash)
+    return open_, fee_payer, blockhash, options
+
+
+def _payment_channel_session_open(
+    open_: PaymentChannelOpen,
+    tx: PaymentChannelOpenTransaction,
+    session_signer: VoucherSigner | Any,
+    options: PaymentChannelSessionOpenOptions,
+) -> PaymentChannelSessionOpen:
+    """Attach the unchanged session and action shapes to the signed open."""
     session = _configured_session(open_.channel_id, session_signer, options.cumulative, options.expires_at)
     action = SessionAction.open_action(
         open_.open_payload(
@@ -454,10 +528,7 @@ def _build_open_payment_channel_tx(
     filled in, serialized as standard-alphabet base64 with padding.
     """
     blockhash = recent_blockhash if isinstance(recent_blockhash, Hash) else Hash.from_string(recent_blockhash)
-    open_params = open_.open_channel_params()
-    # rentPayer is pinned to the operator / fee payer already in scope.
-    open_params.rent_payer = fee_payer
-    ix = build_open_instruction(open_params)
+    ix = _open_payment_channel_instruction(open_, fee_payer)
     try:
         wire = build_partially_signed_v0_transaction(
             [ix],
@@ -470,6 +541,31 @@ def _build_open_payment_channel_tx(
         raise ValueError("payment-channel open signing failed: payer is not a transaction signer") from exc
     encoded = base64.b64encode(wire).decode("ascii")
     return PaymentChannelOpenTransaction(channel_id=open_.channel_id, transaction=encoded)
+
+
+async def _build_open_payment_channel_tx_async(
+    signer: VoucherSigner | Any,
+    open_: PaymentChannelOpen,
+    fee_payer: Pubkey,
+    recent_blockhash: Hash,
+) -> PaymentChannelOpenTransaction:
+    """Assemble the same open instruction and await the payer's partial signature."""
+    ix = _open_payment_channel_instruction(open_, fee_payer)
+    try:
+        wire = await build_partially_signed_v0_transaction_async(
+            [ix], fee_payer, recent_blockhash, _signer_pubkey(signer), signer
+        )
+    except ValueError as exc:
+        raise ValueError("payment-channel open signing failed: payer is not a transaction signer") from exc
+    encoded = base64.b64encode(wire).decode("ascii")
+    return PaymentChannelOpenTransaction(channel_id=open_.channel_id, transaction=encoded)
+
+
+def _open_payment_channel_instruction(open_: PaymentChannelOpen, fee_payer: Pubkey) -> Instruction:
+    open_params = open_.open_channel_params()
+    # rentPayer is pinned to the operator / fee payer already in scope.
+    open_params.rent_payer = fee_payer
+    return build_open_instruction(open_params)
 
 
 def _configured_session(

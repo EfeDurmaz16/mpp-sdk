@@ -63,6 +63,7 @@ from solana_pay_kit.protocols.mpp.server._tx_decode import (
 from solana_pay_kit.protocols.mpp.server._verify import (
     _assert_signature_slot,
     _co_sign_with_fee_payer,
+    _co_sign_with_fee_payer_async,
     _expected_ata_creation_policy,
     _validate_ata_create_idempotent,
     _validate_instruction_allowlist,
@@ -556,7 +557,7 @@ class Mpp:
         # account in the wire transaction.
         signed_b64 = payload.transaction
         if details.fee_payer:
-            signed_b64 = _co_sign_with_fee_payer(payload.transaction, self._fee_payer_signer)
+            signed_b64 = await _co_sign_with_fee_payer_async(payload.transaction, self._fee_payer_signer)
 
         # L8 lock: broadcast first, then consume_signature, then await
         # confirmation. The previous order (consume → broadcast → await,

@@ -23,12 +23,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 from pyborsh import BorshDeserializationError
 from solders.hash import Hash  # type: ignore[import-untyped]
 from solders.keypair import Keypair  # type: ignore[import-untyped]
+from solders.message import Message  # type: ignore[import-untyped]
 from solders.pubkey import Pubkey  # type: ignore[import-untyped]
 from solders.signature import Signature  # type: ignore[import-untyped]
-from solders.transaction import Transaction  # type: ignore[import-untyped]
+from solders.transaction import Transaction, VersionedTransaction  # type: ignore[import-untyped]
 
 from solana_pay_kit._paycore.errors import PaymentError
 from solana_pay_kit._paycore.solana import default_token_program_for_currency, resolve_mint
+from solana_pay_kit._paycore.transaction import decode_supported_transaction
 from solana_pay_kit.protocols.mpp._paymentchannels import (
     PROGRAM_ID,
     Distribution,
@@ -41,6 +43,7 @@ from solana_pay_kit.protocols.mpp._paymentchannels import (
     find_channel_pda,
 )
 from solana_pay_kit.protocols.mpp.intents.session import OpenPayload, TopUpPayload
+from solana_pay_kit.signer import sign_transaction
 
 if TYPE_CHECKING:
     from solana_pay_kit.protocols.mpp.server.session import SessionConfig, SessionOpenContext
@@ -185,10 +188,8 @@ def _decode_transaction(transaction_b64: str) -> tuple[bytes, Any, list[str], li
     verifier only sees the static account keys, so an ALT could hide the
     accounts it validates. See :func:`_reject_address_lookup_tables`.
     """
-    from solders.transaction import VersionedTransaction
-
     raw = base64.b64decode(transaction_b64, validate=True)
-    vtx = VersionedTransaction.from_bytes(raw)
+    vtx = decode_supported_transaction(raw)
     message = vtx.message
     _reject_address_lookup_tables(message)
     account_keys = [str(key) for key in message.account_keys]
@@ -803,8 +804,10 @@ async def settle_and_seal_channel(
     )
 
     blockhash = Hash.from_string((await rpc.get_latest_blockhash()).value.blockhash)
-    tx = Transaction.new_signed_with_payer([*settle, distribute], merchant_pubkey, [merchant], blockhash)
-    sent = await rpc.send_raw_transaction(bytes(tx))
+    message = Message.new_with_blockhash([*settle, distribute], merchant_pubkey, blockhash)
+    tx = VersionedTransaction.from_legacy(Transaction.new_unsigned(message))
+    signed = await sign_transaction(merchant, tx)
+    sent = await rpc.send_raw_transaction(bytes(signed.transaction))
     signature = str(sent.value)
     # Confirm before returning, mirroring cosign_and_broadcast_open: a dropped
     # settle tx (blockhash expiry, congestion, duplicate-settle race) must raise
@@ -823,14 +826,14 @@ async def cosign_and_broadcast_open(payload: OpenPayload, *, fee_payer: Any, rpc
     signature, broadcasts, and confirms. Returns the confirmed open signature.
     Mirrors Go SubmitOpenTx (and reuses the charge fee-payer co-sign).
     """
-    from solana_pay_kit.protocols.mpp.server._verify import _co_sign_with_fee_payer
+    from solana_pay_kit.protocols.mpp.server._verify import _co_sign_with_fee_payer_async
 
     if not payload.transaction:
         raise PaymentError(
             "server-funded open requires the client-built transaction in the payload",
             code="invalid-payload",
         )
-    cosigned = _co_sign_with_fee_payer(payload.transaction, fee_payer)
+    cosigned = await _co_sign_with_fee_payer_async(payload.transaction, fee_payer)
     sent = await rpc.send_raw_transaction(base64.b64decode(cosigned))
     signature = str(sent.value)
     await confirm_transaction_signature(rpc, signature, "open")

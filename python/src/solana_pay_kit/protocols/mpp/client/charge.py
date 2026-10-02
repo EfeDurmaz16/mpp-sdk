@@ -146,7 +146,7 @@ async def build_charge_transaction(
     from solders.pubkey import Pubkey  # type: ignore[import-untyped]
     from solders.system_program import TransferParams, transfer  # type: ignore[import-untyped]
 
-    from solana_pay_kit._paycore.transaction import build_partially_signed_v0_transaction
+    from solana_pay_kit._paycore.transaction import build_partially_signed_v0_transaction_async
 
     details = method_details or MethodDetails()
     amount_int = int(amount)
@@ -314,12 +314,12 @@ async def build_charge_transaction(
     # (charge.rs:162-163). The client signs ONLY its own slot; when sponsored
     # the server cosigns the fee-payer slot at account[0].
     actual_fee_payer = fee_payer_key if fee_payer_key is not None else signer.pubkey()
-    tx_bytes = build_partially_signed_v0_transaction(
+    tx_bytes = await build_partially_signed_v0_transaction_async(
         instructions,
         actual_fee_payer,
         blockhash,
         signer.pubkey(),
-        lambda message: bytes(signer.sign_message(message)),
+        signer,
     )
 
     # Encode transaction

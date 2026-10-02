@@ -6,7 +6,9 @@ import asyncio
 from typing import Any
 
 import pytest
+from solana_keychain import MemorySigner, SignedTransaction
 from solders.keypair import Keypair  # type: ignore[import-untyped]
+from solders.transaction import VersionedTransaction
 
 from solana_pay_kit._paycore.errors import PaymentError
 from solana_pay_kit.protocols.mpp.server import SessionOptions, new_session
@@ -86,7 +88,15 @@ async def _seed(session: Any, state: ChannelState) -> None:
     await session.core().store().update_channel(state.channel_id, lambda _: state)
 
 
-async def test_settlement_broadcasts_and_seals_with_final_voucher() -> None:
+async def test_settlement_broadcasts_and_seals_with_final_voucher(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bytes] = []
+    original = MemorySigner.sign_transaction
+
+    async def sign(self: MemorySigner, transaction: VersionedTransaction) -> SignedTransaction:
+        calls.append(bytes(transaction))
+        return await original(self, transaction)
+
+    monkeypatch.setattr(MemorySigner, "sign_transaction", sign)
     merchant = Keypair.from_seed(bytes([1] * 32))
     rpc = _Rpc()
     session = _session(rpc, merchant)
@@ -97,6 +107,8 @@ async def test_settlement_broadcasts_and_seals_with_final_voucher() -> None:
     stored = await session.core().store().get_channel(state.channel_id)
     assert signature == SETTLEMENT_SIGNATURE
     assert len(rpc.sent) == 1
+    assert len(calls) == 1
+    assert VersionedTransaction.from_bytes(rpc.sent[0]).verify_with_results() == [True]
     assert stored is not None and stored.sealed and stored.settled_signature == signature
     session.shutdown()
 
