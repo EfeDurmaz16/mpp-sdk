@@ -78,12 +78,13 @@ mod tests {
     use async_trait::async_trait;
     use solana_hash::Hash;
     use solana_keychain::transaction_util::TransactionUtil;
-    use solana_keychain::{SignTransactionResult, SignerError, SolanaSigner};
-    use solana_message::{v0, VersionedMessage};
+    use solana_keychain::{MemorySigner, SignTransactionResult, SignerError, SolanaSigner};
+    use solana_message::v1;
     use solana_signature::Signature;
     use solana_system_interface::instruction as system_instruction;
 
     use super::*;
+    use crate::core::tx::{build_unsigned, decode_bytes, serialize, TxVersion};
 
     struct TransactionOnlySigner {
         pubkey: Pubkey,
@@ -137,72 +138,117 @@ mod tests {
 
     #[tokio::test]
     async fn signs_only_the_calling_signers_required_slot() {
-        let fee_payer = Pubkey::new_unique();
-        let signer = TransactionOnlySigner::new(Pubkey::new_unique());
-        let recipient = Pubkey::new_unique();
-        let instruction = system_instruction::transfer(&signer.pubkey(), &recipient, 1);
-        let mut tx = crate::core::tx::build_unsigned(
-            crate::core::tx::TxVersion::V0,
-            &fee_payer,
+        for version in [TxVersion::V0, TxVersion::V1] {
+            let fee_payer = Pubkey::new_unique();
+            let signer = TransactionOnlySigner::new(Pubkey::new_unique());
+            let recipient = Pubkey::new_unique();
+            let instruction = system_instruction::transfer(&signer.pubkey(), &recipient, 1);
+            let mut tx = build_unsigned(
+                version,
+                &fee_payer,
+                &[instruction],
+                Hash::new_unique(),
+                None,
+            )
+            .unwrap();
+
+            sign_versioned_transaction_slot(&signer, &mut tx)
+                .await
+                .unwrap();
+
+            let signer_index = tx
+                .message
+                .static_account_keys()
+                .iter()
+                .position(|key| key == &signer.pubkey())
+                .unwrap();
+            assert_ne!(signer_index, 0);
+            assert_eq!(tx.signatures[0], Signature::default());
+            assert_eq!(tx.signatures[signer_index], Signature::from([7u8; 64]));
+            assert_eq!(
+                *signer.signed_message.lock().unwrap(),
+                tx.message.serialize()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cosigns_fee_payer_without_replacing_the_payer_signature() {
+        for version in [TxVersion::V0, TxVersion::V1] {
+            let fee_payer = TransactionOnlySigner::new(Pubkey::new_unique());
+            let payer = Pubkey::new_unique();
+            let recipient = Pubkey::new_unique();
+            let instruction = system_instruction::transfer(&payer, &recipient, 1);
+            let mut tx = build_unsigned(
+                version,
+                &fee_payer.pubkey(),
+                &[instruction],
+                Hash::new_unique(),
+                None,
+            )
+            .unwrap();
+            let payer_index = tx
+                .message
+                .static_account_keys()
+                .iter()
+                .position(|key| key == &payer)
+                .unwrap();
+            tx.signatures[payer_index] = Signature::from([9u8; 64]);
+
+            cosign_versioned_fee_payer(&fee_payer, &fee_payer.pubkey(), &mut tx)
+                .await
+                .unwrap();
+
+            assert_eq!(tx.signatures[0], Signature::from([7u8; 64]));
+            assert_eq!(tx.signatures[payer_index], Signature::from([9u8; 64]));
+            assert_eq!(
+                *fee_payer.signed_message.lock().unwrap(),
+                tx.message.serialize()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_signers_preserve_valid_v1_signatures_through_wire_round_trip() {
+        let [fee_payer, payer] = [1u8, 2u8].map(|seed| {
+            let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+            MemorySigner::from_bytes(&key.to_keypair_bytes()).unwrap()
+        });
+        let instruction = system_instruction::transfer(&payer.pubkey(), &Pubkey::new_unique(), 1);
+        let mut tx = build_unsigned(
+            TxVersion::V1,
+            &fee_payer.pubkey(),
             &[instruction],
             Hash::new_unique(),
             None,
         )
         .unwrap();
+        assert_eq!(tx.signatures.len(), 2);
+        assert_eq!(
+            &tx.message.static_account_keys()[..2],
+            &[fee_payer.pubkey(), payer.pubkey()]
+        );
+        let message_bytes = tx.message.serialize();
+        assert_eq!(message_bytes[0], v1::V1_PREFIX);
 
-        sign_versioned_transaction_slot(&signer, &mut tx)
+        sign_versioned_transaction_slot(&payer, &mut tx)
             .await
             .unwrap();
-
-        let signer_index = tx
-            .message
-            .static_account_keys()
-            .iter()
-            .position(|key| key == &signer.pubkey())
-            .unwrap();
-        assert_ne!(signer_index, 0);
+        let payer_signature = tx.signatures[1];
         assert_eq!(tx.signatures[0], Signature::default());
-        assert_eq!(tx.signatures[signer_index], Signature::from([7u8; 64]));
-        assert_eq!(
-            *signer.signed_message.lock().unwrap(),
-            tx.message.serialize()
-        );
-    }
-
-    #[tokio::test]
-    async fn cosigns_v0_fee_payer_without_replacing_the_payer_signature() {
-        let fee_payer = TransactionOnlySigner::new(Pubkey::new_unique());
-        let payer = Pubkey::new_unique();
-        let recipient = Pubkey::new_unique();
-        let instruction = system_instruction::transfer(&payer, &recipient, 1);
-        let message = VersionedMessage::V0(
-            v0::Message::try_compile(&fee_payer.pubkey(), &[instruction], &[], Hash::new_unique())
-                .unwrap(),
-        );
-        let mut tx = VersionedTransaction {
-            signatures: vec![
-                Signature::default();
-                message.header().num_required_signatures as usize
-            ],
-            message,
-        };
-        let payer_index = tx
-            .message
-            .static_account_keys()
-            .iter()
-            .position(|key| key == &payer)
-            .unwrap();
-        tx.signatures[payer_index] = Signature::from([9u8; 64]);
 
         cosign_versioned_fee_payer(&fee_payer, &fee_payer.pubkey(), &mut tx)
             .await
             .unwrap();
+        assert_eq!(tx.signatures[1], payer_signature);
+        assert_eq!(tx.message.serialize(), message_bytes);
 
-        assert_eq!(tx.signatures[0], Signature::from([7u8; 64]));
-        assert_eq!(tx.signatures[payer_index], Signature::from([9u8; 64]));
-        assert_eq!(
-            *fee_payer.signed_message.lock().unwrap(),
-            tx.message.serialize()
-        );
+        let wire = serialize(&tx).unwrap();
+        assert_eq!(wire[0], v1::V1_PREFIX);
+        let decoded = decode_bytes(&wire).unwrap();
+        assert_eq!(decoded.message.serialize(), message_bytes);
+        assert_eq!(decoded.signatures, tx.signatures);
+        assert!(decoded.signatures[0].verify(fee_payer.pubkey().as_ref(), &message_bytes));
+        assert!(decoded.signatures[1].verify(payer.pubkey().as_ref(), &message_bytes));
     }
 }
