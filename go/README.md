@@ -226,10 +226,13 @@ Run the Memory example from `go/`:
 go run ./examples/keychain-memory
 ```
 
-It creates an ephemeral signer, signs a v0 transaction, serializes and decodes
-it, and verifies the signature locally. It uses no RPC and submits no payment.
-The SDK continues to build v0 and accept legacy/v0 wire transactions; enabling
-v1 payment flows is a separate rollout from the SDK/signing migration.
+It creates ephemeral signers, signs v0 and v1 transactions, serializes and decodes
+them with the official SDK, and verifies their signatures locally. The v1
+transaction sets its compute budget in `TransactionConfig`; `PriorityFee` is
+total lamports, not a price per compute unit. It uses no RPC and submits no payment.
+Pay-kit payment clients continue to build v0 and servers accept legacy/v0 wire
+transactions. V1 server acceptance requires updating the fee guards and
+instruction verifiers, so it remains a separate rollout.
 
 To verify Memory signing against a local RPC, start Surfpool 1.5 with an isolated
 offline validator. This requires no remote datasource or saved wallet:

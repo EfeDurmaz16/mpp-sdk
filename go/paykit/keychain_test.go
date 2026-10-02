@@ -53,6 +53,7 @@ func TestKeychainTransactionCapabilityPreservesPartialSignature(t *testing.T) {
 	}{
 		{"legacy", solana.MessageVersionLegacy},
 		{"v0", solana.MessageVersionV0},
+		{"v1", solana.MessageVersionV1},
 	} {
 		t.Run(version.name, func(t *testing.T) {
 			for _, path := range []string{"transaction", "message fallback"} {
@@ -82,6 +83,12 @@ func testKeychainTransactionCapability(t *testing.T, version solana.MessageVersi
 		solana.TransactionMessageVersion(version))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if version == solana.MessageVersionV1 {
+		tx.Message.TransactionConfig = solana.TransactionConfig{}.
+			WithComputeUnitLimit(20_000).
+			WithLoadedAccountsDataSizeLimit(64 * 1024).
+			WithPriorityFee(1)
 	}
 	partial, err := payer.SignTransaction(context.Background(), tx)
 	if err != nil || partial.IsComplete() {
@@ -136,6 +143,17 @@ func testKeychainTransactionCapability(t *testing.T, version solana.MessageVersi
 	}
 	if decoded.Signatures[1] != payerSignature {
 		t.Fatal("serialized transaction lost the payer signature")
+	}
+	if version == solana.MessageVersionV1 {
+		decoded.Message.TransactionConfig = decoded.Message.TransactionConfig.WithPriorityFee(2)
+		tampered, err := decoded.Message.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		payerKey := payer.Pubkey()
+		if ed25519.Verify(payerKey[:], tampered, payerSignature[:]) {
+			t.Fatal("payer signature accepted a changed v1 priority fee")
+		}
 	}
 }
 
