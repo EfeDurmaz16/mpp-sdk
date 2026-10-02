@@ -6,6 +6,7 @@
   outputs = { self, nixpkgs }:
     let
       systems = [ "x86_64-linux" "aarch64-darwin" ];
+      lanes = builtins.fromJSON (builtins.readFile ./nix/ci-lanes.json);
       forAllSystems = nixpkgs.lib.genAttrs systems;
       context = system:
         let
@@ -24,14 +25,65 @@
       devShells = forAllSystems (system:
         let
           inherit (context system) pkgs toolchains;
+          inherit (pkgs) lib;
           languages = builtins.removeAttrs toolchains.tools
             ([ "common" ] ++ pkgs.lib.optional pkgs.stdenv.isLinux "swift");
-        in builtins.mapAttrs (_: tools: pkgs.mkShell {
+          supported = builtins.filter
+            (lane: lane.language != "swift" || pkgs.stdenv.isDarwin) lanes;
+          laneShell = lane:
+            let
+              envNames = [ "GOTOOLCHAIN" "GOWORK" ]
+                ++ lib.optionals (lane.language == "kotlin") [ "JAVA_HOME" ]
+                ++ lib.optionals (lane.language == "rust") [ "LLVM_COV" "LLVM_PROFDATA" ]
+                ++ lib.optionals (lane.language == "lua") [
+                  "LUA_INCDIR" "LIBSODIUM_INCDIR" "LIBSODIUM_LIBDIR"
+                  "OPENSSL_INCDIR" "OPENSSL_LIBDIR"
+                ]
+                ++ lib.optionals (lane.kind == "browser") [
+                  "NIX_BROWSER_INTERPRETER" "NIX_BROWSER_LIBRARY_PATH"
+                ];
+              environment = builtins.intersectAttrs
+                (lib.genAttrs envNames (_: true)) toolchains.environment;
+            in pkgs.mkShell (environment // {
+              packages = lib.unique (toolchains.tools.common
+                ++ toolchains.tools.typescript ++ toolchains.tools.${lane.language}
+                ++ lib.optionals (lane.kind == "browser") toolchains.tools.browser);
+              CI = "1";
+              UV_PYTHON_DOWNLOADS = "never";
+              SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+              shellHook = ''
+                export PATH="$PWD/.nix-work/bin:$PATH"
+              '';
+            });
+        in (builtins.mapAttrs (_: tools: pkgs.mkShell {
           packages = toolchains.tools.common ++ tools;
           GOTOOLCHAIN = "local";
           GOWORK = "off";
           UV_PYTHON_DOWNLOADS = "never";
-        }) languages);
+        }) languages) // builtins.listToAttrs (map (lane: {
+          name = "ci-${lane.id}";
+          value = laneShell lane;
+        }) supported));
+
+      apps = forAllSystems (system:
+        let
+          inherit (context system) pkgs;
+          supported = builtins.filter
+            (lane: lane.language != "swift" || pkgs.stdenv.isDarwin) lanes;
+        in builtins.listToAttrs (map (lane: {
+          name = lane.id;
+          value = {
+            type = "app";
+            program = "${pkgs.writeShellScriptBin "paykit-${lane.id}" ''
+              set -euo pipefail
+              cd "$(git rev-parse --show-toplevel)"
+              exec nix develop --no-update-lock-file .#ci-${lane.id} \
+                --command bash nix/scripts/run.sh ${lane.kind} ${lane.lane} "$@"
+            ''}/bin/paykit-${lane.id}";
+          };
+        }) supported));
+
+      lib.ciMatrix.include = lanes;
 
       lib.toolVersions = forAllSystems (system:
         let inherit (context system) toolchains;

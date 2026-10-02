@@ -47,6 +47,41 @@ let
   };
   composer = pkgs.php83Packages.composer.override { inherit php; };
   lua = pkgs.luajit;
+  llvm = pkgs.llvmPackages_22.llvm;
+  # Match Nixpkgs' Playwright Chromium and headless-shell runtime dependencies.
+  browserLibraries = lib.optionals pkgs.stdenv.hostPlatform.isLinux (with pkgs; [
+    alsa-lib
+    at-spi2-atk
+    atk
+    cairo
+    cups
+    dbus
+    expat
+    fontconfig
+    freetype
+    glib
+    glibc
+    gobject-introspection
+    libgbm
+    libgcc
+    libGL
+    libdrm
+    libxkbcommon
+    nspr
+    nss
+    pango
+    pciutils
+    stdenv.cc.cc.lib
+    systemd
+    libx11
+    libxcomposite
+    libxdamage
+    libxext
+    libxfixes
+    libxrandr
+    libxcb
+    vulkan-loader
+  ]);
 in
 {
   inherit nodejs pnpm go golangciLint rust cargo java gradle python ruby bundler php composer lua;
@@ -57,6 +92,24 @@ in
   sodiumLibraryDir = "${lib.getLib pkgs.libsodium}/lib";
   opensslIncludeDir = "${lib.getDev pkgs.openssl}/include";
   opensslLibraryDir = "${lib.getLib pkgs.openssl}/lib";
+
+  environment = {
+    GOTOOLCHAIN = "local";
+    GOWORK = "off";
+    JAVA_HOME = "${java}";
+    LLVM_COV = "${llvm}/bin/llvm-cov";
+    LLVM_PROFDATA = "${llvm}/bin/llvm-profdata";
+    LUA_INCDIR = "${lua}/include/luajit-2.1";
+    LIBSODIUM_INCDIR = "${lib.getDev pkgs.libsodium}/include";
+    LIBSODIUM_LIBDIR = "${lib.getLib pkgs.libsodium}/lib";
+    OPENSSL_INCDIR = "${lib.getDev pkgs.openssl}/include";
+    OPENSSL_LIBDIR = "${lib.getLib pkgs.openssl}/lib";
+  } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+    # The experimental Linux target is x86_64. Patch only its private Playwright
+    # downloads, rather than making host executables load Nix libraries globally.
+    NIX_BROWSER_INTERPRETER = "${lib.getLib pkgs.glibc}/lib/ld-linux-x86-64.so.2";
+    NIX_BROWSER_LIBRARY_PATH = lib.makeLibraryPath browserLibraries;
+  };
 
   tools = {
     common = with pkgs; [
@@ -80,15 +133,18 @@ in
       python
     ];
     typescript = [ nodejs pnpm ];
+    # Nixpkgs uses this newer ELF rewriter for Chromium's headless shell too.
+    browser = lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.patchelfUnstable ];
     rust = with pkgs; [
       rust
       cargo
       rustfmt
       clippy
       cargo-llvm-cov
-      llvmPackages.llvm
+      llvm
       openssl
       protobuf
+      redis
     ];
     go = [ go golangciLint ];
     python = [ python pkgs.uv ];

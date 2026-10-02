@@ -40,3 +40,8 @@ rust/target/doc-json/
 *.xcuserstate
 *.xcuserstate
 coverage.out
+
+# Local outputs of the optional Nix CI experiment.
+.nix-work/
+.nix-results/
+.nix-artifacts/

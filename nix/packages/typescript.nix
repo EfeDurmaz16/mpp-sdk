@@ -67,6 +67,14 @@ let
   nativeLibraries = lib.optionals pkgs.stdenv.hostPlatform.isLinux [
     pkgs.stdenv.cc.cc.lib
   ];
+  # utf-8-validate ships GNU and musl prebuilds in one package. Its loader
+  # selects GNU on this target, but autoPatchelf scans both variants.
+  pruneNonHostPrebuilds = directory:
+    lib.optionalString (pkgs.stdenv.hostPlatform.libc == "glibc") ''
+      find ${lib.escapeShellArg directory} -type f \
+        -path '*/utf-8-validate/prebuilds/linux-*/utf-8-validate.musl.node' \
+        -print -delete
+    '';
 
   htmlAssets = pkgs.buildNpmPackage {
     pname = "pay-kit-html-assets";
@@ -101,6 +109,7 @@ let
       runHook preBuild
       cp ${htmlAssets}/typescript/packages/mpp/src/server/html-assets.gen.ts \
         packages/mpp/src/server/html-assets.gen.ts
+      ${pruneNonHostPrebuilds "node_modules"}
       ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux "autoPatchelf node_modules"}
       pnpm --filter @solana/mpp build
       pnpm --filter @solana/pay-kit build
@@ -133,6 +142,7 @@ let
     dontBuild = true;
     installPhase = ''
       runHook preInstall
+      ${pruneNonHostPrebuilds "harness/node_modules"}
       mkdir -p "$out/harness"
       cp -a harness/node_modules "$out/harness/"
       runHook postInstall

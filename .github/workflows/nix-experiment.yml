@@ -1,0 +1,306 @@
+name: Nix experiment
+
+# Fork-only experiment. The existing PR workflows are the native comparison.
+on:
+  push:
+    branches: [experiment/nix-ci]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-experiment-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    if: github.repository == 'EfeDurmaz16/mpp-sdk'
+    runs-on: ubuntu-24.04
+    outputs:
+      units: ${{ steps.matrix.outputs.units }}
+      interop: ${{ steps.matrix.outputs.interop }}
+      browsers: ${{ steps.matrix.outputs.browsers }}
+      demos: ${{ steps.matrix.outputs.demos }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - run: nix flake check --no-build --all-systems --no-update-lock-file
+      - id: matrix
+        run: |
+          python3 - <<'PY'
+          import json, os
+          lanes = json.load(open('nix/ci-lanes.json'))
+          assert len(lanes) == len({lane['id'] for lane in lanes}) == 27
+          groups = {
+              'units': [x for x in lanes if x['kind'] == 'unit'],
+              'interop': [x for x in lanes if x['kind'] == 'interop' and x['lane'] != 'swift'],
+              'browsers': [x for x in lanes if x['kind'] == 'browser'],
+              'demos': [x for x in lanes if x['kind'] == 'demo'],
+          }
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              for name, values in groups.items():
+                  out.write(f'{name}={json.dumps({"include": values})}\n')
+          PY
+
+  units:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.units) }}
+    name: Nix / ${{ matrix.id }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - name: Run the SDK gates
+        env:
+          TARGET: ${{ matrix.id }}
+        run: nix run --no-update-lock-file ".#$TARGET"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-${{ matrix.id }}
+          path: .nix-results/
+          include-hidden-files: true
+
+  shared-linux:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      manifest: ${{ steps.export.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - name: Build shared Linux outputs and repeat with a warm store
+        run: bash nix/scripts/build-shared.sh linux
+      - name: Export the verified outputs
+        id: export
+        run: |
+          mapfile -t roots < .nix-results/shared-roots.txt
+          bash nix/scripts/store-artifact.sh export .nix-artifacts/shared "${roots[@]}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: upload
+        with:
+          name: nix-shared-linux
+          path: .nix-artifacts/shared/
+          compression-level: 0
+          include-hidden-files: true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-shared-linux
+          path: .nix-results/
+          include-hidden-files: true
+
+  shared-darwin:
+    needs: plan
+    runs-on: macos-15
+    timeout-minutes: 60
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      manifest: ${{ steps.export.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - name: Build shared Darwin outputs and repeat with a warm store
+        run: bash nix/scripts/build-shared.sh darwin
+      - name: Export the verified outputs
+        id: export
+        run: |
+          roots=()
+          while IFS= read -r root; do roots+=("$root"); done < .nix-results/shared-roots.txt
+          bash nix/scripts/store-artifact.sh export .nix-artifacts/shared "${roots[@]}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: upload
+        with:
+          name: nix-shared-darwin
+          path: .nix-artifacts/shared/
+          compression-level: 0
+          include-hidden-files: true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-shared-darwin
+          path: .nix-results/
+          include-hidden-files: true
+
+  sbf:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - name: Build the program once for every language
+        id: build
+        run: |
+          output=$(nix build --no-update-lock-file --no-link --print-out-paths .#payment-channels)
+          mkdir -p .nix-artifacts/sbf
+          cp "$output/lib/payment_channels.so" .nix-artifacts/sbf/
+          cp "$output/nix-support/"* .nix-artifacts/sbf/
+          hash=$(sha256sum .nix-artifacts/sbf/payment_channels.so | cut -d ' ' -f 1)
+          echo "sha256=$hash" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: upload
+        with:
+          name: nix-payment-channels
+          path: .nix-artifacts/sbf/
+          include-hidden-files: true
+
+  interop:
+    needs: [plan, shared-linux, sbf]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.interop) }}
+    name: Nix / ${{ matrix.id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.shared-linux.outputs.artifact }}
+          path: .nix-artifacts/shared
+          merge-multiple: true
+      - name: Import shared native outputs
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.shared-linux.outputs.manifest }}
+        run: bash nix/scripts/store-artifact.sh import .nix-artifacts/shared
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.sbf.outputs.artifact }}
+          path: .nix-artifacts/sbf
+          merge-multiple: true
+      - name: Verify the program and run interop
+        env:
+          EXPECTED_SBF_SHA256: ${{ needs.sbf.outputs.sha256 }}
+          TARGET: ${{ matrix.id }}
+        run: |
+          bash nix/scripts/verify-sbf.sh
+          export PAYMENT_CHANNELS_PROGRAM_SO="$PWD/.nix-artifacts/sbf/payment_channels.so"
+          nix run --no-update-lock-file ".#$TARGET"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-${{ matrix.id }}
+          path: .nix-results/
+          include-hidden-files: true
+
+  interop-swift:
+    needs: [shared-darwin, sbf]
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.shared-darwin.outputs.artifact }}
+          path: .nix-artifacts/shared
+          merge-multiple: true
+      - name: Import shared native outputs
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.shared-darwin.outputs.manifest }}
+        run: bash nix/scripts/store-artifact.sh import .nix-artifacts/shared
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.sbf.outputs.artifact }}
+          path: .nix-artifacts/sbf
+          merge-multiple: true
+      - name: Verify the program and run Swift interop
+        env:
+          EXPECTED_SBF_SHA256: ${{ needs.sbf.outputs.sha256 }}
+        run: |
+          bash nix/scripts/verify-sbf.sh
+          export PAYMENT_CHANNELS_PROGRAM_SO="$PWD/.nix-artifacts/sbf/payment_channels.so"
+          nix run --no-update-lock-file .#interop-swift
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-interop-swift
+          path: .nix-results/
+          include-hidden-files: true
+
+  browsers:
+    needs: [plan, shared-linux]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.browsers) }}
+    name: Nix / ${{ matrix.id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.shared-linux.outputs.artifact }}
+          path: .nix-artifacts/shared
+          merge-multiple: true
+      - name: Import shared native outputs
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.shared-linux.outputs.manifest }}
+        run: bash nix/scripts/store-artifact.sh import .nix-artifacts/shared
+      - name: Run browser checks
+        env:
+          TARGET: ${{ matrix.id }}
+        run: nix run --no-update-lock-file ".#$TARGET"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-${{ matrix.id }}
+          path: .nix-results/
+          include-hidden-files: true
+
+  demos:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.demos) }}
+    name: Nix / ${{ matrix.id }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      # Platform SDK provisioning remains an explicit host dependency.
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        if: matrix.lane == 'android-demo'
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+      - name: Run the platform build
+        env:
+          TARGET: ${{ matrix.id }}
+        run: nix run --no-update-lock-file ".#$TARGET"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-${{ matrix.id }}
+          path: .nix-results/
+          include-hidden-files: true
