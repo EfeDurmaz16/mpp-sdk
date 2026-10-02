@@ -20,16 +20,18 @@ let
     name = "paykit-rust-source";
     filter = path: type:
       let relative = lib.removePrefix "${rustRoot}/" (toString path);
-      in lib.cleanSourceFilter path type && (
-        type == "directory" && !(builtins.elem (baseNameOf path) [ "target" ])
+      in lib.cleanSourceFilter path type
+        && !(type == "directory" && baseNameOf path == "target") && (
+        type == "directory"
         || baseNameOf path == "Cargo.toml"
+        || baseNameOf path == "build.rs"
         || lib.hasPrefix ".cargo/" relative
         || relative == "README.md"
-        || relative == "crates/integration-tests/src/lib.rs"
-        || lib.hasSuffix ".rs" relative && builtins.any
-          (prefix: lib.hasPrefix prefix relative) [
-            "crates/kit/src/" "crates/kit/examples/" "crates/harness-bins/src/"
-          ]
+        # Cargo validates declared targets even for a binary-only build. Keep
+        # each workspace crate intact, including tests, benches, examples,
+        # build scripts and their non-Rust inputs. Crane's dummy source still
+        # isolates dependency compilation from these real source contents.
+        || lib.hasPrefix "crates/" relative
       );
   };
   cargoVendorDir = craneLib.vendorCargoDeps {
