@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/solana-foundation/pay-kit/go/paycore/signer"
@@ -33,6 +34,18 @@ func (s transactionOnlySigner) SignTransaction(ctx context.Context, tx *solana.T
 	return s.backend.SignTransaction(ctx, tx)
 }
 
+// Deliberately exposes only the original message-signing interface.
+type messageOnlySigner struct {
+	address paykit.Address
+	sign    func(context.Context, []byte) ([]byte, error)
+}
+
+func (s messageOnlySigner) Pubkey() paykit.Address { return s.address }
+func (s messageOnlySigner) IsDemo() bool           { return false }
+func (s messageOnlySigner) Sign(ctx context.Context, message []byte) ([]byte, error) {
+	return s.sign(ctx, message)
+}
+
 func TestKeychainTransactionCapabilityPreservesPartialSignature(t *testing.T) {
 	for _, version := range []struct {
 		name    string
@@ -43,12 +56,16 @@ func TestKeychainTransactionCapabilityPreservesPartialSignature(t *testing.T) {
 		{"v1", solana.MessageVersionV1},
 	} {
 		t.Run(version.name, func(t *testing.T) {
-			testKeychainTransactionCapability(t, version.version)
+			for _, path := range []string{"transaction", "message fallback"} {
+				t.Run(path, func(t *testing.T) {
+					testKeychainTransactionCapability(t, version.version, path == "message fallback")
+				})
+			}
 		})
 	}
 }
 
-func testKeychainTransactionCapability(t *testing.T, version solana.MessageVersion) {
+func testKeychainTransactionCapability(t *testing.T, version solana.MessageVersion, fallback bool) {
 	t.Helper()
 	payer, err := memory.New(memory.Config{PrivateKey: make([]byte, 32)})
 	if err != nil {
@@ -80,7 +97,15 @@ func testKeychainTransactionCapability(t *testing.T, version solana.MessageVersi
 	payerSignature := tx.Signatures[1]
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s := transactionOnlySigner{Signer: signer.FromKeychain(operator), backend: operator, ctx: ctx}
+	var s paykit.Signer = transactionOnlySigner{Signer: signer.FromKeychain(operator), backend: operator, ctx: ctx}
+	if fallback {
+		s = messageOnlySigner{address: paykit.Address(operator.Pubkey().String()), sign: func(got context.Context, message []byte) ([]byte, error) {
+			if got != ctx {
+				return nil, errors.New("message signing context lost")
+			}
+			return signer.FromKeychain(operator).Sign(got, message)
+		}}
+	}
 	result, err := paykit.SignTransaction(ctx, tx, s)
 	if err != nil {
 		t.Fatal(err)
@@ -129,5 +154,46 @@ func testKeychainTransactionCapability(t *testing.T, version solana.MessageVersi
 		if ed25519.Verify(payerKey[:], tampered, payerSignature[:]) {
 			t.Fatal("payer signature accepted a changed v1 priority fee")
 		}
+	}
+}
+
+func TestKeychainMessageFallbackErrors(t *testing.T) {
+	backendErr := errors.New("backend denied signing")
+	key := signer.Generate()
+	publicKey := solana.MustPublicKeyFromBase58(string(key.Pubkey()))
+	for _, tc := range []struct {
+		name      string
+		address   paykit.Address
+		signature []byte
+		signErr   error
+		want      string
+		calls     int
+	}{
+		{"invalid public key", "not-base58!", nil, nil, "signer pubkey", 0},
+		{"backend error", key.Pubkey(), nil, backendErr, "backend denied signing", 1},
+		{"canceled signing", key.Pubkey(), nil, context.Canceled, "context canceled", 1},
+		{"short signature", key.Pubkey(), make([]byte, 63), nil, "signature length 63", 1},
+		{"long signature", key.Pubkey(), make([]byte, 65), nil, "signature length 65", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, err := solana.NewTransaction(
+				[]solana.Instruction{system.NewTransferInstruction(1, publicKey, solana.NewWallet().PublicKey()).Build()},
+				solana.Hash{}, solana.TransactionPayer(publicKey))
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			s := messageOnlySigner{address: tc.address, sign: func(context.Context, []byte) ([]byte, error) {
+				calls++
+				return tc.signature, tc.signErr
+			}}
+			result, err := paykit.SignTransaction(context.Background(), tx, s)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || calls != tc.calls || result.EncodedTransaction != "" {
+				t.Fatalf("calls=%d err=%v encoded=%t; want calls=%d error=%q and no transaction", calls, err, result.EncodedTransaction != "", tc.calls, tc.want)
+			}
+			if tc.signErr != nil && !errors.Is(err, tc.signErr) {
+				t.Fatalf("backend error identity lost: %v", err)
+			}
+		})
 	}
 }
