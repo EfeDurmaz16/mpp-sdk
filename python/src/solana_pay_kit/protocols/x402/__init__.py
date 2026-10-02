@@ -28,6 +28,7 @@ from solana_pay_kit._paycore.network_check import check_network_blockhash
 from solana_pay_kit._paycore.protocol import Protocol
 from solana_pay_kit._paycore.rpc import SolanaRpc
 from solana_pay_kit._paycore.store import MemoryStore, Store
+from solana_pay_kit._paycore.transaction import decode_supported_transaction
 from solana_pay_kit.errors import ConfigurationError, InvalidProofError
 from solana_pay_kit.payment import Payment
 from solana_pay_kit.protocols.x402.exact.legacy import (
@@ -48,8 +49,11 @@ from solana_pay_kit.protocols.x402.exact.verify import (
     X402_VERSION_V2,
     ExactVerifier,
 )
+from solana_pay_kit.signer import sign_transaction
 
 if TYPE_CHECKING:
+    from solders.transaction import VersionedTransaction
+
     from solana_pay_kit.config import Config
     from solana_pay_kit.gate import Gate
 
@@ -223,7 +227,7 @@ class X402Adapter:
                 check_network_blockhash(self._config.network.mints_label(), blockhash)
 
         # Cosign as the facilitator fee payer (slot-splice, version aware).
-        cosigned_wire = _co_sign(tx_base64, signer)
+        cosigned_wire = await _co_sign_async(tx_base64, signer)
         signature = _transaction_signature(cosigned_wire)
         replay_key = _REPLAY_PREFIX + signature
         binding = hashlib.sha256(cosigned_wire).hexdigest()
@@ -419,31 +423,37 @@ class X402Adapter:
         return self._config.network.caip2()
 
 
-def _co_sign(transaction_b64: str, signer: Any) -> bytes:
+def _co_sign(transaction_b64: str, signer: Any) -> bytes:  # pyright: ignore[reportUnusedFunction]
     """Splice the facilitator signature into the fee-payer slot, return wire.
 
     The signature covers ``to_bytes_versioned(msg)``: the 0x80 prefix plus
     the v0 body, or the bare legacy message. ``VersionedTransaction.from_bytes``
     dispatches on the prefix, so a pre-cutover client's legacy wire is
-    co-signed like a v0 one. The fee payer must occupy a signature slot.
+    co-signed like a v0 one. Retained for synchronous callers; the fee payer
+    must occupy slot zero.
     """
     from solders.message import to_bytes_versioned
-    from solders.pubkey import Pubkey
-    from solders.transaction import VersionedTransaction
-
     raw = base64.b64decode(transaction_b64)
-    fee_payer_pubkey = Pubkey.from_string(signer.pubkey())
+    vtx = _decode_fee_payer_transaction(raw, signer)
+    sig_bytes = bytes(signer.sign(bytes(to_bytes_versioned(vtx.message))))
+    serialized = bytearray(raw)
+    serialized[1:65] = sig_bytes
+    return bytes(serialized)
+
+
+def _decode_fee_payer_transaction(raw: bytes, signer: Any) -> VersionedTransaction:
+    """Check the format and canonical fee-payer role before calling a signer."""
+    from solders.pubkey import Pubkey
 
     try:
-        vtx = VersionedTransaction.from_bytes(raw)
+        vtx = decode_supported_transaction(raw)
     except Exception as exc:  # noqa: BLE001
         raise _transaction_parse_error("invalid_exact_svm_payload_transaction_parse") from exc
     account_keys = list(vtx.message.account_keys)
-    message_bytes = bytes(to_bytes_versioned(vtx.message))
     num_required = int(vtx.message.header.num_required_signatures)
 
     try:
-        idx = account_keys.index(fee_payer_pubkey)
+        idx = account_keys.index(Pubkey.from_string(signer.pubkey()))
     except ValueError as exc:
         raise InvalidProofError(
             "solana_pay_kit: fee payer pubkey not present in transaction accounts",
@@ -451,12 +461,21 @@ def _co_sign(transaction_b64: str, signer: Any) -> bytes:
         ) from exc
     if idx >= num_required:
         raise InvalidProofError("solana_pay_kit: fee payer is not a required signer", code="payment_invalid")
+    if idx != 0:
+        raise InvalidProofError("solana_pay_kit: fee payer must occupy slot 0", code="payment_invalid")
+    return vtx
 
-    sig_bytes = bytes(signer.sign(message_bytes))
-    serialized = bytearray(raw)
-    sig_start = 1 + idx * 64
-    serialized[sig_start : sig_start + 64] = sig_bytes
-    return bytes(serialized)
+
+async def _co_sign_async(transaction_b64: str, signer: Any) -> bytes:
+    """Co-sign a policy-checked transaction through the async signer adapter."""
+    vtx = _decode_fee_payer_transaction(base64.b64decode(transaction_b64), signer)
+    try:
+        signed = await sign_transaction(signer, vtx)
+    except ValueError:
+        raise InvalidProofError(
+            "solana_pay_kit: invalid transaction for fee payer signing", code="payment_invalid"
+        ) from None
+    return bytes(signed.transaction)
 
 
 def _transaction_parse_error(message: str) -> InvalidProofError:
@@ -466,10 +485,8 @@ def _transaction_parse_error(message: str) -> InvalidProofError:
 
 def _transaction_signature(transaction_wire: bytes) -> str:
     """Return the deterministic first signature from a signed wire transaction."""
-    from solders.transaction import VersionedTransaction
-
     try:
-        signatures = VersionedTransaction.from_bytes(transaction_wire).signatures
+        signatures = decode_supported_transaction(transaction_wire).signatures
     except Exception as exc:  # noqa: BLE001
         raise _transaction_parse_error("invalid_exact_svm_payload_transaction_parse") from exc
     if not signatures:
@@ -528,11 +545,9 @@ async def _recover_replay_record(
 
 def _recent_blockhash_of(transaction_b64: str) -> str | None:
     """Best-effort extract of the recent blockhash for the network check."""
-    from solders.transaction import VersionedTransaction
-
     try:
         raw = base64.b64decode(transaction_b64)
-        tx = VersionedTransaction.from_bytes(raw)
+        tx = decode_supported_transaction(raw)
         return str(tx.message.recent_blockhash)
     except Exception:  # noqa: BLE001 - the verifier already validated shape
         return None

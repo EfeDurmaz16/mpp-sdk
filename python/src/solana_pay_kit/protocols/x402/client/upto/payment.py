@@ -28,7 +28,10 @@ from solana_pay_kit._paycore.paymentchannels import (
     find_channel_pda,
 )
 from solana_pay_kit._paycore.solana import MEMO_PROGRAM, TOKEN_PROGRAM
-from solana_pay_kit._paycore.transaction import build_partially_signed_v0_transaction
+from solana_pay_kit._paycore.transaction import (
+    build_partially_signed_v0_transaction,
+    build_partially_signed_v0_transaction_async,
+)
 from solana_pay_kit.protocols.x402.exact.verify import X402_VERSION
 from solana_pay_kit.protocols.x402.upto.types import (
     UPTO_SCHEME,
@@ -42,8 +45,10 @@ if TYPE_CHECKING:
 __all__ = [
     "parse_upto_challenge",
     "build_upto_payload",
+    "build_upto_payload_async",
     "encode_upto_header",
     "build_upto_header",
+    "build_upto_header_async",
 ]
 
 _U64_MAX = (1 << 64) - 1
@@ -121,6 +126,30 @@ def build_upto_payload(
     only. The open transaction is signed only in the client's payer slot
     (pull-style); the fee-payer slot is completed server-side.
     """
+    payload, instructions, fee_payer, payer, blockhash = _prepare_upto_payload(signer, requirements, expires_at)
+    payload["openTransaction"] = _build_payer_signed_open(instructions, fee_payer, payer, blockhash, signer)
+    return payload
+
+
+async def build_upto_payload_async(
+    signer: LocalSigner,
+    requirements: UptoRequirements,
+    expires_at: int,
+    nonce: str | None = None,
+) -> UptoPayload:
+    """Build the channel-open payload using the async transaction signer."""
+    payload, instructions, fee_payer, payer, blockhash = _prepare_upto_payload(signer, requirements, expires_at)
+    wire = await build_partially_signed_v0_transaction_async(instructions, fee_payer, blockhash, payer, signer)
+    payload["openTransaction"] = base64.b64encode(wire).decode("ascii")
+    return payload
+
+
+def _prepare_upto_payload(
+    signer: LocalSigner,
+    requirements: UptoRequirements,
+    expires_at: int,
+) -> tuple[UptoPayload, list[Instruction], Pubkey, Pubkey, Hash]:
+    """Validate the offer and build the same unsigned inputs for both APIs."""
     extra = requirements["extra"]
     max_amount = int(requirements["amount"], 10)
     beneficiary = Pubkey.from_string(requirements["payTo"])
@@ -181,8 +210,6 @@ def build_upto_payload(
         if len(memo_data) > _OPEN_MAX_MEMO_BYTES:
             raise ValueError(f"x402 client: extra.memo exceeds {_OPEN_MAX_MEMO_BYTES} bytes")
         instructions.append(Instruction(Pubkey.from_string(MEMO_PROGRAM), memo_data, []))
-    open_tx = _build_payer_signed_open(instructions, fee_payer, payer, blockhash, signer)
-
     valid_after = int(extra.get("validAfter", 0))
     payload: UptoPayload = {
         "from": signer.pubkey(),
@@ -194,9 +221,8 @@ def build_upto_payload(
         "deposit": str(max_amount),
         "authorizedSigner": receiver_authorizer_str,
         "openSlot": str(open_slot),
-        "openTransaction": open_tx,
     }
-    return payload
+    return payload, instructions, fee_payer, payer, blockhash
 
 
 def encode_upto_header(requirements: UptoRequirements, payload: UptoPayload) -> str:
@@ -218,6 +244,17 @@ def build_upto_header(
 ) -> str:
     """Build the full ``PAYMENT-SIGNATURE`` header value for an ``upto`` retry."""
     payload = build_upto_payload(signer, requirements, expires_at, nonce)
+    return encode_upto_header(requirements, payload)
+
+
+async def build_upto_header_async(
+    signer: LocalSigner,
+    requirements: UptoRequirements,
+    expires_at: int,
+    nonce: str | None = None,
+) -> str:
+    """Build the header using the async transaction signer."""
+    payload = await build_upto_payload_async(signer, requirements, expires_at, nonce)
     return encode_upto_header(requirements, payload)
 
 

@@ -33,7 +33,7 @@ from solana_pay_kit._paycore.solana import (
     default_token_program_for_currency,
     is_native_sol,
 )
-from solana_pay_kit._paycore.transaction import build_partially_signed_v0_transaction
+from solana_pay_kit._paycore.transaction import build_partially_signed_v0_transaction_async
 from solana_pay_kit.protocols.x402.exact.extensions import (
     echo_extensions,
     extensions_is_empty,
@@ -564,7 +564,9 @@ async def build_payment(
         blockhash_str = await _resolve_blockhash(rpc, recent_blockhash_provider)
     blockhash = Hash.from_string(blockhash_str)
 
-    tx_bytes = build_partially_signed_v0_transaction(instructions, fee_payer_key, blockhash, signer_pubkey, signer.sign)
+    tx_bytes = await build_partially_signed_v0_transaction_async(
+        instructions, fee_payer_key, blockhash, signer_pubkey, signer
+    )
 
     # Derive the envelope-level resource BEFORE building the echoed ``accepted``
     # body, then strip the private resource-info key so the echo carries only

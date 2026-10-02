@@ -52,7 +52,10 @@ from solana_pay_kit._paycore.paymentchannels import (
     voucher_message_bytes,
 )
 from solana_pay_kit._paycore.rpc import SolanaRpc
-from solana_pay_kit._paycore.transaction import build_partially_signed_v0_transaction
+from solana_pay_kit._paycore.transaction import (
+    build_partially_signed_v0_transaction_async,
+    decode_supported_transaction,
+)
 from solana_pay_kit.errors import ConfigurationError, InvalidProofError
 from solana_pay_kit.protocols.programs.paymentchannels.accounts.channel import Channel
 from solana_pay_kit.protocols.x402.exact.verify import X402_VERSION
@@ -69,8 +72,11 @@ from solana_pay_kit.protocols.x402.upto.verify import (
     validate_upto_open_instruction,
     verify_upto_payload,
 )
+from solana_pay_kit.signer import sign_transaction
 
 if TYPE_CHECKING:
+    from solders.transaction import VersionedTransaction
+
     from solana_pay_kit.config import Config
     from solana_pay_kit.gate import Gate
     from solana_pay_kit.signer import LocalSigner
@@ -330,7 +336,7 @@ class X402Upto:
                     "open transaction fee payer must be the advertised fee payer", code="payment_invalid"
                 )
 
-            cosigned = _cosign_fee_payer(open_tx, signer)
+            cosigned = await _cosign_fee_payer_async(open_tx, signer)
             sent = await rpc.send_raw_transaction(cosigned)
             await rpc.await_confirmation(str(sent.value))
 
@@ -448,7 +454,9 @@ class X402Upto:
             rpc = SolanaRpc(self._config.effective_rpc_url())
             try:
                 blockhash = Hash.from_string((await rpc.get_latest_blockhash()).value.blockhash)
-                wire = build_partially_signed_v0_transaction(instructions, fee_payer, blockhash, fee_payer, signer.sign)
+                wire = await build_partially_signed_v0_transaction_async(
+                    instructions, fee_payer, blockhash, fee_payer, signer
+                )
                 sent = await rpc.send_raw_transaction(wire)
                 signature = str(sent.value)
                 await rpc.await_confirmation(signature)
@@ -623,11 +631,9 @@ def _distribution_hash(distribution: list[Distribution]) -> bytes:
 
 def _decode_transaction(transaction_b64: str) -> tuple[list[str], list[Any]]:
     """Decode a base64 (legacy or v0) transaction into ``(account_keys, instructions)``."""
-    from solders.transaction import VersionedTransaction
-
     try:
         raw = base64.b64decode(transaction_b64, validate=True)
-        message = VersionedTransaction.from_bytes(raw).message
+        message = decode_supported_transaction(raw).message
     except InvalidProofError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -636,33 +642,53 @@ def _decode_transaction(transaction_b64: str) -> tuple[list[str], list[Any]]:
     return account_keys, list(message.instructions)
 
 
-def _cosign_fee_payer(transaction_b64: str, signer: LocalSigner) -> bytes:
+def _cosign_fee_payer(  # pyright: ignore[reportUnusedFunction]
+    transaction_b64: str, signer: LocalSigner
+) -> bytes:
     """Splice the fee-payer signature into the client-built open tx.
 
     The client built the open with the advertised fee payer (slot 0) and signed
     only its own (payer) slot; the server completes the fee-payer signature and
-    the result is broadcastable. Mirrors the exact-scheme cosign.
+    the result is broadcastable. Retained for synchronous callers.
     """
     from solders.message import to_bytes_versioned
-    from solders.transaction import VersionedTransaction
-
     raw = base64.b64decode(transaction_b64)
-    fee_payer = Pubkey.from_string(signer.pubkey())
-    vtx = VersionedTransaction.from_bytes(raw)
+    vtx = _decode_fee_payer_transaction(raw, signer)
+    sig = bytes(signer.sign(bytes(to_bytes_versioned(vtx.message))))
+    serialized = bytearray(raw)
+    serialized[1:65] = sig
+    return bytes(serialized)
+
+
+def _decode_fee_payer_transaction(raw: bytes, signer: LocalSigner) -> VersionedTransaction:
+    """Refuse unsupported formats and non-fee-payer roles before signing."""
+    try:
+        vtx = decode_supported_transaction(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise InvalidProofError(f"invalid transaction: {exc}", code="payment_invalid") from exc
     account_keys = list(vtx.message.account_keys)
-    message_bytes = bytes(to_bytes_versioned(vtx.message))
     num_required = int(vtx.message.header.num_required_signatures)
     try:
-        idx = account_keys.index(fee_payer)
+        idx = account_keys.index(Pubkey.from_string(signer.pubkey()))
     except ValueError as exc:
         raise InvalidProofError("fee payer pubkey not present in transaction accounts", code="payment_invalid") from exc
     if idx >= num_required:
         raise InvalidProofError("fee payer is not a required signer", code="payment_invalid")
-    sig = bytes(signer.sign(message_bytes))
-    serialized = bytearray(raw)
-    start = 1 + idx * 64
-    serialized[start : start + 64] = sig
-    return bytes(serialized)
+    if idx != 0:
+        raise InvalidProofError("fee payer must occupy slot 0", code="payment_invalid")
+    return vtx
+
+
+async def _cosign_fee_payer_async(transaction_b64: str, signer: LocalSigner) -> bytes:
+    """Co-sign a validated channel open through the async signer adapter."""
+    vtx = _decode_fee_payer_transaction(base64.b64decode(transaction_b64), signer)
+    try:
+        signed = await sign_transaction(signer, vtx)
+    except ValueError:
+        raise InvalidProofError(
+            "solana_pay_kit: invalid transaction for fee payer signing", code="payment_invalid"
+        ) from None
+    return bytes(signed.transaction)
 
 
 def _request_path(request: Any) -> str:

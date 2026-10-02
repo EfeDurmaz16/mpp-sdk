@@ -14,6 +14,7 @@ import struct
 from typing import Any, cast
 
 from solana_pay_kit._paycore.mints import derive_ata
+from solana_pay_kit._paycore.transaction import decode_supported_transaction
 from solana_pay_kit.errors import InvalidProofError
 
 __all__ = [
@@ -91,8 +92,6 @@ class ExactVerifier:
         facilitator fee payer) that must never be the transfer authority.
         Returns a dict describing the matched transfer on success.
         """
-        from solders.transaction import VersionedTransaction
-
         try:
             raw = base64.b64decode(transaction_base64, validate=True)
         except Exception as exc:  # noqa: BLE001 - any decode failure is a reject
@@ -109,7 +108,7 @@ class ExactVerifier:
         # ``from_bytes`` dispatches on the message-version prefix: legacy and
         # v0 wires both decode and are held to the same static layout.
         try:
-            tx = VersionedTransaction.from_bytes(raw)
+            tx = decode_supported_transaction(raw)
         except Exception as exc:  # noqa: BLE001
             raise InvalidProofError(
                 "invalid_exact_svm_payload_transaction_parse",

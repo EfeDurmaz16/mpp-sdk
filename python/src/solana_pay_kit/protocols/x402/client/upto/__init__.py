@@ -8,14 +8,18 @@ from __future__ import annotations
 
 from solana_pay_kit.protocols.x402.client.upto.payment import (
     build_upto_header,
+    build_upto_header_async,
     build_upto_payload,
+    build_upto_payload_async,
     encode_upto_header,
     parse_upto_challenge,
 )
 
 __all__ = [
     "build_upto_header",
+    "build_upto_header_async",
     "build_upto_payload",
+    "build_upto_payload_async",
     "encode_upto_header",
     "parse_upto_challenge",
 ]
