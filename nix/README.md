@@ -97,6 +97,9 @@ Linux-built artifact in `PAYMENT_CHANNELS_PROGRAM_SO`.
 
 Manual workflow inputs are `cache_mode` (`packed`, `tar`, or `none`), `profile`
 for file-count detail, and `diagnose_rust` for a separate compiler diagnostic.
+`diagnostic_only=true` runs that comparison through the registered experiment
+workflow while skipping the regular SDK gates. Dispatch only after an active
+experiment finishes because both use the branch concurrency group.
 Push runs use `packed`. Changing mode does not change test selections.
 
 The optional `nix-rust-diagnostic.yml` workflow compares native and Nix-provided
