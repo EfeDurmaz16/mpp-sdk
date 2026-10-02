@@ -5,10 +5,13 @@ inputs:
     description: Restore before building, or save after the shared build succeeds.
     required: true
   scope:
-    description: shared-linux or interop-swift.
+    description: Current experimental producer scope from nix/scripts/outputs.py.
+    required: true
+  expected-file:
+    description: Current evaluated system, runner, output roots and derivations JSON.
     required: true
   runner-label:
-    description: The explicit GitHub runner image label, required when restoring.
+    description: Optional compatibility check against the expected output runner image.
     default: ''
   primary-key:
     description: The original restore step's primary-key, required when saving.
@@ -21,7 +24,7 @@ outputs:
     description: Whether the action found an exact primary-key match.
     value: ${{ steps.restore.outputs.hit-primary-key }}
   restored-key:
-    description: Exact or fallback cache key restored by the action.
+    description: Exact current v3 cache key restored by the action.
     value: ${{ steps.restore.outputs.restored-key }}
 runs:
   using: composite
@@ -36,7 +39,7 @@ runs:
         CACHE_PRIMARY_KEY: ${{ inputs.primary-key }}
       run: |
         case "$CACHE_MODE" in restore|save) ;; *) exit 2 ;; esac
-        case "$CACHE_SCOPE" in shared-linux|interop-swift) ;; *) exit 2 ;; esac
+        test -n "$CACHE_SCOPE"
         if [[ "$CACHE_MODE" == save && -z "$CACHE_PRIMARY_KEY" ]]; then
           echo 'A save must use the original restore key.' >&2
           exit 2
@@ -47,6 +50,7 @@ runs:
       shell: bash
       env:
         CACHE_SCOPE: ${{ inputs.scope }}
+        CACHE_EXPECTED_FILE: ${{ inputs.expected-file }}
         CACHE_RUNNER_LABEL: ${{ inputs.runner-label }}
       run: bash nix/scripts/cache-roots.sh key "$CACHE_SCOPE" "$CACHE_RUNNER_LABEL"
     - name: Restore selected Nix outputs
@@ -55,12 +59,12 @@ runs:
       uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7
       with:
         primary-key: ${{ steps.key.outputs.primary-key }}
-        restore-prefixes-first-match: ${{ steps.key.outputs.restore-prefixes }}
     - name: Record cache restoration evidence
       if: ${{ !cancelled() && inputs.mode == 'restore' && steps.restore.outcome == 'success' }}
       shell: bash
       env:
         CACHE_SCOPE: ${{ inputs.scope }}
+        CACHE_EXPECTED_FILE: ${{ inputs.expected-file }}
         CACHE_HIT_PRIMARY_KEY: ${{ steps.restore.outputs.hit-primary-key }}
         CACHE_RESTORED_KEY: ${{ steps.restore.outputs.restored-key }}
       run: bash nix/scripts/cache-roots.sh record "$CACHE_SCOPE"
@@ -70,6 +74,8 @@ runs:
       shell: bash
       env:
         CACHE_SCOPE: ${{ inputs.scope }}
+        CACHE_EXPECTED_FILE: ${{ inputs.expected-file }}
+        CACHE_PRIMARY_KEY: ${{ inputs.primary-key }}
       run: bash nix/scripts/cache-roots.sh root "$CACHE_SCOPE"
     - name: Save the selected Nix outputs
       if: ${{ !cancelled() && inputs.mode == 'save' && steps.protect.outcome == 'success' }}

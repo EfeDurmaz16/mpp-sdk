@@ -21,6 +21,7 @@ runs:
         } >> "$GITHUB_OUTPUT"
         {
           # Keep runtime Cargo state outside the immutable Nix build outputs.
+          printf 'CARGO_INCREMENTAL=0\n'
           printf 'CARGO_HOME=%s/.nix-work/cargo-home\n' "$GITHUB_WORKSPACE"
           printf 'CARGO_TARGET_DIR=%s/rust/target\n' "$GITHUB_WORKSPACE"
           # Coverage instrumentation has a separate Cargo fingerprint/build tree.

@@ -19,6 +19,9 @@ nix_setup_language() {
       export UV_PYTHON
       UV_PYTHON="$(command -v python3.11)"
       export UV_PYTHON_DOWNLOADS=never
+      export PIP_CACHE_DIR="${PIP_CACHE_DIR:-$root/.nix-work/cache/pip}"
+      export UV_CACHE_DIR="${UV_CACHE_DIR:-$root/.nix-work/cache/uv}"
+      mkdir -p "$PIP_CACHE_DIR" "$UV_CACHE_DIR"
       export UV_PROJECT_ENVIRONMENT="$root/.nix-work/python-$purpose"
       export VIRTUAL_ENV="$UV_PROJECT_ENVIRONMENT"
       if [[ "$purpose" == unit ]]; then
@@ -35,7 +38,7 @@ nix_setup_language() {
       fi
       ;;
     ruby)
-      export BUNDLE_PATH="$root/.nix-work/bundle"
+      export BUNDLE_PATH="${BUNDLE_PATH:-$root/.nix-work/bundle}"
       ruby --version
       bundle --version
       (cd "$root/ruby" && bundle install)
@@ -57,6 +60,14 @@ nix_setup_language() {
       luarocks --version
       mkdir -p "$root/lua/lua_modules"
       for rock in "${rocks[@]}"; do
+        # Only an exact cache contract permits skipping a rock installation.
+        # The contract includes the Nix compiler/native libraries, rockspecs,
+        # setup script, purpose and a weekly refresh for unpinned rocks.
+        if [[ "${NIX_RUNTIME_CACHE_LUA_HIT:-false}" == true ]] &&
+          luarocks --lua-version=5.1 --tree "$root/lua/lua_modules" show "$rock" >/dev/null 2>&1; then
+          printf 'Reusing compatible Lua rock: %s\n' "$rock"
+          continue
+        fi
         luarocks --lua-version=5.1 --tree "$root/lua/lua_modules" install "$rock" \
           "LUA_INCDIR=$LUA_INCDIR" \
           "SODIUM_INCDIR=$LIBSODIUM_INCDIR" \
@@ -73,6 +84,8 @@ nix_setup_language() {
       fi
       ;;
     php)
+      export COMPOSER_CACHE_DIR="${COMPOSER_CACHE_DIR:-$root/.nix-work/cache/composer}"
+      mkdir -p "$COMPOSER_CACHE_DIR"
       php --version
       composer --version
       if [[ "$purpose" == unit ]]; then
@@ -81,6 +94,9 @@ nix_setup_language() {
       (cd "$root/php" && composer install --no-interaction --no-progress)
       ;;
     kotlin)
+      export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$root/.nix-work/gradle}"
+      # Prevent daemons from surviving the lane and avoid caching test outputs.
+      export GRADLE_OPTS="${GRADLE_OPTS:-} -Dorg.gradle.daemon=false -Dorg.gradle.caching=false"
       java -version
       gradle --version
       ;;

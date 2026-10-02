@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Key and retain only the expensive outputs reused by the two producer jobs.
+# Key and retain only the current evaluated outputs for each producer scope.
 set -euo pipefail
 exec python3 - "$@" <<'PY'
 import hashlib
@@ -11,20 +11,45 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, str(Path("nix/scripts").resolve()))
+from outputs import SCOPES
+
 if len(sys.argv) not in (3, 4):
-    raise SystemExit("Usage: cache-roots.sh <key|record|root> <shared-linux|interop-swift> [runner-label]")
+    raise SystemExit("Usage: cache-roots.sh <key|record|root> <scope> [runner-label]")
 operation, scope = sys.argv[1:3]
-if operation not in ("key", "record", "root") or scope not in ("shared-linux", "interop-swift"):
+if operation not in ("key", "record", "root") or scope not in SCOPES:
     raise SystemExit("Unsupported cache operation or scope")
 system = {("Linux", "x86_64"): "x86_64-linux", ("Darwin", "arm64"): "aarch64-darwin"}.get(
     (platform.system(), platform.machine())
 )
-expected = "x86_64-linux" if scope == "shared-linux" else "aarch64-darwin"
-if system != expected:
-    raise SystemExit(f"{scope} requires {expected}; got {system}")
-
 results = Path(".nix-results")
 results.mkdir(exist_ok=True)
+expected_file = Path(os.environ.get("CACHE_EXPECTED_FILE") or results / f"expected-{scope}.json")
+if results.resolve() not in expected_file.resolve().parents:
+    raise SystemExit("Expected output contract must be inside .nix-results")
+expected = json.loads(expected_file.read_text())
+if expected.get("system") != system or system is None:
+    raise SystemExit(f"Expected output system {expected.get('system')!r} does not match {system!r}")
+runner = expected.get("runner")
+if not isinstance(runner, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", runner):
+    raise SystemExit("Expected output contract requires an explicit runner image label")
+if len(sys.argv) == 4 and sys.argv[3] and sys.argv[3] != runner:
+    raise SystemExit("Runner image differs from the expected output contract")
+store_path = re.compile(r"/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+")
+roots = expected.get("roots")
+derivations = expected.get("derivations")
+if not isinstance(roots, dict) or not isinstance(derivations, dict):
+    raise SystemExit("Expected output contract requires roots and derivations maps")
+if set(roots) != set(SCOPES[scope]) or set(derivations) != set(roots):
+    raise SystemExit(f"Expected output names must exactly match the current {scope} scope")
+if any(not isinstance(path, str) or not store_path.fullmatch(path) or path.endswith(".drv")
+       for path in roots.values()):
+    raise SystemExit("Expected complete Nix output paths")
+if any(not isinstance(path, str) or not store_path.fullmatch(path) or not path.endswith(".drv")
+       for path in derivations.values()):
+    raise SystemExit("Expected complete Nix derivation paths")
+contract = {"system": system, "runner": runner, "roots": roots, "derivations": derivations}
+metadata_file = results / f"cache-{scope}.json"
 
 
 def output(command):
@@ -32,80 +57,59 @@ def output(command):
 
 
 if operation == "key":
-    if len(sys.argv) != 4 or not re.fullmatch(r"[A-Za-z0-9_.-]+", sys.argv[3]):
-        raise SystemExit("A runner image label is required for the cache key")
-    runner = sys.argv[3]
-    targets = ["html-assets", "typescript-sdk", "harness-deps", "rust-harness"]
-    if scope == "shared-linux":
-        targets.extend(["go-client", "go-server"])
-    names = " ".join(json.dumps(target) for target in targets)
-    expression = f"packages: builtins.map (name: packages.${{name}}.drvPath) [ {names} ]"
-    paths = json.loads(output([
-        "nix", "eval", "--json", "--no-update-lock-file", f".#packages.{system}",
-        "--apply", expression,
-    ]))
-    if len(paths) != len(targets):
-        raise SystemExit("Nix returned an incomplete derivation set")
-    derivations = dict(zip(targets, paths))
-    if scope == "interop-swift":
-        # Compatibility input only. Fetch public Swift tools from the Nix cache
-        # instead of retaining their full SDK/compiler closure in our snapshot.
-        derivations["ci-interop-swift"] = output([
-            "nix", "eval", "--raw", "--no-update-lock-file",
-            f".#devShells.{system}.ci-interop-swift.drvPath",
-        ])
     version = re.search(r"\b(\d+\.\d+\.\d+)\b", output(["nix", "--version"]))
     if version is None:
         raise SystemExit("Could not identify the installed Nix version")
     lock_hash = hashlib.sha256(Path("flake.lock").read_bytes()).hexdigest()
-    digest = hashlib.sha256(json.dumps(derivations, sort_keys=True).encode()).hexdigest()
-    schema = 2 if scope == "interop-swift" else 1
-    suffix = f"{scope}-{runner}-{system}-nix{version[1]}-{lock_hash[:16]}-"
-    prefix = f"nix-experiment-v{schema}-{suffix}"
-    restore_prefixes = [prefix]
-    if scope == "interop-swift":
-        # Migrate once from the broad snapshot, then prefer the narrower v2 one.
-        restore_prefixes.append(f"nix-experiment-v1-{suffix}")
-    key = prefix + digest
+    digest = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    # v3 has no legacy or prefix fallback. Both cache implementations consume
+    # the same exact roots, unlike the former hard-coded six/four output lists.
+    key = f"nix-experiment-v3-{scope}-{runner}-{system}-nix{version[1]}-{lock_hash[:16]}-{digest}"
     metadata = {
-        "schema": schema, "scope": scope, "runner": runner, "system": system,
+        "schema": 3, "scope": scope, **contract,
         "nix_version": version[1], "flake_lock_sha256": lock_hash,
-        "derivations": derivations, "primary_key": key, "restore_prefix": prefix,
-        "restore_prefixes": restore_prefixes,
+        "expected_file": str(expected_file), "primary_key": key,
+        "restore_policy": "exact current outputs only; no legacy or prefix fallback",
     }
-    (results / f"cache-{scope}.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
-        handle.write(f"primary-key={key}\nrestore-prefix={prefix}\n")
-        handle.write("restore-prefixes<<NIX_CACHE_PREFIXES\n")
-        handle.write("\n".join(restore_prefixes) + "\nNIX_CACHE_PREFIXES\n")
-    print(f"Cache scope {scope}: {len(derivations)} derivations, key {key}")
-elif operation == "record":
-    metadata_file = results / f"cache-{scope}.json"
-    metadata = json.loads(metadata_file.read_text())
-    restored_key = os.environ.get("CACHE_RESTORED_KEY", "")
-    metadata.update({
-        "hit_primary_key": os.environ.get("CACHE_HIT_PRIMARY_KEY", "") == "true",
-        "restored_key": restored_key,
-        "restored": bool(restored_key),
-    })
     metadata_file.write_text(json.dumps(metadata, indent=2) + "\n")
-    print(f"Cache scope {scope}: restored {restored_key or 'none (miss)'}")
+    with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+        handle.write(f"primary-key={key}\n")
+    print(f"Cache scope {scope}: {len(roots)} evaluated outputs, key {key}")
 else:
-    roots_file = results / "shared-roots.txt"
-    roots = roots_file.read_text().splitlines()
-    expected_count = 6 if scope == "shared-linux" else 4
-    if len(roots) != expected_count or len(set(roots)) != expected_count:
-        raise SystemExit(f"Expected {expected_count} distinct successful shared build outputs")
-    directory = Path(".nix-work/cache-roots") / scope
-    directory.mkdir(parents=True, exist_ok=True)
-    for index, root in enumerate(roots):
-        if not re.fullmatch(r"/nix/store/[0-9a-z]{32}-[^/\s]+", root):
-            raise SystemExit(f"Invalid store output: {root!r}")
-        # Do not fetch or rebuild outputs if the preceding shared build failed.
-        subprocess.run(["nix-store", "--check-validity", root], check=True)
-        subprocess.run([
-            "nix-store", "--realise", root, "--add-root",
-            str((directory / f"shared-{index}").absolute()),
-        ], check=True)
-    print(f"Protected {len(roots)} shared outputs for {scope}")
+    metadata = json.loads(metadata_file.read_text())
+    if metadata.get("schema") != 3 or metadata.get("scope") != scope:
+        raise SystemExit("Current v3 restore metadata is required")
+    if any(metadata.get(name) != value for name, value in contract.items()):
+        raise SystemExit("Expected output contract changed after cache key evaluation")
+    if metadata["flake_lock_sha256"] != hashlib.sha256(Path("flake.lock").read_bytes()).hexdigest():
+        raise SystemExit("The flake lock changed after cache key evaluation")
+    if operation == "record":
+        restored_key = os.environ.get("CACHE_RESTORED_KEY", "")
+        if restored_key and restored_key != metadata["primary_key"]:
+            raise SystemExit("Only the exact current v3 cache key may be restored")
+        metadata.update({
+            "hit_primary_key": os.environ.get("CACHE_HIT_PRIMARY_KEY", "") == "true",
+            "restored_key": restored_key, "restored": bool(restored_key),
+        })
+        metadata_file.write_text(json.dumps(metadata, indent=2) + "\n")
+        print(f"Cache scope {scope}: restored {restored_key or 'none (miss)'}")
+    else:
+        if os.environ.get("CACHE_PRIMARY_KEY") != metadata["primary_key"]:
+            raise SystemExit("A save must use the original exact restore key")
+        # Check every root before registering any of them. Do not fetch or
+        # rebuild missing outputs after a preceding producer build failed.
+        unique_roots = sorted(set(roots.values()))
+        subprocess.run(["nix-store", "--check-validity", *unique_roots], check=True)
+        directory = Path(".nix-work/cache-roots") / scope
+        directory.mkdir(parents=True, exist_ok=True)
+        desired_names = {f"output-{index}" for index in range(len(unique_roots))}
+        for previous in directory.iterdir():
+            if previous.is_symlink() and previous.name not in desired_names:
+                previous.unlink()
+        for index, root in enumerate(unique_roots):
+            subprocess.run([
+                "nix-store", "--realise", root, "--add-root",
+                str((directory / f"output-{index}").absolute()),
+            ], check=True)
+        print(f"Protected {len(unique_roots)} successful evaluated outputs for {scope}")
 PY
