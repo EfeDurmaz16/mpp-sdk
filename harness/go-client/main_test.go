@@ -23,23 +23,61 @@ func TestReadPrivateKeyEnvParsesJSONByteArray(t *testing.T) {
 		t.Fatalf("marshal private key: %v", err)
 	}
 
-	t.Setenv("MPP_HARNESS_CLIENT_SECRET_KEY", string(raw))
+	t.Setenv("MPP_HARNESS_CLIENT_SECRET_KEY", " \n"+string(raw)+"\n")
 
 	got, err := readPrivateKeyEnv("MPP_HARNESS_CLIENT_SECRET_KEY")
 	if err != nil {
 		t.Fatalf("read private key: %v", err)
 	}
 	if got.PublicKey() != privateKey.PublicKey() {
-		t.Fatalf("expected public key %s, got %s", privateKey.PublicKey(), got.PublicKey())
+		t.Fatal("parsed key changed the public key")
+	}
+	message := []byte("harness key parsing test")
+	signature, err := got.Sign(message)
+	if err != nil || !signature.Verify(privateKey.PublicKey(), message) {
+		t.Fatalf("parsed key could not produce a valid signature: %v", err)
 	}
 }
 
-func TestReadPrivateKeyEnvRejectsInvalidLength(t *testing.T) {
-	t.Setenv("MPP_HARNESS_CLIENT_SECRET_KEY", "[1,2,3]")
-
-	_, err := readPrivateKeyEnv("MPP_HARNESS_CLIENT_SECRET_KEY")
-	if err == nil {
-		t.Fatal("expected invalid private key length to fail")
+func TestReadPrivateKeyEnvRejectsInvalidKeys(t *testing.T) {
+	key, err := solana.NewRandomPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	array := func(index, value int) string {
+		values := make([]int, len(key))
+		for i, value := range key {
+			values[i] = int(value)
+		}
+		values[index] = value
+		raw, err := json.Marshal(values)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	// JSON encoding of []byte produces a base64 string, not a keygen array.
+	encodedString, err := json.Marshal([]byte(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ name, raw string }{
+		{"seed public mismatch", array(32, int(key[32]^1))},
+		{"negative byte", array(0, int(key[0])-256)},
+		{"overflow byte", array(0, int(key[0])+256)},
+		{"short key", "[1,2,3]"},
+		{"base64 string", string(encodedString)},
+		{"object", "{}"},
+		{"malformed array", "["},
+		{"missing", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("MPP_HARNESS_CLIENT_SECRET_KEY", test.raw)
+			got, err := readPrivateKeyEnv("MPP_HARNESS_CLIENT_SECRET_KEY")
+			if err == nil || got != nil {
+				t.Fatalf("invalid private key must return nil and an error; got key=%t, err=%v", got != nil, err)
+			}
+		})
 	}
 }
 
