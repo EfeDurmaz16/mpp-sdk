@@ -46,6 +46,13 @@ jobs:
         env:
           GOCACHE: /tmp/go-build-cache
         run: go test ./...
+      - name: Verify downstream module consumers
+        working-directory: go
+        env:
+          GOCACHE: /tmp/go-build-cache
+        run: |
+          bash scripts/check_module_consumer_test.sh
+          bash scripts/check_module_consumer.sh
       - name: Upload Go coverage
         if: always()
         uses: actions/upload-artifact@v7
