@@ -1,0 +1,72 @@
+name: Go SDK conformance
+
+on:
+  push:
+    paths:
+      - "go/**"
+      - "harness/**"
+      - "typescript/packages/mpp/**"
+      - "typescript/package.json"
+      - "typescript/pnpm-lock.yaml"
+      - "typescript/pnpm-workspace.yaml"
+      - "package.json"
+      - ".node-version"
+      - ".github/actions/setup-harness/**"
+      - ".github/workflows/go-conformance.yml"
+  pull_request:
+    paths:
+      - "go/**"
+      - "harness/**"
+      - "typescript/packages/mpp/**"
+      - "typescript/package.json"
+      - "typescript/pnpm-lock.yaml"
+      - "typescript/pnpm-workspace.yaml"
+      - "package.json"
+      - ".node-version"
+      - ".github/actions/setup-harness/**"
+      - ".github/workflows/go-conformance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: Conformance (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [go, typescript]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        if: matrix.language == 'go'
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+      - uses: ./.github/actions/setup-harness
+        id: harness
+      - name: Run intent conformance
+        working-directory: harness
+        env:
+          MPP_CONFORMANCE_LANGUAGES: ${{ matrix.language }}
+        run: |
+          mkdir -p conformance-results
+          pnpm exec vitest run test/conformance.test.ts \
+            --reporter=verbose --reporter=json \
+            --outputFile=conformance-results/intent-${{ matrix.language }}.json
+      - name: Run all canonical protocol cases
+        if: ${{ !cancelled() && steps.harness.outcome == 'success' }}
+        working-directory: harness
+        run: |
+          pnpm exec node --import tsx run-protocol-conformance.mjs \
+            ${{ matrix.language }} conformance-results/protocol-${{ matrix.language }}.json
+      - name: Upload conformance evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-${{ matrix.language }}
+          path: harness/conformance-results/*.json
+          if-no-files-found: error
