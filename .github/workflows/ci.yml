@@ -149,9 +149,9 @@ jobs:
       - name: Verify committed gen files are up to date
         working-directory: .
         run: |
-          if ! git diff --quiet -- rust/crates/kit/src/mpp/server/html/ go/protocols/mpp/server/html/ lua/pay_kit/protocols/mpp/server/html_assets/ python/src/pay_kit/protocols/mpp/server/html/; then
+          if ! git diff --quiet -- rust/crates/kit/src/mpp/server/html/ go/protocols/mpp/server/html/ lua/pay_kit/protocols/mpp/server/html_assets/ python/src/solana_pay_kit/protocols/mpp/server/html/; then
             echo "::error::Generated files are out of date. Run 'just html-build' and commit the results."
-            git diff --stat -- rust/crates/kit/src/mpp/server/html/ go/protocols/mpp/server/html/ lua/pay_kit/protocols/mpp/server/html_assets/ python/src/pay_kit/protocols/mpp/server/html/
+            git diff --stat -- rust/crates/kit/src/mpp/server/html/ go/protocols/mpp/server/html/ lua/pay_kit/protocols/mpp/server/html_assets/ python/src/solana_pay_kit/protocols/mpp/server/html/
             exit 1
           fi
       - name: Upload HTML build artifacts
@@ -163,7 +163,7 @@ jobs:
             rust/crates/kit/src/mpp/server/html/
             go/protocols/mpp/server/html/
             lua/pay_kit/protocols/mpp/server/html_assets/
-            python/src/pay_kit/protocols/mpp/server/html/
+            python/src/solana_pay_kit/protocols/mpp/server/html/
             typescript/packages/mpp/src/server/html-assets.gen.ts
 
   test-playground-smoke:
@@ -417,6 +417,11 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Start Surfnet
         working-directory: .
+        env:
+          # Fork the canonical sandbox so the local, single-instance RPC has
+          # the payment-channel and subscription programs without inheriting
+          # the hosted load balancer's cross-request blockhash races.
+          SURFPOOL_REMOTE_RPC_URL: https://402.surfnet.dev:8899
         run: |
           node harness/start-surfnet-proxy.mjs &
           ready=0
@@ -448,11 +453,8 @@ jobs:
         run: pnpm test:e2e
         env:
           PLAYGROUND_DISABLE_SIDECAR: "1"
-          # The hosted payment sandbox has the canonical payment-channel and
-          # subscription programs deployed; the lightweight CI Surfnet used by
-          # unit tests intentionally does not.
-          RPC_URL: https://402.surfnet.dev:8899
-          VITE_RPC_URL: https://402.surfnet.dev:8899
+          RPC_URL: http://localhost:8899
+          VITE_RPC_URL: http://localhost:8899
       - name: Upload Playwright report
         if: always()
         uses: actions/upload-artifact@v7
