@@ -1,42 +1,103 @@
-{ pkgs, ... }:
+{ pkgs, craneLib, htmlAssets, ... }:
 let
   inherit (pkgs) lib;
+  cargoLock = ../locks/rust-Cargo.lock;
+  lockPackages = (builtins.fromTOML (builtins.readFile cargoLock)).package;
   hashes = builtins.fromJSON (builtins.readFile ./rust-hashes.json);
+  # Crane keys git hashes by the complete Cargo source URL. The existing
+  # nixpkgs lock importer keys the same checkout hashes by package/version.
+  outputHashes = builtins.listToAttrs (map (package: {
+    name = package.source;
+    value = hashes."${package.name}-${package.version}";
+  }) (builtins.filter (package:
+    lib.hasPrefix "git+" (package.source or "")
+    && hashes ? "${package.name}-${package.version}") lockPackages));
+  gitPackages = builtins.filter (package:
+    lib.hasPrefix "git+" (package.source or "")) lockPackages;
+  rustRoot = toString ../../rust;
   rustSource = lib.cleanSourceWith {
     src = ../../rust;
     name = "paykit-rust-source";
     filter = path: type:
-      lib.cleanSourceFilter path type
-      && !(builtins.elem (builtins.baseNameOf path) [ "target" "Cargo.lock" ]);
+      let relative = lib.removePrefix "${rustRoot}/" (toString path);
+      in lib.cleanSourceFilter path type && (
+        type == "directory" && !(builtins.elem (baseNameOf path) [ "target" ])
+        || baseNameOf path == "Cargo.toml"
+        || lib.hasPrefix ".cargo/" relative
+        || relative == "README.md"
+        || relative == "crates/integration-tests/src/lib.rs"
+        || lib.hasSuffix ".rs" relative && builtins.any
+          (prefix: lib.hasPrefix prefix relative) [
+            "crates/kit/src/" "crates/kit/examples/" "crates/harness-bins/src/"
+          ]
+      );
   };
-in
-{
-  # Build artifacts only. SDK assertions and runtime interop remain separate jobs.
-  rust-harness = pkgs.rustPlatform.buildRustPackage {
-    pname = "paykit-rust-harness";
-    version = "0.1.0";
+  cargoVendorDir = craneLib.vendorCargoDeps {
+    inherit cargoLock outputHashes;
+  };
+  commonArgs = {
     src = rustSource;
-
-    cargoLock = {
-      lockFile = ../locks/rust-Cargo.lock;
-      outputHashes = hashes;
-    };
-    postPatch = ''
-      cp ${../locks/rust-Cargo.lock} Cargo.lock
-    '';
-
-    # Match the existing harness build profile and build all six adapters once.
-    buildType = "debug";
-    cargoBuildFlags = [ "--package" "paykit-harness-bins" "--bins" ];
+    inherit cargoLock cargoVendorDir;
+    version = "0.1.0";
+    strictDeps = true;
     doCheck = false;
+    # Preserve native harness/playground dev builds. Coverage remains a
+    # separately instrumented runtime job and never consumes these artifacts.
+    CARGO_PROFILE = "dev";
+    CARGO_INCREMENTAL = "0";
     nativeBuildInputs = [ pkgs.pkg-config ];
     buildInputs = [ pkgs.openssl ]
       ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
-
+    postPatch = ''
+      cp ${cargoLock} Cargo.lock
+    '';
+    postInstall = ''
+      if [ -d target/cargo-timings ]; then
+        mkdir -p "$out/share/paykit-cargo-timings"
+        cp target/cargo-timings/*.html "$out/share/paykit-cargo-timings/"
+      fi
+    '';
     meta = {
-      description = "Shared MPP and x402 Rust adapter binaries for the experimental CI";
       license = lib.licenses.mit;
       platforms = lib.platforms.unix;
     };
   };
+  targetArgs = name: flags: commonArgs // {
+    pname = name;
+    cargoExtraArgs = "--locked ${flags}";
+    cargoBuildExtraArgs = "--timings";
+  };
+  harnessArgs = targetArgs "paykit-rust-harness" "--package paykit-harness-bins --bins";
+  playgroundArgs = targetArgs "paykit-rust-playground-server"
+    "--package solana-pay-kit --example payment_link_server --features axum";
+  dependencies = args: craneLib.buildDepsOnly (args // {
+    # Compile just the matching targets, without an additional cargo check or
+    # test compilation. Crane stubs workspace sources for this derivation, so
+    # ordinary SDK/HTML source edits do not invalidate dependency artifacts.
+    buildPhaseCargoCommand = ''
+      cargoWithProfile build ${args.cargoExtraArgs} --timings
+    '';
+  });
+  harnessDeps = dependencies harnessArgs;
+  playgroundDeps = dependencies playgroundArgs;
+  package = args: cargoArtifacts: craneLib.buildPackage (args // {
+    inherit cargoArtifacts;
+    postPatch = commonArgs.postPatch + ''
+      mkdir -p crates/kit/src/mpp/server/html
+      cp ${htmlAssets}/rust/crates/kit/src/mpp/server/html/template.gen.html \
+        crates/kit/src/mpp/server/html/template.gen.html
+      cp ${htmlAssets}/rust/crates/kit/src/mpp/server/html/service_worker.gen.js \
+        crates/kit/src/mpp/server/html/service_worker.gen.js
+    '';
+  });
+in
+assert lib.all (package: outputHashes ? "${package.source}") gitPackages;
+{
+  # Build artifacts only. SDK assertions and runtime interop remain fresh jobs.
+  rust-harness = package harnessArgs harnessDeps;
+  rust-playground-server = package playgroundArgs playgroundDeps;
+  # These are build dependencies, not runtime closure dependencies. Cache them
+  # explicitly so source edits can reuse compiled third-party crates.
+  rust-harness-deps = harnessDeps;
+  rust-playground-deps = playgroundDeps;
 }
