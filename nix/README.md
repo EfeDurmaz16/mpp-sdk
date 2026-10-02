@@ -20,7 +20,7 @@ branch. It has read-only repository permissions and does not publish packages.
   import it into the disposable runner's Nix store. Swift builds and consumes
   its Darwin outputs in one job, avoiding a transfer to a single consumer.
 - Two scoped GitHub Actions caches retain the shared Linux outputs and the
-  Swift job's Nix outputs and environment across runs. A separate Cargo cache
+  Swift job's shared project outputs across runs. A separate Cargo cache
   retains the Rust unit lane's ordinary and coverage build profiles. No
   external cache account or paid infrastructure is needed.
 - `ci-lanes.json` defines 27 SDK, interop, browser and demo lanes. The interop
@@ -117,6 +117,12 @@ snapshot may supply unchanged outputs, but Nix still realizes every current
 target. Only valid, successful build outputs are rooted before unneeded store
 paths are collected and the snapshot is saved. Exact hits skip saving again.
 `.nix-results/cache-*.json` records the requested keys and restore results.
+The Swift shell remains part of the compatibility key, but its full environment
+is not rooted for the snapshot. Rooting it retained both Apple SDK/compiler
+ecosystems and made snapshot restoration expensive. Public tools are fetched
+from Nix's binary cache instead. The Darwin cache prefers its narrowed format
+and can restore the earlier broad snapshot once to populate the new format without rebuilding
+unchanged project outputs.
 
 Cargo keys also include the Rust lane's exact Nix environment, dependency lock,
 manifests and gate scripts. Source changes can reuse compatible dependency

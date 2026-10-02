@@ -55,7 +55,7 @@ runs:
       uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7
       with:
         primary-key: ${{ steps.key.outputs.primary-key }}
-        restore-prefixes-first-match: ${{ steps.key.outputs.restore-prefix }}
+        restore-prefixes-first-match: ${{ steps.key.outputs.restore-prefixes }}
     - name: Record cache restoration evidence
       if: ${{ !cancelled() && inputs.mode == 'restore' && steps.restore.outcome == 'success' }}
       shell: bash

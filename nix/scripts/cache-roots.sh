@@ -48,6 +48,8 @@ if operation == "key":
         raise SystemExit("Nix returned an incomplete derivation set")
     derivations = dict(zip(targets, paths))
     if scope == "interop-swift":
+        # Compatibility input only. Fetch public Swift tools from the Nix cache
+        # instead of retaining their full SDK/compiler closure in our snapshot.
         derivations["ci-interop-swift"] = output([
             "nix", "eval", "--raw", "--no-update-lock-file",
             f".#devShells.{system}.ci-interop-swift.drvPath",
@@ -57,16 +59,25 @@ if operation == "key":
         raise SystemExit("Could not identify the installed Nix version")
     lock_hash = hashlib.sha256(Path("flake.lock").read_bytes()).hexdigest()
     digest = hashlib.sha256(json.dumps(derivations, sort_keys=True).encode()).hexdigest()
-    prefix = f"nix-experiment-v1-{scope}-{runner}-{system}-nix{version[1]}-{lock_hash[:16]}-"
+    schema = 2 if scope == "interop-swift" else 1
+    suffix = f"{scope}-{runner}-{system}-nix{version[1]}-{lock_hash[:16]}-"
+    prefix = f"nix-experiment-v{schema}-{suffix}"
+    restore_prefixes = [prefix]
+    if scope == "interop-swift":
+        # Migrate once from the broad snapshot, then prefer the narrower v2 one.
+        restore_prefixes.append(f"nix-experiment-v1-{suffix}")
     key = prefix + digest
     metadata = {
-        "schema": 1, "scope": scope, "runner": runner, "system": system,
+        "schema": schema, "scope": scope, "runner": runner, "system": system,
         "nix_version": version[1], "flake_lock_sha256": lock_hash,
         "derivations": derivations, "primary_key": key, "restore_prefix": prefix,
+        "restore_prefixes": restore_prefixes,
     }
     (results / f"cache-{scope}.json").write_text(json.dumps(metadata, indent=2) + "\n")
     with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
         handle.write(f"primary-key={key}\nrestore-prefix={prefix}\n")
+        handle.write("restore-prefixes<<NIX_CACHE_PREFIXES\n")
+        handle.write("\n".join(restore_prefixes) + "\nNIX_CACHE_PREFIXES\n")
     print(f"Cache scope {scope}: {len(derivations)} derivations, key {key}")
 elif operation == "record":
     metadata_file = results / f"cache-{scope}.json"
@@ -95,13 +106,6 @@ else:
         subprocess.run([
             "nix-store", "--realise", root, "--add-root",
             str((directory / f"shared-{index}").absolute()),
-        ], check=True)
-    if scope == "interop-swift":
-        # This records the already used shell and retains its Swift runtime/tools.
-        subprocess.run([
-            "nix", "develop", "--no-update-lock-file", ".#ci-interop-swift",
-            "--profile", str((directory / "environment").absolute()),
-            "--command", "true",
         ], check=True)
     print(f"Protected {len(roots)} shared outputs for {scope}")
 PY
