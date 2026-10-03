@@ -102,6 +102,19 @@ workflow while skipping the regular SDK gates. Dispatch only after an active
 experiment finishes because both use the branch concurrency group.
 Push runs use `packed`. Changing mode does not change test selections.
 
+`test_runners_only=true` runs one optional Cargo/Nextest control job instead of
+the polyglot suite. It installs checksum-pinned Nextest 0.9.146, reuses the
+unchanged Rust cache contract, verifies test-name and ignored-test parity, and
+compares three alternating warmed runs. Fresh coverage retains the 90% floor;
+x402 and Redis checks still run. Stable doctests are additional validation,
+not an instrumented coverage claim. This does not change the default runner.
+
+From `harness/`, `pnpm test:pure` runs an explicit allowlist with two isolated
+workers; `pnpm test:serial` retains serial execution for the other default files.
+Their union preserves the original default selection, with on-chain tests
+remaining separate. `pnpm test` and existing CI selections remain unchanged.
+These opt-in controls do not imply a measured full-CI speedup.
+
 The optional `nix-rust-diagnostic.yml` workflow compares native and Nix-provided
 Rust 1.98.1 on one Ubuntu runner, native first. It verifies identical source,
 lockfile and generated HTML inputs, uses separate empty target directories,

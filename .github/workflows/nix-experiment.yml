@@ -19,6 +19,10 @@ on:
         description: Run only the Rust diagnostic, without repeating SDK gates.
         type: boolean
         default: false
+      test_runners_only:
+        description: Compare warmed Cargo and Nextest execution without repeating the polyglot suite.
+        type: boolean
+        default: false
       profile:
         description: Count output files and record detailed closure sizes.
         type: boolean
@@ -39,7 +43,7 @@ concurrency:
 
 jobs:
   plan:
-    if: github.repository == 'EfeDurmaz16/mpp-sdk' && inputs.diagnostic_only != true
+    if: github.repository == 'EfeDurmaz16/mpp-sdk' && inputs.diagnostic_only != true && inputs.test_runners_only != true
     runs-on: ubuntu-24.04
     outputs:
       units: ${{ steps.matrix.outputs.units }}
@@ -578,3 +582,7 @@ jobs:
   rust-diagnostic:
     if: github.event_name == 'workflow_dispatch' && (inputs.diagnose_rust || inputs.diagnostic_only)
     uses: ./.github/workflows/nix-rust-diagnostic.yml
+
+  test-runner-control:
+    if: github.event_name == 'workflow_dispatch' && inputs.test_runners_only
+    uses: ./.github/workflows/test-runner-control.yml

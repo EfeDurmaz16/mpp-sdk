@@ -1,0 +1,73 @@
+name: Test runner control
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  rust:
+    if: github.repository == 'EfeDurmaz16/mpp-sdk' && github.ref == 'refs/heads/experiment/nix-ci'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CI: '1'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - name: Install the pinned Nextest binary
+        run: |
+          mkdir -p .nix-work/bin
+          curl --fail --location --retry 2 \
+            https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.146/cargo-nextest-0.9.146-x86_64-unknown-linux-musl.tar.gz \
+            --output .nix-work/nextest.tar.gz
+          printf '%s  %s\n' b64617e8640624e8f9ba99819e37d7971154e97836d7ae4774fed4715501a6aa .nix-work/nextest.tar.gz | sha256sum --check --strict
+          tar --extract --gzip --file .nix-work/nextest.tar.gz --directory .nix-work/bin
+          echo "$PWD/.nix-work/bin" >> "$GITHUB_PATH"
+      - name: Evaluate the generated HTML contract
+        run: python3 nix/scripts/outputs.py unit-html ubuntu-24.04
+      - uses: ./.github/actions/cache-nix-binary
+        with:
+          mode: restore
+          scope: unit-html
+          expected-file: .nix-results/expected-unit-html.json
+      - name: Stage identical generated inputs
+        run: |
+          output="$(nix build --no-update-lock-file --no-link --print-out-paths '.#html-assets^out')"
+          cp -r --no-preserve=mode "$output"/. .
+          cp nix/locks/rust-Cargo.lock rust/Cargo.lock
+      - uses: ./.github/actions/cache-rust-experiment
+      - name: Compare the two test runners and validate fresh coverage
+        run: |
+          { uname -a; nproc; lscpu; } > .nix-results/test-runner-host.txt
+          nix develop --no-update-lock-file .#ci-unit-rust --command bash -euo pipefail <<'BASH'
+          results="$PWD/.nix-results/test-runner-control"
+          mkdir -p "$results"
+          redis_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+          redis-server --bind 127.0.0.1 --port "$redis_port" --save '' --appendonly no \
+            --daemonize no >"$results/redis.log" 2>&1 &
+          redis_pid=$!
+          trap 'kill "$redis_pid" 2>/dev/null || true; wait "$redis_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for _ in {1..50}; do
+            kill -0 "$redis_pid" 2>/dev/null || { cat "$results/redis.log" >&2; exit 1; }
+            if [[ "$(redis-cli -h 127.0.0.1 -p "$redis_port" ping 2>/dev/null)" == PONG ]]; then ready=true; break; fi
+            sleep 0.1
+          done
+          [[ "$ready" == true ]] || { echo 'Redis fixture did not become ready' >&2; exit 1; }
+          export PAY_KIT_TEST_REDIS_URL="redis://127.0.0.1:$redis_port"
+          python3 nix/scripts/test-runner-control.py --out "$results"
+          BASH
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: test-runner-control
+          path: .nix-results/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
