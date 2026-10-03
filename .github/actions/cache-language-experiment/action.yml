@@ -1,0 +1,52 @@
+name: Cache Nix language runtime dependencies
+description: Reuse compatible dependency downloads and native gems or rocks without restoring tests, coverage, virtualenvs or project build outputs.
+inputs:
+  language:
+    description: python, ruby, lua, php, kotlin or go.
+    required: true
+  lane:
+    description: Exact lane id from nix/ci-lanes.json.
+    required: true
+  purpose:
+    description: unit, interop or browser, matching the lane kind.
+    default: unit
+outputs:
+  cache-hit:
+    description: Whether the exact dependency and Nix toolchain cache was restored.
+    value: ${{ steps.cache.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Identify the language dependency environment
+      id: contract
+      shell: bash
+      env:
+        CACHE_LANGUAGE: ${{ inputs.language }}
+        CACHE_LANE: ${{ inputs.lane }}
+        CACHE_PURPOSE: ${{ inputs.purpose }}
+      run: python3 nix/scripts/language-cache.py "$CACHE_LANGUAGE" "$CACHE_LANE" "$CACHE_PURPOSE"
+    - name: Restore compatible runtime dependencies
+      id: cache
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ${{ steps.contract.outputs.paths }}
+        key: ${{ steps.contract.outputs.key }}
+    - name: Record the language cache state
+      shell: bash
+      env:
+        CACHE_LANE: ${{ inputs.lane }}
+        CACHE_LANGUAGE: ${{ inputs.language }}
+        CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+      run: |
+        python3 - <<'PYTHON'
+        import json
+        import os
+        from pathlib import Path
+        path = Path('.nix-results') / f"cache-{os.environ['CACHE_LANE']}.json"
+        result = json.loads(path.read_text())
+        result['cache_hit'] = os.environ['CACHE_HIT']
+        path.write_text(json.dumps(result, indent=2) + '\n')
+        if os.environ['CACHE_LANGUAGE'] == 'lua':
+            with open(os.environ['GITHUB_ENV'], 'a') as handle:
+                handle.write(f"NIX_RUNTIME_CACHE_LUA_HIT={os.environ['CACHE_HIT']}\n")
+        PYTHON

@@ -1,0 +1,12 @@
+# Experimental profile only; the existing Cargo CI remains the default.
+[profile.runner-control]
+retries = 0
+fail-fast = false
+
+[test-groups.shared-integration-fixtures]
+max-threads = 1
+
+[[profile.runner-control.overrides]]
+# serial_test's in-process mutex cannot coordinate separate Nextest processes.
+filter = 'package(paykit-integration-tests)'
+test-group = 'shared-integration-fixtures'

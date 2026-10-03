@@ -14,7 +14,7 @@
 // resolved relative to that cwd. Mirrors mpp-tools' adapter.json discovery.
 
 import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type RunnerManifest = {
@@ -67,7 +67,9 @@ export type DiscoveredRunner = {
 // resolve its cwd to an absolute path. Sorted by language for a stable,
 // deterministic suite order across machines. Throws on a malformed manifest
 // so a typo fails loudly at load instead of silently dropping a runner.
-export function discoverRunners(): DiscoveredRunner[] {
+export function discoverRunners(
+  encodedCommands: string | undefined = process.env.PAY_KIT_CONFORMANCE_COMMANDS,
+): DiscoveredRunner[] {
   const files = readdirSync(manifestsDir)
     .filter((name) => name.endsWith(".json"))
     .sort();
@@ -85,5 +87,45 @@ export function discoverRunners(): DiscoveredRunner[] {
       intents: parsed.intents ?? DEFAULT_INTENTS,
     });
   }
-  return runners;
+  if (encodedCommands === undefined) return runners;
+
+  const variable = "PAY_KIT_CONFORMANCE_COMMANDS";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(encodedCommands);
+  } catch {
+    throw new Error(`${variable} must be a JSON object of runner argv arrays`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${variable} must be a JSON object of runner argv arrays`);
+  }
+
+  const knownLanguages = new Set(runners.map(({ language }) => language));
+  const overrides = new Map<string, string[]>();
+  for (const [language, argv] of Object.entries(parsed)) {
+    if (!knownLanguages.has(language)) {
+      throw new Error(`${variable} contains unknown runner ${language}`);
+    }
+    if (
+      !Array.isArray(argv) ||
+      argv.length === 0 ||
+      !argv.every(
+        (argument): argument is string =>
+          typeof argument === "string" && !argument.includes("\0"),
+      ) ||
+      !isAbsolute(argv[0])
+    ) {
+      throw new Error(
+        `${variable}[${language}] must be an argv array with an absolute executable path`,
+      );
+    }
+    overrides.set(language, argv);
+  }
+
+  // Change only executable discovery. Vector selection, capabilities and cwd
+  // still come from each unchanged manifest, and assertions run every time.
+  return runners.map((runner) => ({
+    ...runner,
+    command: overrides.get(runner.language) ?? runner.command,
+  }));
 }

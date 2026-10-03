@@ -1,0 +1,588 @@
+name: Nix experiment
+
+# Fork-only experiment. The existing PR workflows are the native comparison.
+on:
+  push:
+    branches: [experiment/nix-ci]
+  workflow_dispatch:
+    inputs:
+      cache_mode:
+        description: Nix output cache transport; none disables all experimental caches.
+        type: choice
+        options: [packed, tar, none]
+        default: packed
+      diagnose_rust:
+        description: Run the separate opt-in Rust compiler diagnostic.
+        type: boolean
+        default: false
+      diagnostic_only:
+        description: Run only the Rust diagnostic, without repeating SDK gates.
+        type: boolean
+        default: false
+      test_runners_only:
+        description: Compare warmed Cargo and Nextest execution without repeating the polyglot suite.
+        type: boolean
+        default: false
+      profile:
+        description: Count output files and record detailed closure sizes.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+  NIX_EXPERIMENT_CACHE_MODE: ${{ inputs.cache_mode || 'packed' }}
+  NIX_PROFILE_OUTPUTS: ${{ inputs.profile && 'true' || 'false' }}
+
+concurrency:
+  group: nix-experiment-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    if: github.repository == 'EfeDurmaz16/mpp-sdk' && inputs.diagnostic_only != true && inputs.test_runners_only != true
+    runs-on: ubuntu-24.04
+    outputs:
+      units: ${{ steps.matrix.outputs.units }}
+      interop: ${{ steps.matrix.outputs.interop }}
+      browsers: ${{ steps.matrix.outputs.browsers }}
+      demos: ${{ steps.matrix.outputs.demos }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - run: nix flake check --no-build --all-systems --no-update-lock-file
+      - id: matrix
+        run: |
+          python3 - <<'PY'
+          import json, os
+          lanes = json.load(open('nix/ci-lanes.json'))
+          assert len(lanes) == len({lane['id'] for lane in lanes}) == 27
+          units = []
+          for lane in [x for x in lanes if x['kind'] == 'unit']:
+              gates = ('lint', 'typecheck', 'tests', 'integration') if lane['id'] == 'unit-typescript' else ('',)
+              scope = lane['id'] if lane['id'] in ('unit-typescript', 'unit-audit', 'unit-html') else 'swift-tools' if lane['id'] == 'unit-swift' else ''
+              for gate in gates:
+                  units.append({**lane, 'gate': gate, 'cache_scope': scope,
+                                'physical_id': lane['id'] + ('-' + gate if gate else '')})
+          assert len(units) == 14
+          assert {unit['id'] for unit in units} == {lane['id'] for lane in lanes if lane['kind'] == 'unit'}
+          groups = {
+              'units': units,
+              'interop': [x for x in lanes if x['kind'] == 'interop' and x['lane'] != 'swift'],
+              'browsers': [x for x in lanes if x['kind'] == 'browser'],
+              'demos': [x for x in lanes if x['kind'] == 'demo'],
+          }
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              for name, values in groups.items():
+                  out.write(f'{name}={json.dumps({"include": values})}\n')
+          PY
+
+  units:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.units) }}
+    name: Nix / ${{ matrix.physical_id }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - name: Evaluate unit preparation outputs
+        if: matrix.cache_scope != ''
+        env:
+          CACHE_SCOPE: ${{ matrix.cache_scope }}
+          RUNNER_LABEL: ${{ matrix.runner }}
+        run: python3 nix/scripts/outputs.py "$CACHE_SCOPE" "$RUNNER_LABEL"
+      - name: Restore packed unit outputs
+        uses: ./.github/actions/cache-nix-binary
+        id: packed-cache
+        if: matrix.cache_scope != '' && env.NIX_EXPERIMENT_CACHE_MODE == 'packed'
+        with:
+          mode: restore
+          scope: ${{ matrix.cache_scope }}
+          expected-file: .nix-results/expected-${{ matrix.cache_scope }}.json
+      - name: Restore tar unit outputs
+        uses: ./.github/actions/cache-nix-experiment
+        id: tar-cache
+        if: matrix.cache_scope != '' && env.NIX_EXPERIMENT_CACHE_MODE == 'tar'
+        with:
+          mode: restore
+          scope: ${{ matrix.cache_scope }}
+          expected-file: .nix-results/expected-${{ matrix.cache_scope }}.json
+          runner-label: ${{ matrix.runner }}
+      - name: Build unit preparation outputs
+        id: prepare
+        if: matrix.cache_scope != ''
+        env:
+          CACHE_SCOPE: ${{ matrix.cache_scope }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, 'nix/scripts')
+          from outputs import selected_installables
+          expected = Path('.nix-results') / f"expected-{os.environ['CACHE_SCOPE']}.json"
+          contract = json.loads(expected.read_text())
+          targets = selected_installables(contract)
+          subprocess.run(['nix', 'build', '--no-update-lock-file', '--no-link', *targets], check=True)
+          subprocess.run(['nix-store', '--check-validity', *contract['roots'].values()], check=True)
+          command = ['python3', 'nix/scripts/measure.py', 'outputs', '--expected', str(expected),
+                     '--results', '.nix-results/unit-preparation-closure.json']
+          if os.environ.get('NIX_PROFILE_OUTPUTS') == 'true':
+              command.append('--files')
+          subprocess.run(command, check=True)
+          PYTHON
+      - name: Restore Rust runtime build cache
+        uses: ./.github/actions/cache-rust-experiment
+        if: matrix.id == 'unit-rust' && env.NIX_EXPERIMENT_CACHE_MODE != 'none'
+      - name: Restore language runtime dependencies
+        uses: ./.github/actions/cache-language-experiment
+        if: contains(fromJSON('["python", "ruby", "lua", "php", "kotlin", "go"]'), matrix.language) && env.NIX_EXPERIMENT_CACHE_MODE != 'none'
+        with:
+          language: ${{ matrix.language }}
+          lane: ${{ matrix.id }}
+          purpose: unit
+      - name: Run the SDK gates
+        env:
+          TARGET: ${{ matrix.id }}
+          NIX_TYPESCRIPT_GATE: ${{ matrix.gate }}
+          SURFPOOL_DATASOURCE_RPC_URL: ${{ secrets.SURFPOOL_DATASOURCE_RPC_URL }}
+        run: nix run --no-update-lock-file ".#$TARGET"
+      - name: Save packed unit outputs
+        uses: ./.github/actions/cache-nix-binary
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' && env.NIX_EXPERIMENT_CACHE_MODE == 'packed' && steps.packed-cache.outputs.hit-primary-key != 'true' }}
+        with:
+          mode: save
+          scope: ${{ matrix.cache_scope }}
+          expected-file: .nix-results/expected-${{ matrix.cache_scope }}.json
+          primary-key: ${{ steps.packed-cache.outputs.primary-key }}
+      - name: Save tar unit outputs
+        uses: ./.github/actions/cache-nix-experiment
+        if: ${{ !cancelled() && steps.prepare.outcome == 'success' && env.NIX_EXPERIMENT_CACHE_MODE == 'tar' && steps.tar-cache.outputs.hit-primary-key != 'true' }}
+        with:
+          mode: save
+          scope: ${{ matrix.cache_scope }}
+          expected-file: .nix-results/expected-${{ matrix.cache_scope }}.json
+          primary-key: ${{ steps.tar-cache.outputs.primary-key }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-${{ matrix.physical_id }}
+          path: .nix-results/
+          include-hidden-files: true
+
+  shared-linux:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      manifest: ${{ steps.export.outputs.manifest_sha256 }}
+      browser_artifact: ${{ steps.upload-browser.outputs.artifact-id }}
+      browser_manifest: ${{ steps.export-browser.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - name: Evaluate shared output contract
+        run: python3 nix/scripts/outputs.py shared-linux ubuntu-24.04
+      - name: Restore packed shared Linux outputs
+        uses: ./.github/actions/cache-nix-binary
+        id: packed-cache
+        if: env.NIX_EXPERIMENT_CACHE_MODE == 'packed'
+        with:
+          mode: restore
+          scope: shared-linux
+          expected-file: .nix-results/expected-shared-linux.json
+      - name: Restore tar shared Linux outputs
+        uses: ./.github/actions/cache-nix-experiment
+        id: tar-cache
+        if: env.NIX_EXPERIMENT_CACHE_MODE == 'tar'
+        with:
+          mode: restore
+          scope: shared-linux
+          expected-file: .nix-results/expected-shared-linux.json
+          runner-label: ubuntu-24.04
+      - name: Build shared linux outputs and repeat with a warm store
+        id: shared-build
+        run: bash nix/scripts/build-shared.sh linux
+      - name: Export verified interop runtime outputs
+        id: export
+        run: |
+          roots=()
+          while IFS= read -r root; do roots+=("$root"); done < .nix-results/interop-roots.txt
+          bash nix/scripts/store-artifact.sh export .nix-artifacts/shared "${roots[@]}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: upload
+        with:
+          name: nix-shared-linux-interop
+          path: .nix-artifacts/shared/
+          compression-level: 1
+          include-hidden-files: true
+      - name: Export verified browser runtime outputs
+        id: export-browser
+        run: |
+          roots=()
+          while IFS= read -r root; do roots+=("$root"); done < .nix-results/browser-roots.txt
+          bash nix/scripts/store-artifact.sh export .nix-artifacts/browser "${roots[@]}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: upload-browser
+        with:
+          name: nix-shared-linux-browser
+          path: .nix-artifacts/browser/
+          compression-level: 1
+          include-hidden-files: true
+      - name: Save packed shared Linux outputs
+        uses: ./.github/actions/cache-nix-binary
+        if: ${{ !cancelled() && steps.shared-build.outcome == 'success' && env.NIX_EXPERIMENT_CACHE_MODE == 'packed' && steps.packed-cache.outputs.hit-primary-key != 'true' }}
+        with:
+          mode: save
+          scope: shared-linux
+          expected-file: .nix-results/expected-shared-linux.json
+          primary-key: ${{ steps.packed-cache.outputs.primary-key }}
+      - name: Save tar shared Linux outputs
+        uses: ./.github/actions/cache-nix-experiment
+        if: ${{ !cancelled() && steps.shared-build.outcome == 'success' && env.NIX_EXPERIMENT_CACHE_MODE == 'tar' && steps.tar-cache.outputs.hit-primary-key != 'true' }}
+        with:
+          mode: save
+          scope: shared-linux
+          expected-file: .nix-results/expected-shared-linux.json
+          primary-key: ${{ steps.tar-cache.outputs.primary-key }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-shared-linux
+          path: .nix-results/
+          include-hidden-files: true
+
+  shared-darwin:
+    needs: plan
+    runs-on: macos-26
+    timeout-minutes: 60
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      manifest: ${{ steps.export.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - name: Evaluate shared output contract
+        run: python3 nix/scripts/outputs.py shared-darwin macos-26
+      - name: Restore packed shared Darwin outputs
+        uses: ./.github/actions/cache-nix-binary
+        id: packed-cache
+        if: env.NIX_EXPERIMENT_CACHE_MODE == 'packed'
+        with:
+          mode: restore
+          scope: shared-darwin
+          expected-file: .nix-results/expected-shared-darwin.json
+      - name: Restore tar shared Darwin outputs
+        uses: ./.github/actions/cache-nix-experiment
+        id: tar-cache
+        if: env.NIX_EXPERIMENT_CACHE_MODE == 'tar'
+        with:
+          mode: restore
+          scope: shared-darwin
+          expected-file: .nix-results/expected-shared-darwin.json
+          runner-label: macos-26
+      - name: Build shared darwin outputs and repeat with a warm store
+        id: shared-build
+        run: bash nix/scripts/build-shared.sh darwin
+      - name: Export verified runtime outputs
+        id: export
+        run: |
+          roots=()
+          while IFS= read -r root; do roots+=("$root"); done < .nix-results/shared-roots.txt
+          bash nix/scripts/store-artifact.sh export .nix-artifacts/shared "${roots[@]}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: upload
+        with:
+          name: nix-shared-darwin
+          path: .nix-artifacts/shared/
+          compression-level: 1
+          include-hidden-files: true
+      - name: Save packed shared Darwin outputs
+        uses: ./.github/actions/cache-nix-binary
+        if: ${{ !cancelled() && steps.shared-build.outcome == 'success' && env.NIX_EXPERIMENT_CACHE_MODE == 'packed' && steps.packed-cache.outputs.hit-primary-key != 'true' }}
+        with:
+          mode: save
+          scope: shared-darwin
+          expected-file: .nix-results/expected-shared-darwin.json
+          primary-key: ${{ steps.packed-cache.outputs.primary-key }}
+      - name: Save tar shared Darwin outputs
+        uses: ./.github/actions/cache-nix-experiment
+        if: ${{ !cancelled() && steps.shared-build.outcome == 'success' && env.NIX_EXPERIMENT_CACHE_MODE == 'tar' && steps.tar-cache.outputs.hit-primary-key != 'true' }}
+        with:
+          mode: save
+          scope: shared-darwin
+          expected-file: .nix-results/expected-shared-darwin.json
+          primary-key: ${{ steps.tar-cache.outputs.primary-key }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-shared-darwin
+          path: .nix-results/
+          include-hidden-files: true
+
+  sbf:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - name: Build the program once for every language
+        id: build
+        run: |
+          output=$(nix build --no-update-lock-file --no-link --print-out-paths .#payment-channels)
+          mkdir -p .nix-artifacts/sbf
+          cp "$output/lib/payment_channels.so" .nix-artifacts/sbf/
+          cp "$output/nix-support/"* .nix-artifacts/sbf/
+          hash=$(sha256sum .nix-artifacts/sbf/payment_channels.so | cut -d ' ' -f 1)
+          echo "sha256=$hash" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        id: upload
+        with:
+          name: nix-payment-channels
+          path: .nix-artifacts/sbf/
+          include-hidden-files: true
+
+  interop:
+    needs: [plan, shared-linux, sbf]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.interop) }}
+    name: Nix / ${{ matrix.id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.shared-linux.outputs.artifact }}
+          path: .nix-artifacts/shared
+          merge-multiple: true
+      - name: Import shared native outputs
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.shared-linux.outputs.manifest }}
+        run: bash nix/scripts/store-artifact.sh import .nix-artifacts/shared
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.sbf.outputs.artifact }}
+          path: .nix-artifacts/sbf
+          merge-multiple: true
+      - name: Restore language runtime dependencies
+        uses: ./.github/actions/cache-language-experiment
+        if: contains(fromJSON('["python", "ruby", "lua", "php", "kotlin", "go"]'), matrix.language) && env.NIX_EXPERIMENT_CACHE_MODE != 'none'
+        with:
+          language: ${{ matrix.language }}
+          lane: ${{ matrix.id }}
+          purpose: interop
+      - name: Verify the program and run interop
+        env:
+          EXPECTED_SBF_SHA256: ${{ needs.sbf.outputs.sha256 }}
+          TARGET: ${{ matrix.id }}
+          SURFPOOL_DATASOURCE_RPC_URL: ${{ secrets.SURFPOOL_DATASOURCE_RPC_URL }}
+        run: |
+          bash nix/scripts/verify-sbf.sh
+          export PAYMENT_CHANNELS_PROGRAM_SO="$PWD/.nix-artifacts/sbf/payment_channels.so"
+          nix run --no-update-lock-file ".#$TARGET"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-${{ matrix.id }}
+          path: .nix-results/
+          include-hidden-files: true
+
+  interop-swift:
+    needs: [shared-darwin, sbf]
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [standard, exact, upto]
+    name: Nix / interop-swift-${{ matrix.group }}
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.shared-darwin.outputs.artifact }}
+          path: .nix-artifacts/shared
+          merge-multiple: true
+      - name: Import verified Darwin runtime outputs
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.shared-darwin.outputs.manifest }}
+        run: bash nix/scripts/store-artifact.sh import .nix-artifacts/shared
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.sbf.outputs.artifact }}
+          path: .nix-artifacts/sbf
+          merge-multiple: true
+      - name: Verify the program and run Swift interop group
+        env:
+          EXPECTED_SBF_SHA256: ${{ needs.sbf.outputs.sha256 }}
+          NIX_INTEROP_GROUP: ${{ matrix.group }}
+          SURFPOOL_DATASOURCE_RPC_URL: ${{ secrets.SURFPOOL_DATASOURCE_RPC_URL }}
+        run: |
+          bash nix/scripts/verify-sbf.sh
+          export PAYMENT_CHANNELS_PROGRAM_SO="$PWD/.nix-artifacts/sbf/payment_channels.so"
+          nix run --no-update-lock-file .#interop-swift
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-interop-swift-${{ matrix.group }}
+          path: .nix-results/
+          include-hidden-files: true
+
+  browsers:
+    needs: [plan, shared-linux]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.browsers) }}
+    name: Nix / ${{ matrix.id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          artifact-ids: ${{ needs.shared-linux.outputs.browser_artifact }}
+          path: .nix-artifacts/shared
+          merge-multiple: true
+      - name: Import shared native outputs
+        env:
+          EXPECTED_MANIFEST_SHA256: ${{ needs.shared-linux.outputs.browser_manifest }}
+        run: bash nix/scripts/store-artifact.sh import .nix-artifacts/shared
+      - name: Evaluate the Rust playground output contract
+        if: matrix.id == 'playground-rust'
+        run: python3 nix/scripts/outputs.py playground-rust ubuntu-24.04
+      - name: Restore packed Rust playground outputs
+        uses: ./.github/actions/cache-nix-binary
+        id: packed-cache
+        if: matrix.id == 'playground-rust' && env.NIX_EXPERIMENT_CACHE_MODE == 'packed'
+        with:
+          mode: restore
+          scope: playground-rust
+          expected-file: .nix-results/expected-playground-rust.json
+      - name: Restore tar Rust playground outputs
+        uses: ./.github/actions/cache-nix-experiment
+        id: tar-cache
+        if: matrix.id == 'playground-rust' && env.NIX_EXPERIMENT_CACHE_MODE == 'tar'
+        with:
+          mode: restore
+          scope: playground-rust
+          expected-file: .nix-results/expected-playground-rust.json
+          runner-label: ubuntu-24.04
+      - name: Build the Rust playground server and reusable dependencies
+        id: prepare-rust
+        if: matrix.id == 'playground-rust'
+        run: |
+          python3 - <<'PYTHON'
+          import json, subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, 'nix/scripts')
+          from outputs import selected_installables
+          contract = json.loads(Path('.nix-results/expected-playground-rust.json').read_text())
+          subprocess.run(['nix', 'build', '--no-update-lock-file', '--no-link',
+                          *selected_installables(contract)], check=True)
+          PYTHON
+          profile_args=()
+          if [[ "$NIX_PROFILE_OUTPUTS" == true ]]; then profile_args+=(--files); fi
+          python3 nix/scripts/measure.py outputs \
+            --expected .nix-results/expected-playground-rust.json \
+            --results .nix-results/playground-rust-closure.json "${profile_args[@]}"
+      - name: Restore language runtime dependencies
+        uses: ./.github/actions/cache-language-experiment
+        if: matrix.id == 'playground-go' && env.NIX_EXPERIMENT_CACHE_MODE != 'none'
+        with:
+          language: go
+          lane: ${{ matrix.id }}
+          purpose: browser
+      - name: Run browser checks
+        env:
+          TARGET: ${{ matrix.id }}
+        run: nix run --no-update-lock-file ".#$TARGET"
+      - name: Save packed Rust playground outputs
+        uses: ./.github/actions/cache-nix-binary
+        if: ${{ !cancelled() && steps.prepare-rust.outcome == 'success' && env.NIX_EXPERIMENT_CACHE_MODE == 'packed' && steps.packed-cache.outputs.hit-primary-key != 'true' }}
+        with:
+          mode: save
+          scope: playground-rust
+          expected-file: .nix-results/expected-playground-rust.json
+          primary-key: ${{ steps.packed-cache.outputs.primary-key }}
+      - name: Save tar Rust playground outputs
+        uses: ./.github/actions/cache-nix-experiment
+        if: ${{ !cancelled() && steps.prepare-rust.outcome == 'success' && env.NIX_EXPERIMENT_CACHE_MODE == 'tar' && steps.tar-cache.outputs.hit-primary-key != 'true' }}
+        with:
+          mode: save
+          scope: playground-rust
+          expected-file: .nix-results/expected-playground-rust.json
+          primary-key: ${{ steps.tar-cache.outputs.primary-key }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-${{ matrix.id }}
+          path: .nix-results/
+          include-hidden-files: true
+
+  demos:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.demos) }}
+    name: Nix / ${{ matrix.id }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-nix-experiment
+      # Platform SDK provisioning remains an explicit host dependency.
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        if: matrix.lane == 'android-demo'
+        with:
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
+      - name: Run the platform build
+        env:
+          TARGET: ${{ matrix.id }}
+        run: nix run --no-update-lock-file ".#$TARGET"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: nix-results-${{ matrix.id }}
+          path: .nix-results/
+          include-hidden-files: true
+
+  rust-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && (inputs.diagnose_rust || inputs.diagnostic_only)
+    uses: ./.github/workflows/nix-rust-diagnostic.yml
+
+  test-runner-control:
+    if: github.event_name == 'workflow_dispatch' && inputs.test_runners_only
+    uses: ./.github/workflows/test-runner-control.yml

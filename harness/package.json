@@ -5,6 +5,8 @@
   "packageManager": "pnpm@11.13.0",
   "scripts": {
     "test": "vitest run",
+    "test:pure": "vitest run -c vitest.pure.config.ts",
+    "test:serial": "vitest run -c vitest.serial.config.ts",
     "test:watch": "vitest",
     "test:onchain": "HARNESS_ONCHAIN=1 vitest run -c vitest.onchain.config.ts",
     "typecheck": "tsc --noEmit",

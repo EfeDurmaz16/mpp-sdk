@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
+import { resolveAdapterCommand } from "./adapter-command";
 import {
   normalizeResponseHeaders,
   type AdapterMessage,
@@ -151,7 +152,7 @@ function spawnAdapter(
   implementation: ImplementationDefinition,
   extraEnv: Record<string, string> = {},
 ): ChildProcess {
-  const [command, ...args] = implementation.command;
+  const [command, ...args] = resolveAdapterCommand(implementation);
   const child = spawn(command, args, {
     cwd: process.cwd(),
     env: {

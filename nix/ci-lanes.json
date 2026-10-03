@@ -1,0 +1,191 @@
+[
+  {
+    "id": "unit-typescript",
+    "kind": "unit",
+    "lane": "typescript",
+    "language": "typescript",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "unit-rust",
+    "kind": "unit",
+    "lane": "rust",
+    "language": "rust",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "unit-go",
+    "kind": "unit",
+    "lane": "go",
+    "language": "go",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "unit-python",
+    "kind": "unit",
+    "lane": "python",
+    "language": "python",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "unit-ruby",
+    "kind": "unit",
+    "lane": "ruby",
+    "language": "ruby",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "unit-lua",
+    "kind": "unit",
+    "lane": "lua",
+    "language": "lua",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "unit-php",
+    "kind": "unit",
+    "lane": "php",
+    "language": "php",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "unit-kotlin",
+    "kind": "unit",
+    "lane": "kotlin",
+    "language": "kotlin",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "unit-swift",
+    "kind": "unit",
+    "lane": "swift",
+    "language": "swift",
+    "runner": "macos-26"
+  },
+  {
+    "id": "unit-audit",
+    "kind": "unit",
+    "lane": "audit",
+    "language": "typescript",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "unit-html",
+    "kind": "unit",
+    "lane": "html",
+    "language": "typescript",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "interop-typescript",
+    "kind": "interop",
+    "lane": "typescript",
+    "language": "typescript",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "interop-go",
+    "kind": "interop",
+    "lane": "go",
+    "language": "go",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "interop-python",
+    "kind": "interop",
+    "lane": "python",
+    "language": "python",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "interop-ruby",
+    "kind": "interop",
+    "lane": "ruby",
+    "language": "ruby",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "interop-lua",
+    "kind": "interop",
+    "lane": "lua",
+    "language": "lua",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "interop-php",
+    "kind": "interop",
+    "lane": "php",
+    "language": "php",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "interop-swift",
+    "kind": "interop",
+    "lane": "swift",
+    "language": "swift",
+    "runner": "macos-26"
+  },
+  {
+    "id": "interop-kotlin",
+    "kind": "interop",
+    "lane": "kotlin",
+    "language": "kotlin",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "interop-onchain",
+    "kind": "interop",
+    "lane": "onchain",
+    "language": "typescript",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "playground-smoke",
+    "kind": "browser",
+    "lane": "playground-smoke",
+    "language": "typescript",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "playground-e2e",
+    "kind": "browser",
+    "lane": "playground-e2e",
+    "language": "typescript",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "playground-typescript",
+    "kind": "browser",
+    "lane": "playground-typescript",
+    "language": "typescript",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "playground-rust",
+    "kind": "browser",
+    "lane": "playground-rust",
+    "language": "rust",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "playground-go",
+    "kind": "browser",
+    "lane": "playground-go",
+    "language": "go",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "android-demo",
+    "kind": "demo",
+    "lane": "android-demo",
+    "language": "kotlin",
+    "runner": "ubuntu-24.04"
+  },
+  {
+    "id": "ios-demo",
+    "kind": "demo",
+    "lane": "ios-demo",
+    "language": "swift",
+    "runner": "macos-26"
+  }
+]

@@ -1,0 +1,1068 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "c294f8903f18efc746584e3cc2961d6033b8365c",
+  "notes": [
+    "Exact current native CI commands and selectors, deduplicated by argv, declared environment, runtime input requirements, working directory and operating system.",
+    "The number of cases is a number of command selections, not a number of test assertions or proof that no runtime tests skipped.",
+    "Builds and tool installation are prerequisites managed by the surrounding Nix commands. This manifest adds no new test selections.",
+    "Payment-channels paths and optional RPC credentials come from the process environment. Runtime input values are not stored in result metadata.",
+    "The TypeScript lane includes the Rust-to-Rust reference selection. Ruby lane also includes the separate TS-to-Ruby and Rust-to-Ruby selections from ci.yml."
+  ],
+  "cases": [
+    {
+      "id": "go-run-go-paykit-harness-matrix-mpp-charge-x402-exact-x402-upto-3beae90a",
+      "lane": "go",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testTimeout",
+        "180000"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "typescript",
+        "MPP_HARNESS_SERVERS": "go",
+        "MPP_HARNESS_INTENTS": "charge,x402-exact,x402-upto",
+        "MPP_HARNESS_SCENARIOS": "charge-basic,charge-split-ata,charge-symbol-usdc-localnet,charge-token2022-split-ata,charge-split-ata-idempotent,charge-compute-budget-over-cap,charge-splits-too-many,charge-splits-sum-equals-amount,charge-network-mismatch,charge-cross-route-replay,x402-exact-basic,x402-upto-basic,x402-upto-zero-actual",
+        "X402_HARNESS_CLIENTS": "rust-x402,go-x402,rust-x402-upto,go-x402-upto",
+        "X402_HARNESS_SERVERS": "go,rust-x402-upto,go-x402-upto",
+        "PAYMENT_CHANNELS_PROGRAM_ID": "CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX"
+      },
+      "runtime_env": {
+        "PAYMENT_CHANNELS_PROGRAM_SO": {
+          "source": "PAYMENT_CHANNELS_PROGRAM_SO",
+          "required": true,
+          "kind": "file"
+        },
+        "SURFPOOL_DATASOURCE_RPC_URL": {
+          "source": "SURFPOOL_DATASOURCE_RPC_URL",
+          "required": false,
+          "default": ""
+        }
+      },
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/go.yml",
+          "job": "harness-go",
+          "step": "Run Go PayKit harness matrix (mpp charge + x402 exact + x402 upto)",
+          "source_line": 139
+        }
+      ]
+    },
+    {
+      "id": "go-run-go-paykit-harness-matrix-mpp-charge-x402-exact-ea1776b9",
+      "lane": "go",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testTimeout",
+        "180000"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "typescript",
+        "MPP_HARNESS_SERVERS": "go",
+        "MPP_HARNESS_INTENTS": "charge,x402-exact",
+        "MPP_HARNESS_SCENARIOS": "charge-basic,charge-split-ata,charge-symbol-usdc-localnet,charge-token2022-split-ata,charge-split-ata-idempotent,charge-compute-budget-over-cap,charge-splits-too-many,charge-splits-sum-equals-amount,charge-network-mismatch,charge-cross-route-replay,x402-exact-basic",
+        "X402_HARNESS_CLIENTS": "rust-x402,go-x402",
+        "X402_HARNESS_SERVERS": "go"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "go",
+          "step": "Run Go PayKit harness matrix (mpp charge + x402 exact)",
+          "source_line": 78
+        }
+      ]
+    },
+    {
+      "id": "kotlin-run-kotlin-cross-sdk-conformance-vectors-3a47f975",
+      "lane": "kotlin",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/conformance.test.ts"
+      ],
+      "env": {
+        "MPP_CONFORMANCE_LANGUAGES": "kotlin"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "kotlin",
+          "step": "Run Kotlin cross-SDK conformance vectors",
+          "source_line": 339
+        },
+        {
+          "workflow": ".github/workflows/kotlin.yml",
+          "job": "harness-kotlin",
+          "step": "Run Kotlin cross-SDK conformance vectors",
+          "source_line": 56
+        }
+      ]
+    },
+    {
+      "id": "kotlin-run-kotlin-client-harness-smoke-2c3be1f4",
+      "lane": "kotlin",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "kotlin client pays typescript server",
+        "--testTimeout",
+        "180000"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "kotlin",
+        "MPP_HARNESS_SERVERS": "typescript"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "kotlin",
+          "step": "Run Kotlin client harness smoke",
+          "source_line": 347
+        },
+        {
+          "workflow": ".github/workflows/kotlin.yml",
+          "job": "harness-kotlin",
+          "step": "Run Kotlin client harness smoke",
+          "source_line": 64
+        }
+      ]
+    },
+    {
+      "id": "kotlin-run-kotlin-x402-client-to-rust-x402-server-harness-e58b0060",
+      "lane": "kotlin",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "kotlin-x402 client pays rust-x402 server",
+        "--testTimeout",
+        "180000"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "",
+        "MPP_HARNESS_SERVERS": "",
+        "MPP_HARNESS_INTENTS": "x402-exact",
+        "X402_HARNESS_CLIENTS": "kotlin-x402",
+        "X402_HARNESS_SERVERS": "rust-x402"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "kotlin-x402",
+          "step": "Run Kotlin x402 client to Rust x402 server harness",
+          "source_line": 371
+        },
+        {
+          "workflow": ".github/workflows/kotlin.yml",
+          "job": "harness-kotlin-x402",
+          "step": "Run Kotlin x402 client to Rust x402 server harness",
+          "source_line": 100
+        }
+      ]
+    },
+    {
+      "id": "kotlin-run-kotlin-x402-upto-client-to-rust-upto-server-harness-5d731409",
+      "lane": "kotlin",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testTimeout",
+        "180000"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "",
+        "MPP_HARNESS_SERVERS": "",
+        "MPP_HARNESS_INTENTS": "x402-upto",
+        "MPP_HARNESS_SCENARIOS": "x402-upto-basic,x402-upto-zero-actual",
+        "X402_HARNESS_CLIENTS": "kotlin-x402-upto",
+        "X402_HARNESS_SERVERS": "rust-x402-upto",
+        "PAYMENT_CHANNELS_PROGRAM_ID": "CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX"
+      },
+      "runtime_env": {
+        "PAYMENT_CHANNELS_PROGRAM_SO": {
+          "source": "PAYMENT_CHANNELS_PROGRAM_SO",
+          "required": true,
+          "kind": "file"
+        },
+        "SURFPOOL_DATASOURCE_RPC_URL": {
+          "source": "SURFPOOL_DATASOURCE_RPC_URL",
+          "required": false,
+          "default": ""
+        }
+      },
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/kotlin.yml",
+          "job": "harness-kotlin-x402-upto",
+          "step": "Run Kotlin x402 upto client to Rust upto server harness",
+          "source_line": 142
+        }
+      ]
+    },
+    {
+      "id": "lua-ts-to-lua-focused-matrix-306742d1",
+      "lane": "lua",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "typescript client pays lua server"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "typescript",
+        "MPP_HARNESS_SERVERS": "lua",
+        "MPP_HARNESS_SCENARIOS": "charge-basic,charge-split-ata,charge-network-mismatch,charge-cross-route-replay"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "lua",
+          "step": "TS-to-Lua focused matrix",
+          "source_line": 200
+        },
+        {
+          "workflow": ".github/workflows/lua.yml",
+          "job": "harness-lua",
+          "step": "TS-to-Lua focused matrix",
+          "source_line": 145
+        }
+      ]
+    },
+    {
+      "id": "lua-rust-to-lua-focused-matrix-2ac65d2a",
+      "lane": "lua",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "rust client pays lua server"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "rust",
+        "MPP_HARNESS_SERVERS": "lua",
+        "MPP_HARNESS_SCENARIOS": "charge-basic,charge-split-ata"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "lua",
+          "step": "Rust-to-Lua focused matrix",
+          "source_line": 207
+        },
+        {
+          "workflow": ".github/workflows/lua.yml",
+          "job": "harness-lua",
+          "step": "Rust-to-Lua focused matrix",
+          "source_line": 153
+        }
+      ]
+    },
+    {
+      "id": "lua-run-paykit-harness-smoke-mpp-charge-x402-exact-24de99cb",
+      "lane": "lua",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "lua",
+        "--testTimeout",
+        "180000"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "typescript",
+        "MPP_HARNESS_SERVERS": "lua,typescript",
+        "MPP_HARNESS_INTENTS": "charge,x402-exact",
+        "X402_HARNESS_CLIENTS": "rust-x402",
+        "X402_HARNESS_SERVERS": ""
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "lua",
+          "step": "Run PayKit harness smoke (mpp charge + x402 exact)",
+          "source_line": 214
+        },
+        {
+          "workflow": ".github/workflows/lua.yml",
+          "job": "harness-lua",
+          "step": "Run PayKit harness smoke (mpp charge + x402 exact)",
+          "source_line": 169
+        }
+      ]
+    },
+    {
+      "id": "onchain-run-on-chain-settlement-suite-521a5819",
+      "lane": "onchain",
+      "argv": [
+        "pnpm",
+        "test:onchain"
+      ],
+      "env": {},
+      "runtime_env": {
+        "SURFPOOL_DATASOURCE_RPC_URL": {
+          "source": "SURFPOOL_DATASOURCE_RPC_URL",
+          "required": false,
+          "default": ""
+        }
+      },
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "onchain",
+          "step": "Run on-chain settlement suite",
+          "source_line": 407
+        }
+      ]
+    },
+    {
+      "id": "php-run-php-server-harness-smoke-82a85cff",
+      "lane": "php",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "typescript client pays php server"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "typescript",
+        "MPP_HARNESS_SERVERS": "php",
+        "MPP_HARNESS_SCENARIOS": "charge-basic,charge-split-ata,charge-network-mismatch,charge-cross-route-replay"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "php",
+          "step": "Run PHP server harness smoke",
+          "source_line": 237
+        },
+        {
+          "workflow": ".github/workflows/php.yml",
+          "job": "harness-php",
+          "step": "Run PHP server harness smoke",
+          "source_line": 59
+        }
+      ]
+    },
+    {
+      "id": "php-run-rust-client-php-server-harness-smoke-bcb5d22c",
+      "lane": "php",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "rust client pays php server"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "rust",
+        "MPP_HARNESS_SERVERS": "php",
+        "MPP_HARNESS_SCENARIOS": "charge-basic,charge-split-ata"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "php",
+          "step": "Run Rust client PHP server harness smoke",
+          "source_line": 244
+        },
+        {
+          "workflow": ".github/workflows/php.yml",
+          "job": "harness-php",
+          "step": "Run Rust client PHP server harness smoke",
+          "source_line": 66
+        }
+      ]
+    },
+    {
+      "id": "php-run-paykit-harness-smoke-mpp-charge-x402-exact-021e13e6",
+      "lane": "php",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "php server",
+        "--testTimeout",
+        "180000"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "typescript",
+        "MPP_HARNESS_SERVERS": "php,typescript",
+        "MPP_HARNESS_INTENTS": "charge,x402-exact",
+        "X402_HARNESS_CLIENTS": "rust-x402",
+        "X402_HARNESS_SERVERS": ""
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "php",
+          "step": "Run PayKit harness smoke (mpp charge + x402 exact)",
+          "source_line": 251
+        },
+        {
+          "workflow": ".github/workflows/php.yml",
+          "job": "harness-php",
+          "step": "Run PayKit harness smoke (mpp charge + x402 exact)",
+          "source_line": 78
+        }
+      ]
+    },
+    {
+      "id": "python-run-python-cross-sdk-conformance-vectors-7e05bbec",
+      "lane": "python",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/conformance.test.ts"
+      ],
+      "env": {
+        "MPP_CONFORMANCE_LANGUAGES": "python"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "python",
+          "step": "Run Python cross-SDK conformance vectors",
+          "source_line": 109
+        },
+        {
+          "workflow": ".github/workflows/python.yml",
+          "job": "harness-python",
+          "step": "Run Python cross-SDK conformance vectors",
+          "source_line": 122
+        }
+      ]
+    },
+    {
+      "id": "python-focused-python-session-harness-d672c38e",
+      "lane": "python",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts"
+      ],
+      "env": {
+        "MPP_HARNESS_INTENTS": "session",
+        "MPP_HARNESS_SCENARIOS": "session-basic",
+        "MPP_HARNESS_CLIENTS": "python-session",
+        "MPP_HARNESS_SERVERS": "python"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "python",
+          "step": "Focused Python session harness",
+          "source_line": 114
+        },
+        {
+          "workflow": ".github/workflows/python.yml",
+          "job": "harness-python",
+          "step": "Focused Python session harness",
+          "source_line": 127
+        }
+      ]
+    },
+    {
+      "id": "python-focused-ts-to-python-harness-d00f4c0d",
+      "lane": "python",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "typescript",
+        "MPP_HARNESS_SERVERS": "python"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "python",
+          "step": "Focused TS-to-Python harness",
+          "source_line": 122
+        },
+        {
+          "workflow": ".github/workflows/python.yml",
+          "job": "harness-python",
+          "step": "Focused TS-to-Python harness",
+          "source_line": 135
+        }
+      ]
+    },
+    {
+      "id": "python-focused-rust-to-python-harness-ddadb371",
+      "lane": "python",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "rust",
+        "MPP_HARNESS_SERVERS": "python"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "python",
+          "step": "Focused Rust-to-Python harness",
+          "source_line": 128
+        },
+        {
+          "workflow": ".github/workflows/python.yml",
+          "job": "harness-python",
+          "step": "Focused Rust-to-Python harness",
+          "source_line": 141
+        }
+      ]
+    },
+    {
+      "id": "python-focused-python-x402-rust-python-x402-servers-8872f5fd",
+      "lane": "python",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testTimeout",
+        "180000"
+      ],
+      "env": {
+        "MPP_HARNESS_INTENTS": "x402-exact",
+        "MPP_HARNESS_SCENARIOS": "x402-exact-basic",
+        "MPP_HARNESS_CLIENTS": "python-x402",
+        "MPP_HARNESS_SERVERS": "rust-x402,python",
+        "X402_HARNESS_CLIENTS": "python-x402",
+        "X402_HARNESS_SERVERS": "rust-x402,python"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "python",
+          "step": "Focused python-x402 -> rust/python x402 servers",
+          "source_line": 134
+        },
+        {
+          "workflow": ".github/workflows/python.yml",
+          "job": "harness-python",
+          "step": "Focused python-x402 -> rust/python x402 servers",
+          "source_line": 158
+        }
+      ]
+    },
+    {
+      "id": "python-focused-python-x402-upto-rust-python-upto-servers-1d284146",
+      "lane": "python",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testTimeout",
+        "180000"
+      ],
+      "env": {
+        "MPP_HARNESS_INTENTS": "x402-upto",
+        "MPP_HARNESS_SCENARIOS": "x402-upto-basic,x402-upto-zero-actual",
+        "MPP_HARNESS_CLIENTS": "python-x402-upto,rust-x402-upto",
+        "MPP_HARNESS_SERVERS": "python-x402-upto,rust-x402-upto",
+        "X402_HARNESS_CLIENTS": "python-x402-upto,rust-x402-upto",
+        "X402_HARNESS_SERVERS": "python-x402-upto,rust-x402-upto",
+        "PAYMENT_CHANNELS_PROGRAM_ID": "CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX"
+      },
+      "runtime_env": {
+        "PAYMENT_CHANNELS_PROGRAM_SO": {
+          "source": "PAYMENT_CHANNELS_PROGRAM_SO",
+          "required": true,
+          "kind": "file"
+        },
+        "SURFPOOL_DATASOURCE_RPC_URL": {
+          "source": "SURFPOOL_DATASOURCE_RPC_URL",
+          "required": false,
+          "default": ""
+        }
+      },
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/python.yml",
+          "job": "harness-python",
+          "step": "Focused python-x402-upto -> rust/python upto servers",
+          "source_line": 174
+        }
+      ]
+    },
+    {
+      "id": "ruby-run-ruby-server-harness-smoke-aac8a383",
+      "lane": "ruby",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "typescript client pays ruby server"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "typescript",
+        "MPP_HARNESS_SERVERS": "ruby"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "job": "harness",
+          "step": "Run Ruby server harness smoke",
+          "source_line": 569
+        }
+      ]
+    },
+    {
+      "id": "ruby-run-rust-client-to-ruby-server-harness-smoke-1127350f",
+      "lane": "ruby",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "rust client pays ruby server"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "rust",
+        "MPP_HARNESS_SERVERS": "ruby"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "job": "harness",
+          "step": "Run Rust client to Ruby server harness smoke",
+          "source_line": 575
+        }
+      ]
+    },
+    {
+      "id": "ruby-run-harness-smoke-mpp-charge-x402-exact-9bddfa6e",
+      "lane": "ruby",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "ruby",
+        "--testTimeout",
+        "180000"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "typescript",
+        "MPP_HARNESS_SERVERS": "ruby,typescript",
+        "MPP_HARNESS_INTENTS": "charge,x402-exact",
+        "X402_HARNESS_CLIENTS": "rust-x402",
+        "X402_HARNESS_SERVERS": ""
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "ruby",
+          "step": "Run harness smoke (mpp charge + x402 exact)",
+          "source_line": 157
+        },
+        {
+          "workflow": ".github/workflows/ruby.yml",
+          "job": "harness-ruby",
+          "step": "Run harness smoke (mpp charge + x402 exact)",
+          "source_line": 74
+        }
+      ]
+    },
+    {
+      "id": "swift-run-swift-cross-sdk-conformance-vectors-d83aa553",
+      "lane": "swift",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/conformance.test.ts"
+      ],
+      "env": {
+        "MPP_CONFORMANCE_LANGUAGES": "swift"
+      },
+      "runtime_env": {},
+      "platform": "darwin",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "swift",
+          "step": "Run Swift cross-SDK conformance vectors",
+          "source_line": 277
+        },
+        {
+          "workflow": ".github/workflows/swift.yml",
+          "job": "harness-swift",
+          "step": "Run Swift cross-SDK conformance vectors",
+          "source_line": 39
+        }
+      ]
+    },
+    {
+      "id": "swift-run-swift-client-harness-smoke-against-typescript-server-e2804a05",
+      "lane": "swift",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "swift client pays typescript server"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "swift",
+        "MPP_HARNESS_SERVERS": "typescript"
+      },
+      "runtime_env": {},
+      "platform": "darwin",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "swift",
+          "step": "Run Swift client harness smoke against TypeScript server",
+          "source_line": 282
+        },
+        {
+          "workflow": ".github/workflows/swift.yml",
+          "job": "harness-swift",
+          "step": "Run Swift client harness smoke against TypeScript server",
+          "source_line": 44
+        }
+      ]
+    },
+    {
+      "id": "swift-run-swift-client-harness-smoke-against-rust-server-acb7f5c5",
+      "lane": "swift",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "swift client pays rust server"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "swift",
+        "MPP_HARNESS_SERVERS": "rust"
+      },
+      "runtime_env": {},
+      "platform": "darwin",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "swift",
+          "step": "Run Swift client harness smoke against Rust server",
+          "source_line": 288
+        },
+        {
+          "workflow": ".github/workflows/swift.yml",
+          "job": "harness-swift",
+          "step": "Run Swift client harness smoke against Rust server",
+          "source_line": 50
+        }
+      ]
+    },
+    {
+      "id": "swift-run-swift-x402-client-harness-against-rust-x402-server-36f27d15",
+      "lane": "swift",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "swift-x402 client pays rust-x402 server",
+        "--testTimeout",
+        "180000"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "",
+        "MPP_HARNESS_SERVERS": "",
+        "MPP_HARNESS_INTENTS": "x402-exact",
+        "MPP_HARNESS_SCENARIOS": "x402-exact-basic",
+        "X402_HARNESS_CLIENTS": "swift-x402",
+        "X402_HARNESS_SERVERS": "rust-x402"
+      },
+      "runtime_env": {},
+      "platform": "darwin",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "swift-x402",
+          "step": "Run Swift x402 client harness against Rust x402 server",
+          "source_line": 311
+        },
+        {
+          "workflow": ".github/workflows/swift.yml",
+          "job": "harness-swift-x402",
+          "step": "Run Swift x402 client harness against Rust x402 server",
+          "source_line": 81
+        }
+      ]
+    },
+    {
+      "id": "swift-run-swift-x402-upto-client-harness-against-rust-x402-upto-server-13c1cdbc",
+      "lane": "swift",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testTimeout",
+        "180000"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "",
+        "MPP_HARNESS_SERVERS": "",
+        "MPP_HARNESS_INTENTS": "x402-upto",
+        "MPP_HARNESS_SCENARIOS": "x402-upto-basic,x402-upto-zero-actual",
+        "X402_HARNESS_CLIENTS": "swift-x402-upto",
+        "X402_HARNESS_SERVERS": "rust-x402-upto",
+        "PAYMENT_CHANNELS_PROGRAM_ID": "CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX"
+      },
+      "runtime_env": {
+        "PAYMENT_CHANNELS_PROGRAM_SO": {
+          "source": "PAYMENT_CHANNELS_PROGRAM_SO",
+          "required": true,
+          "kind": "file"
+        },
+        "SURFPOOL_DATASOURCE_RPC_URL": {
+          "source": "SURFPOOL_DATASOURCE_RPC_URL",
+          "required": false,
+          "default": ""
+        }
+      },
+      "platform": "darwin",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/swift.yml",
+          "job": "harness-swift-x402-upto",
+          "step": "Run Swift x402 upto client harness against Rust x402 upto server",
+          "source_line": 114
+        }
+      ]
+    },
+    {
+      "id": "typescript-run-rust-client-harness-smoke-2406b86a",
+      "lane": "typescript",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "rust client pays typescript server"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "rust",
+        "MPP_HARNESS_SERVERS": "typescript"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "job": "harness",
+          "step": "Run Rust client harness smoke",
+          "source_line": 551
+        },
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "ts",
+          "step": "Run Rust client harness smoke",
+          "source_line": 51
+        }
+      ]
+    },
+    {
+      "id": "typescript-run-rust-server-harness-smoke-34da322b",
+      "lane": "typescript",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "typescript client pays rust server"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "typescript",
+        "MPP_HARNESS_SERVERS": "rust"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "job": "harness",
+          "step": "Run Rust server harness smoke",
+          "source_line": 557
+        },
+        {
+          "workflow": ".github/workflows/harness.yml",
+          "job": "ts",
+          "step": "Run Rust server harness smoke",
+          "source_line": 57
+        }
+      ]
+    },
+    {
+      "id": "typescript-run-rust-end-to-end-harness-smoke-c105c9be",
+      "lane": "typescript",
+      "argv": [
+        "pnpm",
+        "exec",
+        "vitest",
+        "run",
+        "test/e2e.test.ts",
+        "--testNamePattern",
+        "rust client pays rust server"
+      ],
+      "env": {
+        "MPP_HARNESS_CLIENTS": "rust",
+        "MPP_HARNESS_SERVERS": "rust"
+      },
+      "runtime_env": {},
+      "platform": "linux",
+      "working_directory": "harness",
+      "sources": [
+        {
+          "workflow": ".github/workflows/ci.yml",
+          "job": "harness",
+          "step": "Run Rust end-to-end harness smoke",
+          "source_line": 563
+        }
+      ]
+    }
+  ]
+}

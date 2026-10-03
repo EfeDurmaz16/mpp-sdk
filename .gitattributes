@@ -54,3 +54,6 @@ kotlin/examples/AndroidDemo/gradle/wrapper/** linguist-vendored=true
 # Android build artifacts (R.java, generated stubs) — generated when present
 **/build/generated/** linguist-generated=true
 **/local.properties linguist-generated=true
+
+# Generated dependency lock for the optional Nix experiment.
+nix/locks/* linguist-generated=true
