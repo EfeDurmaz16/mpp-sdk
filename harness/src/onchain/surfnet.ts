@@ -10,6 +10,7 @@
  */
 import { getAddressDecoder } from "@solana/kit";
 import { Surfnet } from "@solana/surfpool";
+import { traceSurfnet } from "./diagnostic-trace.js";
 
 /** Live mainnet deployment the playground/clients settle against. */
 export const PAYMENT_CHANNELS_PROGRAM = "CHNLxYvVA28MJP9PrFuDXccuoGXAx7jBacfLEkahyGsX";
@@ -93,6 +94,7 @@ export async function startOnchainSurfnet(opts?: {
   // The treasury ATA must exist for `distribute` to credit residuals; pre-create
   // it on the fork (amount 0) so settlement never fails on a missing account.
   surfnet.fundToken(TREASURY_OWNER, USDC_MINT, 0, TOKEN_PROGRAM);
+  const trace = traceSurfnet(surfnet, programs);
 
   const api: OnchainSurfnet = {
     rpcUrl,
@@ -106,7 +108,7 @@ export async function startOnchainSurfnet(opts?: {
       const deadline = Date.now() + timeoutMs;
       const wait = async (what: string, ready: () => Promise<boolean>) => {
         for (;;) {
-          surfnet.drainEvents();
+          trace.events(what, surfnet.drainEvents());
           if (await ready()) return;
           if (Date.now() >= deadline) throw new Error(`${what} not resolved from datasource ${datasourceRpc}`);
           await new Promise((r) => setTimeout(r, 500));
@@ -118,15 +120,24 @@ export async function startOnchainSurfnet(opts?: {
         return program?.executable === true;
       });
       const programData = programDataAddress(program!);
+      trace.ready(programId, program!);
       if (programData === null) return;
       surfnet.streamAccount(programData);
       await wait(`program data ${programData} of ${programId}`, async () => {
         // Past the 45-byte ProgramData header, there is code to run.
         const data = await getAccount(rpcUrl, programData, true);
-        return data?.data !== undefined && Buffer.from(data.data[0], "base64").length > 45;
+        const ready = data?.data !== undefined && Buffer.from(data.data[0], "base64").length > 45;
+        if (ready) trace.ready(programData, data);
+        return ready;
       });
     },
-    stop: () => surfnet.stop(),
+    stop: () => {
+      try {
+        trace.stop();
+      } finally {
+        surfnet.stop();
+      }
+    },
   };
 
   return api;
